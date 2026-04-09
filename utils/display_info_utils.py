@@ -1,202 +1,452 @@
-"""Display information utilities for querying display properties.
+"""
+Display and screen information utilities for UI automation.
 
-This module provides utilities for querying detailed display/monitor
-properties like resolution, scale factor, and color depth.
+Provides functions for querying display configuration,
+screen metrics, and multi-monitor support.
 """
 
 from __future__ import annotations
 
-import platform
-import subprocess
+import sys
+from typing import List, Optional, Tuple, NamedTuple
 from dataclasses import dataclass
-from typing import Optional
 
 
-IS_MACOS = platform.system() == "Darwin"
-IS_LINUX = platform.system() == "Linux"
-IS_WINDOWS = platform.system() == "Windows"
-
-
-@dataclass
-class DisplayMode:
-    """Represents a display mode configuration."""
+class DisplayInfo(NamedTuple):
+    """Display configuration information."""
+    id: int
+    name: str
+    x: int
+    y: int
     width: int
     height: int
-    refresh_rate: float
-    scale_factor: float = 1.0
-    bit_depth: int = 32
+    is_primary: bool
+    scale_factor: float
+    orientation: str  # 'landscape', 'portrait', 'rotated'
+    work_x: int
+    work_y: int
+    work_width: int
+    work_height: int
 
 
 @dataclass
-class DisplayInfo:
-    """Comprehensive display information."""
-    display_id: str
-    name: str
-    is_main: bool
-    is_built_in: bool
-    current_mode: DisplayMode
-    available_modes: list[DisplayMode]
+class ScreenMetrics:
+    """Comprehensive screen metrics."""
+    width: int
+    height: int
+    diagonal: float  # inches
+    dpi: int
+    density: float
+    ppi: float
+    aspect_ratio: float
     
     @property
-    def resolution(self) -> tuple[int, int]:
-        """Get current resolution as (width, height)."""
-        return (self.current_mode.width, self.current_mode.height)
+    def resolution(self) -> Tuple[int, int]:
+        return (self.width, self.height)
     
     @property
-    def dpi(self) -> int:
-        """Estimate DPI based on scale factor (assumes 96 base DPI)."""
-        return int(96 * self.current_mode.scale_factor)
-
-
-def get_display_info(display_index: int = 0) -> Optional[DisplayInfo]:
-    """Get information about a specific display.
+    def is_4k(self) -> bool:
+        return self.width >= 3840 or self.height >= 3840
     
-    Args:
-        display_index: Index of the display (0 = primary).
+    @property
+    def is_retina(self) -> bool:
+        return self.scale_factor > 1.0
+    
+    @property
+    def scale_factor(self) -> float:
+        return self.dpi / 96.0
+
+
+def get_displays() -> List[DisplayInfo]:
+    """Get information about all connected displays.
     
     Returns:
-        DisplayInfo for the display, or None if not found.
+        List of DisplayInfo for each connected display
     """
-    if IS_MACOS:
-        return _get_display_info_macos(display_index)
-    elif IS_LINUX:
-        return _get_display_info_linux(display_index)
-    elif IS_WINDOWS:
-        return _get_display_info_windows(display_index)
-    return None
+    displays: List[DisplayInfo] = []
+    
+    if sys.platform == 'darwin':
+        displays = _get_displays_macos()
+    elif sys.platform == 'win32':
+        displays = _get_displays_windows()
+    else:
+        displays = _get_displays_linux()
+    
+    return displays
 
 
-def _get_display_info_macos(display_index: int) -> Optional[DisplayInfo]:
-    """Get display info on macOS."""
+def _get_displays_macos() -> List[DisplayInfo]:
+    """Get display info using macOS APIs."""
+    displays: List[DisplayInfo] = []
+    
     try:
         import subprocess
         result = subprocess.run(
-            ["system_profiler", "SPDisplaysDataType", "-json"],
+            ['system_profiler', 'SPDisplaysDataType', '-json'],
             capture_output=True,
             text=True,
-            timeout=10
-        )
-        import json
-        data = json.loads(result.stdout)
-        displays = data.get("SPDisplaysDataType", [])
-        
-        if isinstance(displays, list) and display_index < len(displays):
-            display = displays[display_index]
-            current = display.get("CurrentConfiguration", {})
-            mode = DisplayMode(
-                width=current.get("ResolutionWidth", 1920),
-                height=current.get("ResolutionHeight", 1080),
-                refresh_rate=60.0,
-                scale_factor=current.get("ScaleFactor", 1.0),
-            )
-            return DisplayInfo(
-                display_id=str(display_index),
-                name=display.get("DisplayType", f"Display {display_index+1}"),
-                is_main=(display_index == 0),
-                is_built_in="Built-in" in str(display),
-                current_mode=mode,
-                available_modes=[mode],
-            )
-    except Exception:
-        pass
-    return None
-
-
-def _get_display_info_linux(display_index: int) -> Optional[DisplayInfo]:
-    """Get display info on Linux using xrandr."""
-    try:
-        result = subprocess.run(
-            ["xrandr"],
-            capture_output=True,
-            text=True,
-            timeout=5
+            timeout=10,
         )
         
-        displays_found = []
-        for line in result.stdout.split("\n"):
-            if "connected" in line:
-                parts = line.split()
-                name = parts[0]
-                # Parse current mode
-                mode_str = ""
-                scale = 1.0
-                for part in parts:
-                    if "x" in part and "+" in part:
-                        mode_str = part.split("+")[0]
-                        break
+        if result.returncode == 0:
+            import json
+            data = json.loads(result.stdout)
+            
+            for idx, display in enumerate(data.get('SPDisplaysDataType', [])):
+                info = display.get('spdisplays_main', display)
                 
-                if mode_str:
-                    dims = mode_str.split("x")
-                    if len(dims) == 2:
-                        width, height = int(dims[0]), int(dims[1])
-                        mode = DisplayMode(width=width, height=height, refresh_rate=60.0, scale_factor=scale)
-                        displays_found.append(DisplayInfo(
-                            display_id=name,
-                            name=name,
-                            is_main=(display_index == len(displays_found)),
-                            is_built_in=False,
-                            current_mode=mode,
-                            available_modes=[mode],
-                        ))
-        
-        if display_index < len(displays_found):
-            return displays_found[display_index]
+                resolution = info.get('spdisplays_resolution', '0x0').split('x')
+                width = int(resolution[0]) if len(resolution) == 2 else 0
+                height = int(resolution[1]) if len(resolution) == 2 else 0
+                
+                displays.append(DisplayInfo(
+                    id=idx,
+                    name=info.get('spdisplays_display_product_name', f'Display {idx}'),
+                    x=0,
+                    y=0,
+                    width=width,
+                    height=height,
+                    is_primary=(idx == 0),
+                    scale_factor=info.get('spdisplays_scale', 1.0),
+                    orientation='landscape',
+                    work_x=0,
+                    work_y=0,
+                    work_width=width,
+                    work_height=height,
+                ))
     except Exception:
         pass
-    return None
+    
+    if not displays:
+        displays.append(DisplayInfo(
+            id=0,
+            name='Built-in Display',
+            x=0,
+            y=0,
+            width=1920,
+            height=1080,
+            is_primary=True,
+            scale_factor=2.0,
+            orientation='landscape',
+            work_x=0,
+            work_y=0,
+            work_width=1920,
+            work_height=1080,
+        ))
+    
+    return displays
 
 
-def _get_display_info_windows(display_index: int) -> Optional[DisplayInfo]:
-    """Get display info on Windows."""
+def _get_displays_windows() -> List[DisplayInfo]:
+    """Get display info using Windows APIs."""
+    displays: List[DisplayInfo] = []
+    
     try:
         import ctypes
         from ctypes import wintypes
         
         user32 = ctypes.windll.user32
         
-        # Get device context
-        hdc = user32.GetDC(0)
-        width = user32.GetDeviceCaps(hdc, 8)  # HORZRES
-        height = user32.GetDeviceCaps(hdc, 10)  # VERTRES
-        refresh = user32.GetDeviceCaps(hdc, 116)  # VREFRESH
-        user32.ReleaseDC(0, hdc)
+        def_enum = user32.EnumDisplayMonitors(None, None, None, 0)
         
-        mode = DisplayMode(width=width, height=height, refresh_rate=float(refresh))
-        return DisplayInfo(
-            display_id=str(display_index),
-            name=f"Display {display_index+1}",
-            is_main=(display_index == 0),
-            is_built_in=False,
-            current_mode=mode,
-            available_modes=[mode],
+        monitors: List[tuple] = []
+        
+        def callback(monitor, dc, rect, lparam):
+            r = rect._asdict() if hasattr(rect, '_asdict') else {}
+            monitors.append((
+                monitor,
+                r.get('left', 0),
+                r.get('top', 0),
+                r.get('right', 0) - r.get('left', 0),
+                r.get('bottom', 0) - r.get('top', 0),
+            ))
+            return 1
+        
+        MONITORENUMPROC = ctypes.WINFUNCTYPE(
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.RECT),
+            wintypes.LPARAM,
         )
+        
+        user32.EnumDisplayMonitors(None, None, MONITORENUMPROC(callback), 0)
+        
+        for idx, (monitor, x, y, w, h) in enumerate(monitors):
+            info = user32.GetMonitorInfoW(monitor)
+            
+            displays.append(DisplayInfo(
+                id=idx,
+                name=info.get('Device', f'Display {idx}'),
+                x=x,
+                y=y,
+                width=w,
+                height=h,
+                is_primary=bool(info.get('dwFlags', 0) & 1),
+                scale_factor=1.0,
+                orientation='landscape' if w > h else 'portrait',
+                work_x=x,
+                work_y=y,
+                work_width=w,
+                work_height=h,
+            ))
     except Exception:
         pass
-    return None
-
-
-def get_all_displays() -> list[DisplayInfo]:
-    """Get information about all connected displays.
-    
-    Returns:
-        List of DisplayInfo for all displays.
-    """
-    displays = []
-    for i in range(10):  # Check up to 10 displays
-        info = get_display_info(i)
-        if info is None:
-            break
-        displays.append(info)
     
     if not displays:
-        # Return a default display
         displays.append(DisplayInfo(
-            display_id="default",
-            name="Default Display",
-            is_main=True,
-            is_built_in=False,
-            current_mode=DisplayMode(width=1920, height=1080, refresh_rate=60.0),
-            available_modes=[],
+            id=0,
+            name='Primary Display',
+            x=0,
+            y=0,
+            width=1920,
+            height=1080,
+            is_primary=True,
+            scale_factor=1.0,
+            orientation='landscape',
+            work_x=0,
+            work_y=0,
+            work_width=1920,
+            work_height=1080,
         ))
     
     return displays
+
+
+def _get_displays_linux() -> List[DisplayInfo]:
+    """Get display info for Linux/X11."""
+    displays: List[DisplayInfo] = []
+    
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['xrandr', '--listactivemonitors'],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        
+        if result.returncode == 0:
+            lines = result.stdout.strip().split('\n')
+            for i, line in enumerate(lines[1:], 0):
+                parts = line.split()
+                if len(parts) >= 4:
+                    dims = parts[3].split('x')
+                    offset = dims[1].split('+')
+                    
+                    width = int(dims[0])
+                    height = int(offset[0])
+                    x = int(offset[1])
+                    y = int(offset[2])
+                    
+                    displays.append(DisplayInfo(
+                        id=i,
+                        name=f'Monitor {i}',
+                        x=x,
+                        y=y,
+                        width=width,
+                        height=height,
+                        is_primary=(i == 0),
+                        scale_factor=1.0,
+                        orientation='landscape',
+                        work_x=x,
+                        work_y=y,
+                        work_width=width,
+                        work_height=height,
+                    ))
+    except Exception:
+        pass
+    
+    if not displays:
+        displays.append(DisplayInfo(
+            id=0,
+            name='Display 0',
+            x=0,
+            y=0,
+            width=1920,
+            height=1080,
+            is_primary=True,
+            scale_factor=1.0,
+            orientation='landscape',
+            work_x=0,
+            work_y=0,
+            work_width=1920,
+            work_height=1080,
+        ))
+    
+    return displays
+
+
+def get_primary_display() -> Optional[DisplayInfo]:
+    """Get the primary display.
+    
+    Returns:
+        Primary DisplayInfo or None
+    """
+    displays = get_displays()
+    for display in displays:
+        if display.is_primary:
+            return display
+    return displays[0] if displays else None
+
+
+def get_display_at(x: int, y: int) -> Optional[DisplayInfo]:
+    """Get display containing the given point.
+    
+    Args:
+        x: X coordinate
+        y: Y coordinate
+    
+    Returns:
+        DisplayInfo at point or None
+    """
+    displays = get_displays()
+    
+    for display in displays:
+        if (display.x <= x < display.x + display.width and
+            display.y <= y < display.y + display.height):
+            return display
+    
+    return None
+
+
+def get_display_count() -> int:
+    """Get number of connected displays.
+    
+    Returns:
+        Number of displays
+    """
+    return len(get_displays())
+
+
+def is_multi_monitor() -> bool:
+    """Check if multiple monitors are connected.
+    
+    Returns:
+        True if more than one display
+    """
+    return get_display_count() > 1
+
+
+def get_combined_screen_size() -> Tuple[int, int]:
+    """Get combined size of all displays.
+    
+    Returns:
+        (total_width, total_height)
+    """
+    displays = get_displays()
+    
+    if not displays:
+        return (0, 0)
+    
+    min_x = min(d.x for d in displays)
+    min_y = min(d.y for d in displays)
+    max_x = max(d.x + d.width for d in displays)
+    max_y = max(d.y + d.height for d in displays)
+    
+    return (max_x - min_x, max_y - min_y)
+
+
+def get_screen_metrics(display: Optional[DisplayInfo] = None) -> ScreenMetrics:
+    """Get detailed screen metrics.
+    
+    Args:
+        display: Display to get metrics for (uses primary if None)
+    
+    Returns:
+        ScreenMetrics object
+    """
+    if display is None:
+        display = get_primary_display()
+    
+    if display is None:
+        return ScreenMetrics(
+            width=1920,
+            height=1080,
+            diagonal=24.0,
+            dpi=96,
+            density=1.0,
+            ppi=96.0,
+            aspect_ratio=16/9,
+        )
+    
+    width = display.width
+    height = display.height
+    scale = display.scale_factor
+    
+    diag_pixels = (width ** 2 + height ** 2) ** 0.5
+    diagonal = diag_pixels / (96 * scale)
+    
+    ppi = diag_pixels / diagonal
+    
+    aspect = width / height if height > 0 else 16/9
+    
+    return ScreenMetrics(
+        width=width,
+        height=height,
+        diagonal=diagonal,
+        dpi=int(96 * scale),
+        density=scale,
+        ppi=ppi,
+        aspect_ratio=aspect,
+    )
+
+
+def get_safe_area_insets() -> Tuple[int, int, int, int]:
+    """Get safe area insets (for devices with notches).
+    
+    Returns:
+        (top, right, bottom, left) insets in pixels
+    """
+    if sys.platform != 'darwin':
+        return (0, 0, 0, 0)
+    
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['defaults', 'read', '-g', 'AppleInterfaceStyle'],
+            capture_output=True,
+            text=True,
+        )
+        
+        dark_mode = result.returncode == 0 and 'Dark' in result.stdout
+        
+        if dark_mode:
+            return (47, 0, 34, 0)
+        return (28, 0, 21, 0)
+    except Exception:
+        pass
+    
+    return (28, 0, 21, 0)
+
+
+def pixels_to_display_coords(
+    x: int,
+    y: int,
+    from_display: Optional[DisplayInfo] = None,
+) -> Tuple[int, int]:
+    """Convert pixels between displays with different scale factors.
+    
+    Args:
+        x: X coordinate in source display
+        y: Y coordinate in source display
+        from_display: Source display (uses primary if None)
+    
+    Returns:
+        (converted_x, converted_y)
+    """
+    if from_display is None:
+        from_display = get_primary_display()
+    
+    if from_display is None:
+        return (x, y)
+    
+    src_scale = from_display.scale_factor
+    dst_display = get_display_at(x, y)
+    dst_scale = dst_display.scale_factor if dst_display else 1.0
+    
+    if src_scale == dst_scale:
+        return (x, y)
+    
+    factor = dst_scale / src_scale
+    return (int(x * factor), int(y * factor))
