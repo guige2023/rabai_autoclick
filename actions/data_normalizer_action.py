@@ -1,453 +1,253 @@
 """
 Data Normalizer Action Module.
 
-Provides data normalization and standardization for various
-data types including strings, numbers, dates, and complex structures.
-
-Author: rabai_autoclick team
+Normalize data formats, units, and representations.
 """
 
-import re
-import logging
-from typing import Optional, Dict, Any, List, Union, Callable
-from dataclasses import dataclass
-from datetime import datetime
-from urllib.parse import urlparse
+from __future__ import annotations
 
-logger = logging.getLogger(__name__)
+import re
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Union
 
 
 @dataclass
-class NormalizationConfig:
-    """Configuration for normalization operations."""
-    lowercase: bool = False
-    trim_whitespace: bool = True
-    remove_accents: bool = False
-    strip_special_chars: Optional[str] = None
-    max_length: Optional[int] = None
+class NormalizationRule:
+    """A normalization rule."""
+    field: str
+    transform: Callable[[Any], Any]
+    condition: Optional[Callable[[Any], bool]] = None
 
 
 class DataNormalizerAction:
     """
-    Data Normalization Utilities.
+    Data normalization utilities.
 
-    Provides comprehensive normalization for strings, numbers,
-    dates, and complex data structures.
-
-    Example:
-        >>> normalizer = DataNormalizerAction()
-        >>> normalizer.normalize_phone("+1 (555) 123-4567")
-        '5551234567'
+    Handles units, formats, casing, and custom transformations.
     """
 
-    # Common phone patterns
-    PHONE_PATTERN = re.compile(r"[^\d+]")
+    UNIT_CONVERSIONS = {
+        "km": {"m": 1000, "cm": 100000, "mm": 1000000, "mi": 0.621371, "ft": 3280.84, "yd": 1093.61},
+        "m": {"km": 0.001, "cm": 100, "mm": 1000, "mi": 0.000621371, "ft": 3.28084, "yd": 1.09361},
+        "kg": {"g": 1000, "mg": 1000000, "lb": 2.20462, "oz": 35.274, "t": 0.001},
+        "g": {"kg": 0.001, "mg": 1000, "lb": 0.00220462, "oz": 0.035274},
+        "c": {"f": lambda c: c * 9/5 + 32, "k": lambda c: c + 273.15},
+        "f": {"c": lambda f: (f - 32) * 5/9, "k": lambda f: (f - 32) * 5/9 + 273.15},
+    }
 
-    # Email pattern
-    EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+    CASE_TRANSFORMS = {
+        "snake": lambda s: re.sub(r"(?<!^)(?=[A-Z])", "_", s).lower(),
+        "camel": lambda s: s[0].lower() + re.sub(r"_([a-z])", lambda m: m.group(1).upper(), s[1:]) if "_" in s else s,
+        "pascal": lambda s: "".join(word.capitalize() for word in s.split("_")),
+        "kebab": lambda s: re.sub(r"_", "-", s.lower()),
+    }
 
-    # URL pattern
-    URL_PATTERN = re.compile(
-        r"https?://"
-        r"(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|"
-        r"localhost|"
-        r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})"
-        r"(?::\d+)?"
-        r"(?:/?|[/?]\S+)$",
-        re.IGNORECASE,
-    )
+    def __init__(self) -> None:
+        self._rules: List[NormalizationRule] = []
 
-    def __init__(self, config: Optional[NormalizationConfig] = None):
-        self.config = config or NormalizationConfig()
+    def add_rule(
+        self,
+        field: str,
+        transform: Callable[[Any], Any],
+        condition: Optional[Callable[[Any], bool]] = None,
+    ) -> "DataNormalizerAction":
+        """
+        Add a normalization rule.
 
-    # String Normalization
+        Args:
+            field: Field name to normalize
+            transform: Transformation function
+            condition: Optional condition for when to apply
+
+        Returns:
+            Self for chaining
+        """
+        self._rules.append(NormalizationRule(
+            field=field,
+            transform=transform,
+            condition=condition,
+        ))
+        return self
+
+    def normalize(
+        self,
+        data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Normalize data according to rules.
+
+        Args:
+            data: Data to normalize
+
+        Returns:
+            Normalized data
+        """
+        result = data.copy()
+
+        for rule in self._rules:
+            if rule.field not in result:
+                continue
+
+            value = result[rule.field]
+
+            if rule.condition is not None and not rule.condition(value):
+                continue
+
+            try:
+                result[rule.field] = rule.transform(value)
+            except Exception:
+                pass
+
+        return result
+
+    def convert_unit(
+        self,
+        value: float,
+        from_unit: str,
+        to_unit: str,
+    ) -> Optional[float]:
+        """
+        Convert between units.
+
+        Args:
+            value: Numeric value
+            from_unit: Source unit
+            to_unit: Target unit
+
+        Returns:
+            Converted value or None if not possible
+        """
+        from_unit = from_unit.lower()
+        to_unit = to_unit.lower()
+
+        if from_unit not in self.UNIT_CONVERSIONS:
+            return None
+
+        conversions = self.UNIT_CONVERSIONS[from_unit]
+
+        if to_unit not in conversions:
+            return None
+
+        conversion = conversions[to_unit]
+
+        if callable(conversion):
+            return conversion(value)
+
+        return value * conversion
+
+    def transform_case(
+        self,
+        value: str,
+        case_type: str,
+    ) -> str:
+        """
+        Transform string case.
+
+        Args:
+            value: String to transform
+            case_type: Target case (snake, camel, pascal, kebab)
+
+        Returns:
+            Transformed string
+        """
+        transform = self.CASE_TRANSFORMS.get(case_type)
+        if transform:
+            return transform(value)
+        return value
 
     def normalize_string(
         self,
         value: str,
-        config: Optional[NormalizationConfig] = None,
+        strip: bool = True,
+        lowercase: bool = False,
+        remove_accents: bool = False,
     ) -> str:
         """
-        Normalize a string value.
+        Normalize a string.
 
         Args:
-            value: Input string
-            config: Optional normalization config
+            value: String to normalize
+            strip: Strip whitespace
+            lowercase: Convert to lowercase
+            remove_accents: Remove accent marks
 
         Returns:
             Normalized string
         """
-        cfg = config or self.config
-        result = str(value)
+        result = value
 
-        if cfg.trim_whitespace:
+        if strip:
             result = result.strip()
 
-        if cfg.lowercase:
-            result = result.lower()
-
-        if cfg.remove_accents:
+        if remove_accents:
             result = self._remove_accents(result)
 
-        if cfg.strip_special_chars:
-            pattern = f"[{re.escape(cfg.strip_special_chars)}]"
-            result = re.sub(pattern, "", result)
-
-        if cfg.max_length and len(result) > cfg.max_length:
-            result = result[: cfg.max_length]
+        if lowercase:
+            result = result.lower()
 
         return result
 
     def _remove_accents(self, text: str) -> str:
-        """Remove accents from text."""
+        """Remove accent marks from text."""
         import unicodedata
         nfd = unicodedata.normalize("NFD", text)
         return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
 
-    def normalize_whitespace(self, value: str) -> str:
-        """
-        Normalize whitespace in string.
-
-        Args:
-            value: Input string
-
-        Returns:
-            String with normalized whitespace
-        """
-        return re.sub(r"\s+", " ", value).strip()
-
-    def normalize_case(
-        self,
-        value: str,
-        case_type: str = "lower",
-    ) -> str:
-        """
-        Normalize string case.
-
-        Args:
-            value: Input string
-            case_type: Type of case (lower, upper, title, sentence)
-
-        Returns:
-            Case-normalized string
-        """
-        case_type = case_type.lower()
-
-        if case_type == "lower":
-            return value.lower()
-        elif case_type == "upper":
-            return value.upper()
-        elif case_type == "title":
-            return value.title()
-        elif case_type == "sentence":
-            return value.capitalize()
-        else:
-            raise ValueError(f"Unknown case type: {case_type}")
-
-    def normalize_snake_case(self, value: str) -> str:
-        """
-        Convert string to snake_case.
-
-        Args:
-            value: Input string
-
-        Returns:
-            snake_case string
-        """
-        value = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", value)
-        value = re.sub(r"([a-z\d])([A-Z])", r"\1_\2", value)
-        value = value.replace("-", "_").replace(" ", "_")
-        return value.lower()
-
-    def normalize_camel_case(self, value: str) -> str:
-        """
-        Convert string to camelCase.
-
-        Args:
-            value: Input string
-
-        Returns:
-            camelCase string
-        """
-        parts = re.sub(r"[_\-\s]+", " ", value).split()
-        if not parts:
-            return ""
-        return parts[0].lower() + "".join(p.title() for p in parts[1:])
-
-    def normalize_pascal_case(self, value: str) -> str:
-        """
-        Convert string to PascalCase.
-
-        Args:
-            value: Input string
-
-        Returns:
-            PascalCase string
-        """
-        parts = re.sub(r"[_\-\s]+", " ", value).split()
-        return "".join(p.title() for p in parts)
-
-    # Number Normalization
-
-    def normalize_number(
-        self,
-        value: Union[str, int, float],
-        precision: Optional[int] = None,
-        min_value: Optional[float] = None,
-        max_value: Optional[float] = None,
-    ) -> Union[int, float]:
-        """
-        Normalize a numeric value.
-
-        Args:
-            value: Input number
-            precision: Decimal precision
-            min_value: Minimum allowed value
-            max_value: Maximum allowed value
-
-        Returns:
-            Normalized number
-        """
-        if isinstance(value, str):
-            value = self._parse_number(value)
-
-        if value is None:
-            return 0
-
-        if precision is not None:
-            value = round(value, precision)
-
-        if min_value is not None:
-            value = max(value, min_value)
-
-        if max_value is not None:
-            value = min(value, max_value)
-
-        return value
-
-    def _parse_number(self, value: str) -> float:
-        """Parse number from string."""
-        cleaned = re.sub(r"[^\d.\-]", "", value)
-        try:
-            return float(cleaned)
-        except ValueError:
-            return 0.0
-
-    def normalize_percentage(
-        self,
-        value: Union[str, float, int],
-    ) -> float:
-        """
-        Normalize a percentage value to 0-1 range.
-
-        Args:
-            value: Percentage value (0-100 or "50%")
-
-        Returns:
-            Value between 0 and 1
-        """
-        if isinstance(value, str):
-            value = value.replace("%", "").strip()
-        value = float(value)
-        if value > 1:
-            value = value / 100
-        return max(0.0, min(1.0, value))
-
-    # Contact Information Normalization
+    def normalize_email(self, email: str) -> str:
+        """Normalize email address."""
+        email = email.lower().strip()
+        if "@" in email:
+            local, domain = email.rsplit("@", 1)
+            local = local.replace(".", "").split("+")[0]
+            return f"{local}@{domain}"
+        return email
 
     def normalize_phone(
         self,
-        value: str,
+        phone: str,
         country_code: str = "US",
-    ) -> str:
+    ) -> Optional[str]:
         """
-        Normalize a phone number.
+        Normalize phone number.
 
         Args:
-            value: Phone number string
+            phone: Phone number string
             country_code: Country code for formatting
 
         Returns:
-            Normalized phone number
+            Normalized phone or None
         """
-        digits = re.sub(r"[^\d]", "", value)
-
-        if digits.startswith("1") and len(digits) == 11:
-            digits = digits[1:]
+        digits = re.sub(r"\D", "", phone)
 
         if country_code == "US" and len(digits) == 10:
-            return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
-
-        return digits
-
-    def normalize_email(self, value: str) -> str:
-        """
-        Normalize an email address.
-
-        Args:
-            value: Email address
-
-        Returns:
-            Normalized email address
-        """
-        return value.lower().strip()
-
-    def is_valid_email(self, value: str) -> bool:
-        """
-        Check if email is valid.
-
-        Args:
-            value: Email address
-
-        Returns:
-            True if valid
-        """
-        return bool(self.EMAIL_PATTERN.match(value))
-
-    # URL Normalization
-
-    def normalize_url(
-        self,
-        value: str,
-        strip_query: bool = False,
-        strip_fragment: bool = False,
-    ) -> str:
-        """
-        Normalize a URL.
-
-        Args:
-            value: URL string
-            strip_query: Remove query parameters
-            strip_fragment: Remove fragment
-
-        Returns:
-            Normalized URL
-        """
-        parsed = urlparse(value)
-
-        scheme = parsed.scheme.lower() or "https"
-        netloc = parsed.netloc.lower()
-
-        if strip_query:
-            query = ""
-        else:
-            query = parsed.query
-
-        if strip_fragment:
-            fragment = ""
-        else:
-            fragment = parsed.fragment
-
-        path = parsed.path or "/"
-
-        return f"{scheme}://{netloc}{path}?{query}#{fragment}".rstrip("?")
-
-    def is_valid_url(self, value: str) -> bool:
-        """
-        Check if URL is valid.
-
-        Args:
-            value: URL string
-
-        Returns:
-            True if valid
-        """
-        return bool(self.URL_PATTERN.match(value))
-
-    # Date Normalization
-
-    def normalize_date(
-        self,
-        value: Union[str, datetime],
-        output_format: str = "%Y-%m-%d",
-    ) -> str:
-        """
-        Normalize a date to specified format.
-
-        Args:
-            value: Date value
-            output_format: Output format string
-
-        Returns:
-            Formatted date string
-        """
-        if isinstance(value, str):
-            parsed = self._parse_date(value)
-        else:
-            parsed = value
-
-        if parsed is None:
-            return ""
-
-        return parsed.strftime(output_format)
-
-    def _parse_date(self, value: str) -> Optional[datetime]:
-        """Parse date string to datetime."""
-        formats = [
-            "%Y-%m-%d",
-            "%d/%m/%Y",
-            "%m/%d/%Y",
-            "%Y/%m/%d",
-            "%d-%m-%Y",
-            "%m-%d-%Y",
-            "%B %d, %Y",
-            "%b %d, %Y",
-            "%Y-%m-%d %H:%M:%S",
-            "%d/%m/%Y %H:%M:%S",
-        ]
-
-        for fmt in formats:
-            try:
-                return datetime.strptime(value.strip(), fmt)
-            except ValueError:
-                continue
+            return f"+1{digits}"
+        elif len(digits) >= 10:
+            return f"+{digits}"
 
         return None
 
-    # Record Normalization
-
-    def normalize_record(
+    def normalize_json(
         self,
-        record: Dict[str, Any],
-        field_configs: Dict[str, NormalizationConfig],
-    ) -> Dict[str, Any]:
+        data: Union[Dict, List],
+        case: Optional[str] = None,
+    ) -> Union[Dict, List]:
         """
-        Normalize all fields in a record.
+        Recursively normalize JSON data.
 
         Args:
-            record: Data record
-            field_configs: Dict mapping field names to NormalizationConfig
+            data: JSON data
+            case: Optional case transformation for keys
 
         Returns:
-            Normalized record
+            Normalized data
         """
-        result = {}
-
-        for field, config in field_configs.items():
-            if field in record:
-                value = record[field]
-                if isinstance(value, str):
-                    result[field] = self.normalize_string(value, config)
-                elif isinstance(value, (int, float)):
-                    result[field] = self.normalize_number(value)
-                else:
-                    result[field] = value
-
-        return result
-
-    def normalize_batch(
-        self,
-        records: List[Dict[str, Any]],
-        field_configs: Dict[str, NormalizationConfig],
-    ) -> List[Dict[str, Any]]:
-        """
-        Normalize a batch of records.
-
-        Args:
-            records: List of data records
-            field_configs: Dict mapping field names to NormalizationConfig
-
-        Returns:
-            List of normalized records
-        """
-        return [self.normalize_record(record, field_configs) for record in records]
+        if isinstance(data, dict):
+            result = {}
+            for key, value in data.items():
+                if case:
+                    key = self.transform_case(key, case)
+                result[key] = self.normalize_json(value, case)
+            return result
+        elif isinstance(data, list):
+            return [self.normalize_json(item, case) for item in data]
+        return data

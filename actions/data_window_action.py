@@ -1,258 +1,213 @@
-"""Data Window Action Module.
-
-Provides time-series windowing with tumbling, sliding,
-and session windows for streaming data analysis.
 """
+Data Window Action Module.
+
+Time-based and count-based windowing for streaming data.
+"""
+
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from enum import Enum
-from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar
 from collections import deque
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Any, Callable, Deque, Generic, List, Optional, TypeVar
+
 
 T = TypeVar("T")
 
 
 class WindowType(Enum):
-    """Window type."""
-    TUMBLING = "tumbling"
-    SLIDING = "sliding"
-    SESSION = "session"
+    """Window types."""
+    TUMBLING = auto()
+    SLIDING = auto()
+    SESSION = auto()
 
 
 @dataclass
-class Window:
-    """Data window."""
-    window_id: int
+class Window(Generic[T]):
+    """A data window."""
+    window_id: str
     start_time: float
-    end_time: float
-    items: List[Any] = field(default_factory=list)
+    end_time: Optional[float]
+    items: List[T] = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)
 
 
-class DataWindowAction:
-    """Time-series windowing for data streams.
+@dataclass
+class WindowConfig:
+    """Configuration for windowing."""
+    window_type: WindowType = WindowType.TUMBLING
+    size_seconds: float = 60.0
+    slide_seconds: float = 60.0
+    max_size: int = 1000
+    session_gap_seconds: float = 30.0
 
-    Example:
-        windower = DataWindowAction(
-            window_type=WindowType.TUMBLING,
-            window_size_seconds=60.0
-        )
 
-        for window in windower.process(data_stream):
-            result = aggregate(window.items)
+class DataWindowAction(Generic[T]):
+    """
+    Windowing for streaming data.
+
+    Supports tumbling, sliding, and session windows.
     """
 
     def __init__(
         self,
-        window_type: WindowType = WindowType.TUMBLING,
-        window_size_seconds: float = 60.0,
-        slide_interval_seconds: Optional[float] = None,
-        session_gap_seconds: float = 5.0,
+        config: Optional[WindowConfig] = None,
     ) -> None:
-        self.window_type = window_type
-        self.window_size = window_size_seconds
-        self.slide_interval = slide_interval_seconds or window_size_seconds
-        self.session_gap = session_gap_seconds
-        self._buffers: Dict[int, deque] = {}
-        self._window_id = 0
-        self._last_window_end: Dict[int, float] = {}
+        self.config = config or WindowConfig()
+        self._windows: Deque[Window[T]] = deque(maxlen=100)
+        self._current_window: Optional[Window[T]] = None
+        self._buffer: List[T] = []
+        self._window_counter = 0
 
-    def process(
-        self,
-        items: List[Dict[str, Any]],
-        timestamp_field: str = "timestamp",
-    ) -> List[Window]:
-        """Process items into windows.
+    def add(self, item: T) -> Optional[Window[T]]:
+        """
+        Add item to window.
 
         Args:
-            items: List of items with timestamp field
-            timestamp_field: Name of timestamp field
+            item: Item to add
 
         Returns:
-            List of Window objects
+            Window if a window is complete, None otherwise
         """
-        if not items:
-            return []
+        now = time.time()
 
-        sorted_items = sorted(
-            items,
-            key=lambda x: x.get(timestamp_field, 0)
+        if self._current_window is None:
+            self._current_window = self._create_window(now)
+
+        self._buffer.append(item)
+
+        if self.config.window_type == WindowType.TUMBLING:
+            return self._check_tumbling_window(now)
+        elif self.config.window_type == WindowType.SLIDING:
+            return self._check_sliding_window(now)
+        elif self.config.window_type == WindowType.SESSION:
+            return self._check_session_window(now)
+
+        return None
+
+    def _create_window(self, start_time: float) -> Window[T]:
+        """Create a new window."""
+        self._window_counter += 1
+        return Window[T](
+            window_id=f"window_{self._window_counter}",
+            start_time=start_time,
+            end_time=None,
+            items=[],
+            metadata={},
         )
 
-        if self.window_type == WindowType.TUMBLING:
-            return self._process_tumbling(sorted_items, timestamp_field)
-        elif self.window_type == WindowType.SLIDING:
-            return self._process_sliding(sorted_items, timestamp_field)
-        elif self.window_type == WindowType.SESSION:
-            return self._process_session(sorted_items, timestamp_field)
+    def _check_tumbling_window(self, now: float) -> Optional[Window[T]]:
+        """Check if tumbling window is complete."""
+        if self._current_window is None:
+            return None
 
-        return []
+        window_age = now - self._current_window.start_time
 
-    def _process_tumbling(
+        if window_age >= self.config.size_seconds:
+            self._current_window.items = list(self._buffer)
+            self._current_window.end_time = now
+            completed = self._current_window
+            self._windows.append(completed)
+            self._current_window = self._create_window(now)
+            self._buffer.clear()
+            return completed
+
+        return None
+
+    def _check_sliding_window(self, now: float) -> Optional[Window[T]]:
+        """Check if sliding window is complete."""
+        if self._current_window is None:
+            return None
+
+        window_age = now - self._current_window.start_time
+
+        if window_age >= self.config.slide_seconds:
+            self._current_window.items = list(self._buffer)
+            self._current_window.end_time = now
+            completed = self._current_window
+            self._windows.append(completed)
+            self._current_window = self._create_window(now)
+            self._buffer.clear()
+            return completed
+
+        return None
+
+    def _check_session_window(self, now: float) -> Optional[Window[T]]:
+        """Check if session window should close."""
+        if not self._buffer:
+            return None
+
+        if self._current_window is None:
+            return None
+
+        last_item_time = self._current_window.start_time
+        gap = now - last_item_time
+
+        if gap >= self.config.session_gap_seconds and len(self._buffer) > 0:
+            self._current_window.items = list(self._buffer)
+            self._current_window.end_time = now
+            completed = self._current_window
+            self._windows.append(completed)
+            self._current_window = self._create_window(now)
+            self._buffer.clear()
+            return completed
+
+        return None
+
+    def get_current_window(self) -> Optional[Window[T]]:
+        """Get current in-progress window."""
+        if self._current_window and self._buffer:
+            return Window[T](
+                window_id=self._current_window.window_id,
+                start_time=self._current_window.start_time,
+                end_time=None,
+                items=list(self._buffer),
+                metadata=self._current_window.metadata.copy(),
+            )
+        return None
+
+    def get_windows(self) -> List[Window[T]]:
+        """Get all completed windows."""
+        return list(self._windows)
+
+    def get_window_by_id(self, window_id: str) -> Optional[Window[T]]:
+        """Get a specific window by ID."""
+        for window in self._windows:
+            if window.window_id == window_id:
+                return window
+        return None
+
+    def aggregate(
         self,
-        items: List[Dict],
-        timestamp_field: str,
-    ) -> List[Window]:
-        """Process with tumbling windows."""
-        windows: List[Window] = []
-
-        if not items:
-            return windows
-
-        start_ts = items[0].get(timestamp_field, time.time())
-        window_end = start_ts + self.window_size
-
-        current_window = Window(
-            window_id=self._window_id,
-            start_time=start_ts,
-            end_time=window_end,
-        )
-
-        for item in items:
-            ts = item.get(timestamp_field, time.time())
-
-            if ts >= window_end:
-                if current_window.items:
-                    windows.append(current_window)
-
-                self._window_id += 1
-                start_ts = ts
-                window_end = start_ts + self.window_size
-                current_window = Window(
-                    window_id=self._window_id,
-                    start_time=start_ts,
-                    end_time=window_end,
-                )
-
-            current_window.items.append(item)
-
-        if current_window.items:
-            windows.append(current_window)
-
-        return windows
-
-    def _process_sliding(
-        self,
-        items: List[Dict],
-        timestamp_field: str,
-    ) -> List[Window]:
-        """Process with sliding windows."""
-        windows: List[Window] = []
-
-        if not items:
-            return windows
-
-        start_ts = items[0].get(timestamp_field, time.time())
-        window_end = start_ts + self.window_size
-
-        window_start = start_ts
-        step = self.slide_interval
-
-        while window_start <= items[-1].get(timestamp_field, time.time()):
-            window_items = [
-                item for item in items
-                if window_start <= item.get(timestamp_field, 0) < window_end
-            ]
-
-            if window_items:
-                windows.append(Window(
-                    window_id=self._window_id,
-                    start_time=window_start,
-                    end_time=window_end,
-                    items=window_items,
-                ))
-                self._window_id += 1
-
-            window_start += step
-            window_end = window_start + self.window_size
-
-        return windows
-
-    def _process_session(
-        self,
-        items: List[Dict],
-        timestamp_field: str,
-    ) -> List[Window]:
-        """Process with session windows."""
-        windows: List[Window] = []
-
-        if not items:
-            return windows
-
-        current_window = Window(
-            window_id=self._window_id,
-            start_time=items[0].get(timestamp_field, time.time()),
-            end_time=0,
-        )
-        self._window_id += 1
-        last_ts = current_window.start_time
-
-        for item in items:
-            ts = item.get(timestamp_field, time.time())
-
-            if ts - last_ts > self.session_gap:
-                if current_window.items:
-                    current_window.end_time = last_ts
-                    windows.append(current_window)
-
-                current_window = Window(
-                    window_id=self._window_id,
-                    start_time=ts,
-                    end_time=0,
-                )
-                self._window_id += 1
-
-            current_window.items.append(item)
-            last_ts = ts
-
-        if current_window.items:
-            current_window.end_time = last_ts
-            windows.append(current_window)
-
-        return windows
-
-    def aggregate_windows(
-        self,
-        windows: List[Window],
-        aggregator: Callable[[List], Any],
-    ) -> List[Dict[str, Any]]:
-        """Aggregate items within each window.
+        window: Window[T],
+        func: Callable[[List[T]], Any],
+    ) -> Any:
+        """
+        Aggregate items in a window.
 
         Args:
-            windows: List of windows
-            aggregator: Function to aggregate items
+            window: Window to aggregate
+            func: Aggregation function
 
         Returns:
-            List of aggregated results
+            Aggregation result
         """
-        results = []
+        return func(window.items)
 
-        for window in windows:
-            if window.items:
-                result = aggregator(window.items)
-                results.append({
-                    "window_id": window.window_id,
-                    "start_time": window.start_time,
-                    "end_time": window.end_time,
-                    "item_count": len(window.items),
-                    "result": result,
-                })
+    def clear(self) -> None:
+        """Clear all windows and buffers."""
+        self._windows.clear()
+        self._current_window = None
+        self._buffer.clear()
+        self._window_counter = 0
 
-        return results
-
-    def window_stats(self, windows: List[Window]) -> Dict[str, Any]:
-        """Get statistics about windows."""
-        if not windows:
-            return {"total_windows": 0}
-
-        item_counts = [len(w.items) for w in windows]
-
+    def get_stats(self) -> dict:
+        """Get window statistics."""
         return {
-            "total_windows": len(windows),
-            "total_items": sum(item_counts),
-            "avg_items_per_window": sum(item_counts) / len(windows),
-            "min_items": min(item_counts),
-            "max_items": max(item_counts),
+            "total_windows": len(self._windows),
+            "current_window_items": len(self._buffer),
+            "window_type": self.config.window_type.name,
+            "size_seconds": self.config.size_seconds,
+            "slide_seconds": self.config.slide_seconds,
         }
