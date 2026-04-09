@@ -1,234 +1,253 @@
-"""Data Sorter Action Module.
-
-Provides multi-field sorting with ascending/descending,
-null handling, and custom comparator support.
 """
+Data Sorter Action Module.
+
+Sort and order data with multiple criteria.
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-from enum import Enum
-
-
-class NullOrder(Enum):
-    """Null value ordering."""
-    FIRST = "first"
-    LAST = "last"
-
-
-class SortOrder(Enum):
-    """Sort order."""
-    ASC = "asc"
-    DESC = "desc"
 
 
 @dataclass
-class SortConfig:
-    """Sort configuration."""
+class SortKey:
+    """A sort key configuration."""
     field: str
-    order: SortOrder = SortOrder.ASC
-    null_order: NullOrder = NullOrder.LAST
-    custom_key: Optional[Callable[[Any], Any]] = None
+    reverse: bool = False
+    nulls_last: bool = True
 
 
 class DataSorterAction:
-    """Multi-field data sorter.
+    """
+    Sort data with multiple keys and custom comparators.
 
-    Example:
-        sorter = DataSorterAction()
-
-        result = sorter.sort(
-            data=[
-                {"name": "Bob", "age": 30},
-                {"name": "Alice", "age": 25},
-                {"name": "Bob", "age": 35},
-            ],
-            sort_configs=[
-                SortConfig(field="name", order=SortOrder.ASC),
-                SortConfig(field="age", order=SortOrder.DESC),
-            ]
-        )
+    Supports multi-level sorting, null handling, and custom functions.
     """
 
     def __init__(self) -> None:
-        self._custom_comparators: Dict[str, Callable] = {}
+        self._custom_comparators: Dict[str, Callable[[Any, Any], int]] = {}
 
-    def register_comparator(
+    def add_comparator(
         self,
         field: str,
         comparator: Callable[[Any, Any], int],
     ) -> None:
-        """Register custom comparator for field."""
+        """
+        Add a custom comparator for a field.
+
+        Args:
+            field: Field name
+            comparator: Function returning -1, 0, or 1
+        """
         self._custom_comparators[field] = comparator
 
     def sort(
         self,
         data: List[Dict[str, Any]],
-        sort_configs: List[SortConfig],
-        stable: bool = True,
+        keys: Union[str, List[str], List[SortKey]],
+        reverse: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Sort data by multiple fields.
+        """
+        Sort data.
 
         Args:
-            data: List of records to sort
-            sort_configs: List of sort configurations (applied in order)
-            stable: Use stable sort
+            data: Data to sort
+            keys: Sort keys (field name or SortKey objects)
+            reverse: Reverse sort order
 
         Returns:
-            Sorted list of records
+            Sorted data
         """
-        if not data or not sort_configs:
+        if not data:
             return data
 
-        return self._multi_key_sort(data, sort_configs, stable)
+        sort_keys = self._normalize_keys(keys)
 
-    def _multi_key_sort(
+        return sorted(
+            data,
+            key=lambda x: self._make_sort_key(x, sort_keys),
+            reverse=reverse,
+        )
+
+    def _normalize_keys(
         self,
-        data: List[Dict[str, Any]],
-        sort_configs: List[SortConfig],
-        stable: bool,
-    ) -> List[Dict[str, Any]]:
-        """Sort by multiple keys in sequence."""
-        result = data
+        keys: Union[str, List[str], List[SortKey]],
+    ) -> List[SortKey]:
+        """Normalize keys to SortKey list."""
+        if isinstance(keys, str):
+            return [SortKey(field=keys)]
+        elif isinstance(keys, list) and keys and isinstance(keys[0], str):
+            return [SortKey(field=k) for k in keys]
+        elif isinstance(keys, list):
+            return keys
+        return []
 
-        for config in reversed(sort_configs):
-            result = self._single_sort(result, config)
-
-        return result
-
-    def _single_sort(
+    def _make_sort_key(
         self,
-        data: List[Dict[str, Any]],
-        config: SortConfig,
-    ) -> List[Dict[str, Any]]:
-        """Sort by single configuration."""
-        reverse = config.order == SortOrder.DESC
+        record: Dict[str, Any],
+        sort_keys: List[SortKey],
+    ) -> Tuple[Any, ...]:
+        """Create sort key tuple for a record."""
+        key_parts = []
 
-        def sort_key(item: Dict[str, Any]) -> Tuple:
-            value = item.get(config.field)
-            key_value = self._get_sortable_value(value, config)
+        for sort_key in sort_keys:
+            value = record.get(sort_key.field)
 
-            if config.field in self._custom_comparators:
-                return (0, key_value)
+            if sort_key.nulls_last:
+                if value is None:
+                    key_parts.append((1, ""))
+                else:
+                    key_parts.append((0, value))
+            else:
+                key_parts.append((0, value))
 
-            is_null = value is None
-            if is_null:
-                null_priority = 0 if config.null_order == NullOrder.FIRST else 2
-                return (null_priority, key_value)
-
-            return (1, key_value)
-
-        return sorted(data, key=sort_key, reverse=reverse)
-
-    def _get_sortable_value(
-        self,
-        value: Any,
-        config: SortConfig,
-    ) -> Any:
-        """Get sortable value from field value."""
-        if config.custom_key:
-            return config.custom_key(value)
-
-        if isinstance(value, str):
-            return value.lower()
-
-        if isinstance(value, (int, float)):
-            return value
-
-        return str(value)
+        return tuple(key_parts)
 
     def sort_by_function(
         self,
-        data: List[T],
-        key_func: Callable[[T], Any],
+        data: List[Dict[str, Any]],
+        key_func: Callable[[Dict[str, Any]], Any],
         reverse: bool = False,
-    ) -> List[T]:
-        """Sort data using custom key function.
+    ) -> List[Dict[str, Any]]:
+        """
+        Sort by a function.
 
         Args:
-            data: List of items to sort
+            data: Data to sort
             key_func: Function to extract sort key
-            reverse: Sort in descending order
+            reverse: Reverse order
 
         Returns:
-            Sorted list
+            Sorted data
         """
         return sorted(data, key=key_func, reverse=reverse)
 
-    def sort_by_field(
+    def sort_stable(
         self,
         data: List[Dict[str, Any]],
-        field: str,
-        order: SortOrder = SortOrder.ASC,
-        null_order: NullOrder = NullOrder.LAST,
+        keys: Union[str, List[str], List[SortKey]],
     ) -> List[Dict[str, Any]]:
-        """Sort data by single field.
+        """
+        Stable sort preserving original order for equal keys.
 
         Args:
-            data: List of records
-            field: Field name to sort by
-            order: Sort order
-            null_order: Where to place null values
+            data: Data to sort
+            keys: Sort keys
 
         Returns:
-            Sorted list
+            Stable sorted data
         """
-        config = SortConfig(
-            field=field,
-            order=order,
-            null_order=null_order,
-        )
-        return self._single_sort(data, config)
+        sort_keys = self._normalize_keys(keys)
+
+        for key in reversed(sort_keys):
+            data = sorted(
+                data,
+                key=lambda x: self._make_sort_key(x, [key]),
+            )
+
+        return data
 
     def rank(
         self,
         data: List[Dict[str, Any]],
         field: str,
-        order: SortOrder = SortOrder.ASC,
+        key: Optional[str] = None,
+        ascending: bool = True,
     ) -> List[Dict[str, Any]]:
-        """Add rank field to data.
+        """
+        Add rank field to data.
 
         Args:
-            data: List of records
-            field: Field to rank by
-            order: Sort order for ranking
+            data: Data to rank
+            field: Field name for rank
+            key: Field to rank by (defaults to field)
+            ascending: Sort ascending
 
         Returns:
-            Records with added 'rank' field
+            Data with rank field added
         """
-        sorted_data = self.sort_by_field(
-            data, field, order, NullOrder.LAST
-        )
+        key = key or field
+        sorted_data = self.sort(data, [SortKey(field=key, reverse=not ascending)])
 
-        for i, record in enumerate(sorted_data, 1):
-            record["rank"] = i
+        result = []
+        for rank, record in enumerate(sorted_data, 1):
+            new_record = record.copy()
+            new_record[field] = rank
+            result.append(new_record)
 
-        return sorted_data
+        return result
 
     def partition(
         self,
         data: List[Dict[str, Any]],
         field: str,
-        threshold: Any,
-    ) -> Tuple[List[Dict], List[Dict]]:
-        """Partition data by threshold value.
+        bins: int,
+        labels: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Partition data into bins.
 
         Args:
-            data: List of records
+            data: Data to partition
             field: Field to partition by
-            threshold: Threshold value
+            bins: Number of bins
+            labels: Optional bin labels
 
         Returns:
-            Tuple of (below_threshold, above_threshold)
+            Data with partition field added
         """
-        below: List[Dict] = []
-        above: List[Dict] = []
+        values = [record.get(field) for record in data if record.get(field) is not None]
+
+        if not values:
+            return data
+
+        min_val = min(values)
+        max_val = max(values)
+
+        if min_val == max_val:
+            bin_width = 1
+        else:
+            bin_width = (max_val - min_val) / bins
+
+        result = []
 
         for record in data:
+            new_record = record.copy()
             value = record.get(field)
-            if value is not None and value < threshold:
-                below.append(record)
-            else:
-                above.append(record)
 
-        return below, above
+            if value is None:
+                new_record["_partition"] = None
+            else:
+                bin_idx = min(int((value - min_val) / bin_width), bins - 1)
+
+                if labels and bin_idx < len(labels):
+                    new_record["_partition"] = labels[bin_idx]
+                else:
+                    new_record["_partition"] = bin_idx
+
+            result.append(new_record)
+
+        return result
+
+    def sort_multi_criteria(
+        self,
+        data: List[Dict[str, Any]],
+        criteria: List[Tuple[str, bool]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Sort by multiple criteria.
+
+        Args:
+            data: Data to sort
+            criteria: List of (field, ascending) tuples
+
+        Returns:
+            Sorted data
+        """
+        sort_keys = [
+            SortKey(field=field, reverse=not ascending)
+            for field, ascending in criteria
+        ]
+
+        return self.sort(data, sort_keys)
