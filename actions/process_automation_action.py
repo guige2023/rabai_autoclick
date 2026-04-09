@@ -1,775 +1,418 @@
-"""Process Automation Action Module.
+"""
+Process Automation Action Module
 
-Automates business processes with task scheduling,
-workflow triggers, and event-driven execution.
+Automates external process execution, monitoring,
+and IPC communication for workflow integration.
+
+MIT License - Copyright (c) 2025 RabAi Research
 """
 
 from __future__ import annotations
 
-import sys
-import os
+import logging
+import subprocess
 import time
-import json
-import hashlib
-import asyncio
-from typing import Any, Callable, Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
-from datetime import datetime, timedelta
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
-
-
-class TriggerType(Enum):
-    """Types of process triggers."""
-    SCHEDULE = "schedule"
-    EVENT = "event"
-    WEBHOOK = "webhook"
-    MANUAL = "manual"
-    CONDITION = "condition"
-    FILE_WATCH = "file_watch"
-    API_CALL = "api_call"
+logger = logging.getLogger(__name__)
 
 
-class ProcessStatus(Enum):
-    """Status of a process execution."""
+class ProcessState(Enum):
+    """Process state identifiers."""
+
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    TIMEOUT = "timeout"
     CANCELLED = "cancelled"
-    WAITING = "waiting"
-
-
-class ScheduleType(Enum):
-    """Type of schedule."""
-    ONCE = "once"
-    RECURRING = "recurring"
-    CRON = "cron"
-    INTERVAL = "interval"
 
 
 @dataclass
-class ProcessTask:
-    """A process automation task."""
-    task_id: str
+class ProcessResult:
+    """Result of process execution."""
+
+    returncode: int
+    stdout: str
+    stderr: str
+    duration: float
+    state: ProcessState
+    timed_out: bool = False
+
+
+@dataclass
+class ProcessInfo:
+    """Information about a running process."""
+
+    pid: int
     name: str
-    description: str = ""
-    trigger_type: TriggerType
-    trigger_config: Dict[str, Any] = field(default_factory=dict)
-    action_config: Dict[str, Any] = field(default_factory=dict)
-    schedule: Optional[Dict[str, Any]] = None
-    conditions: Optional[Dict[str, Any]] = None
-    enabled: bool = True
-    timeout: float = 60.0
-    retry_config: Dict[str, Any] = field(default_factory=dict)
-    notifications: Dict[str, List[str]] = field(default_factory=dict)
-
-
-@dataclass
-class ProcessExecution:
-    """Record of a process execution."""
-    execution_id: str
-    task_id: str
-    status: ProcessStatus
+    command: str
     started_at: float
-    completed_at: Optional[float] = None
-    trigger_type: TriggerType
-    trigger_data: Dict[str, Any] = field(default_factory=dict)
-    result: Any = None
-    error: Optional[str] = None
-    logs: List[str] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    state: ProcessState = ProcessState.RUNNING
+    cpu_percent: float = 0.0
+    memory_mb: float = 0.0
 
 
 @dataclass
-class Schedule:
-    """Schedule configuration."""
-    schedule_type: ScheduleType
-    start_time: Optional[float] = None
-    end_time: Optional[float] = None
-    interval_seconds: int = 0
-    cron_expression: str = ""
-    max_runs: Optional[int] = None
-    run_count: int = 0
+class ProcessConfig:
+    """Configuration for process automation."""
+
+    default_timeout: float = 300.0
+    default_shell: bool = True
+    capture_output: bool = True
+    working_directory: Optional[str] = None
+    environment: Optional[Dict[str, str]] = None
 
 
-class ProcessAutomationAction(BaseAction):
+class ProcessAutomation:
     """
-    Business process automation with triggers and scheduling.
+    Automates external process execution and management.
 
-    Automates tasks based on schedules, events, webhooks,
-    and conditions with full execution tracking.
-
-    Example:
-        automation = ProcessAutomationAction()
-        result = automation.execute(ctx, {
-            "action": "create_task",
-            "name": "daily_report",
-            "trigger_type": "schedule"
-        })
+    Supports running, monitoring, killing processes,
+    with full stdout/stderr capture and timeout handling.
     """
-    action_type = "process_automation"
-    display_name = "流程自动化"
-    description = "基于触发器和调度的业务流程自动化"
 
-    def __init__(self) -> None:
-        super().__init__()
-        self._tasks: Dict[str, ProcessTask] = {}
-        self._executions: Dict[str, ProcessExecution] = {}
-        self._schedules: Dict[str, Schedule] = {}
-        self._listeners: Dict[str, List[Callable]] = {}
-        self._running = False
-        self._schedule_thread: Optional[Any] = None
+    def __init__(
+        self,
+        config: Optional[ProcessConfig] = None,
+        output_handler: Optional[Callable[[str, str], None]] = None,
+    ):
+        self.config = config or ProcessConfig()
+        self.output_handler = output_handler or self._default_output_handler
+        self._processes: Dict[int, subprocess.Popen] = {}
+        self._process_info: Dict[int, ProcessInfo] = {}
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute a process automation action.
+    def _default_output_handler(self, stdout: str, stderr: str) -> None:
+        """Default output handler."""
+        if stdout:
+            logger.debug(f"STDOUT: {stdout[:200]}")
+        if stderr:
+            logger.warning(f"STDERR: {stderr[:200]}")
+
+    def run(
+        self,
+        command: Union[str, List[str]],
+        timeout: Optional[float] = None,
+        shell: Optional[bool] = None,
+        cwd: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        capture: bool = True,
+    ) -> ProcessResult:
+        """
+        Run a command and wait for completion.
 
         Args:
-            context: Execution context.
-            params: Dict with keys: action, task_id, etc.
+            command: Command to run
+            timeout: Timeout in seconds
+            shell: Use shell execution
+            cwd: Working directory
+            env: Environment variables
+            capture: Capture stdout/stderr
 
         Returns:
-            ActionResult with execution result.
+            ProcessResult with execution details
         """
-        action = params.get("action", "")
+        timeout = timeout or self.config.default_timeout
+        shell = shell if shell is not None else self.config.default_shell
+        cwd = cwd or self.config.working_directory
+
+        merged_env = None
+        if env or self.config.environment:
+            import os
+            merged_env = {**os.environ, **(self.config.environment or {}), **(env or {})}
+
+        start_time = time.time()
 
         try:
-            if action == "create_task":
-                return self._create_task(params)
-            elif action == "run_task":
-                return self._run_task(params)
-            elif action == "get_task":
-                return self._get_task(params)
-            elif action == "list_tasks":
-                return self._list_tasks(params)
-            elif action == "enable_task":
-                return self._enable_task(params)
-            elif action == "disable_task":
-                return self._disable_task(params)
-            elif action == "get_execution":
-                return self._get_execution(params)
-            elif action == "get_execution_history":
-                return self._get_execution_history(params)
-            elif action == "cancel_execution":
-                return self._cancel_execution(params)
-            elif action == "trigger_event":
-                return self._trigger_event(params)
-            elif action == "delete_task":
-                return self._delete_task(params)
+            if isinstance(command, str) and shell:
+                process = subprocess.Popen(
+                    command,
+                    shell=True,
+                    stdout=subprocess.PIPE if capture else None,
+                    stderr=subprocess.PIPE if capture else None,
+                    cwd=cwd,
+                    env=merged_env,
+                    text=True,
+                )
+            elif isinstance(command, list):
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE if capture else None,
+                    stderr=subprocess.PIPE if capture else None,
+                    cwd=cwd,
+                    env=merged_env,
+                    text=True,
+                )
             else:
-                return ActionResult(success=False, message=f"Unknown action: {action}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Automation error: {str(e)}")
-
-    def _create_task(self, params: Dict[str, Any]) -> ActionResult:
-        """Create a new automation task."""
-        name = params.get("name", "")
-        trigger_type_str = params.get("trigger_type", "manual")
-        trigger_config = params.get("trigger_config", {})
-        action_config = params.get("action_config", {})
-        schedule_data = params.get("schedule")
-        conditions = params.get("conditions")
-        timeout = params.get("timeout", 60.0)
-        retry_config = params.get("retry_config", {})
-
-        if not name:
-            return ActionResult(success=False, message="name is required")
-
-        try:
-            trigger_type = TriggerType(trigger_type_str)
-        except ValueError:
-            return ActionResult(success=False, message=f"Invalid trigger type: {trigger_type_str}")
-
-        task_id = self._generate_task_id(name)
-
-        task = ProcessTask(
-            task_id=task_id,
-            name=name,
-            description=params.get("description", ""),
-            trigger_type=trigger_type,
-            trigger_config=trigger_config,
-            action_config=action_config,
-            timeout=timeout,
-            retry_config=retry_config,
-            notifications=params.get("notifications", {}),
-        )
-
-        if conditions:
-            task.conditions = conditions
-
-        if schedule_data:
-            task.schedule = schedule_data
-            schedule = self._build_schedule(schedule_data)
-            self._schedules[task_id] = schedule
-
-        self._tasks[task_id] = task
-
-        return ActionResult(
-            success=True,
-            message=f"Task created: {task_id}",
-            data={
-                "task_id": task_id,
-                "name": name,
-                "trigger_type": trigger_type.value,
-                "enabled": task.enabled,
-            }
-        )
-
-    def _run_task(self, params: Dict[str, Any]) -> ActionResult:
-        """Run an automation task."""
-        task_id = params.get("task_id", "")
-        trigger_data = params.get("trigger_data", {})
-
-        if task_id not in self._tasks:
-            return ActionResult(success=False, message=f"Task not found: {task_id}")
-
-        task = self._tasks[task_id]
-
-        if not task.enabled:
-            return ActionResult(success=False, message=f"Task is disabled: {task_id}")
-
-        if task.conditions and not self._evaluate_conditions(task.conditions, trigger_data):
-            return ActionResult(
-                success=False,
-                message=f"Task conditions not met: {task_id}",
-                data={"skipped": True}
-            )
-
-        execution_id = self._generate_execution_id()
-        execution = ProcessExecution(
-            execution_id=execution_id,
-            task_id=task_id,
-            status=ProcessStatus.RUNNING,
-            started_at=time.time(),
-            trigger_type=task.trigger_type,
-            trigger_data=trigger_data,
-        )
-
-        self._executions[execution_id] = execution
-
-        try:
-            result = self._execute_task_action(task, trigger_data)
-
-            execution.status = ProcessStatus.COMPLETED
-            execution.completed_at = time.time()
-            execution.result = result
-
-            self._notify(task, execution, "success")
-
-            if task.schedule:
-                schedule = self._schedules.get(task_id)
-                if schedule:
-                    schedule.run_count += 1
-
-            return ActionResult(
-                success=True,
-                message=f"Task completed: {task_id}",
-                data={
-                    "execution_id": execution_id,
-                    "task_id": task_id,
-                    "status": ProcessStatus.COMPLETED.value,
-                    "duration": execution.completed_at - execution.started_at,
-                }
-            )
-
-        except Exception as e:
-            execution.status = ProcessStatus.FAILED
-            execution.completed_at = time.time()
-            execution.error = str(e)
-
-            self._notify(task, execution, "failure")
-
-            retry_count = trigger_data.get("_retry_count", 0)
-            max_retries = task.retry_config.get("max_retries", 0)
-
-            if retry_count < max_retries:
-                delay = task.retry_config.get("delay", 1.0) * (2 ** retry_count)
-                return ActionResult(
-                    success=False,
-                    message=f"Task failed, will retry: {str(e)}",
-                    data={
-                        "execution_id": execution_id,
-                        "will_retry": True,
-                        "retry_count": retry_count + 1,
-                        "retry_delay": delay,
-                    }
+                process = subprocess.Popen(
+                    command,
+                    shell=True,
+                    stdout=subprocess.PIPE if capture else None,
+                    stderr=subprocess.PIPE if capture else None,
+                    cwd=cwd,
+                    env=merged_env,
+                    text=True,
                 )
 
-            return ActionResult(
-                success=False,
-                message=f"Task failed: {str(e)}",
-                data={
-                    "execution_id": execution_id,
-                    "task_id": task_id,
-                    "status": ProcessStatus.FAILED.value,
-                    "error": str(e),
-                }
+            self._processes[process.pid] = process
+
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+                state = ProcessState.COMPLETED
+                timed_out = False
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+                state = ProcessState.TIMEOUT
+                timed_out = True
+
+        except Exception as e:
+            duration = time.time() - start_time
+            return ProcessResult(
+                returncode=-1,
+                stdout="",
+                stderr=str(e),
+                duration=duration,
+                state=ProcessState.FAILED,
             )
 
-    def _execute_task_action(self, task: ProcessTask, trigger_data: Dict[str, Any]) -> Any:
-        """Execute the actual task action."""
-        action_type = task.action_config.get("type", "noop")
-        action_params = task.action_config.get("params", {})
+        duration = time.time() - start_time
 
-        if action_type == "noop":
-            return {"executed": True, "action": "noop"}
+        if process.pid in self._processes:
+            del self._processes[process.pid]
 
-        elif action_type == "http_request":
-            return self._execute_http_action(action_params)
+        result = ProcessResult(
+            returncode=process.returncode or 0,
+            stdout=stdout or "",
+            stderr=stderr or "",
+            duration=duration,
+            state=state,
+            timed_out=timed_out,
+        )
 
-        elif action_type == "script":
-            return self._execute_script_action(action_params)
+        if result.returncode != 0 and state == ProcessState.COMPLETED:
+            result.state = ProcessState.FAILED
 
-        elif action_type == "send_notification":
-            return self._execute_notification_action(action_params)
+        return result
 
-        elif action_type == "data_transform":
-            return self._execute_transform_action(action_params, trigger_data)
+    def start(
+        self,
+        command: Union[str, List[str]],
+        shell: Optional[bool] = None,
+        cwd: Optional[str] = None,
+    ) -> int:
+        """
+        Start a process without waiting.
 
-        elif action_type == "file_operation":
-            return self._execute_file_action(action_params)
+        Args:
+            command: Command to run
+            shell: Use shell execution
+            cwd: Working directory
 
-        elif action_type == "subprocess":
-            return self._execute_subprocess_action(action_params)
+        Returns:
+            Process ID
+        """
+        shell = shell if shell is not None else self.config.default_shell
+        cwd = cwd or self.config.working_directory
 
+        if isinstance(command, str) and shell:
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                cwd=cwd,
+            )
+        elif isinstance(command, list):
+            process = subprocess.Popen(
+                command,
+                cwd=cwd,
+            )
         else:
-            return {"executed": True, "action": action_type, "params": action_params}
-
-    def _execute_http_action(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute an HTTP request action."""
-        import urllib.request
-        import urllib.parse
-
-        url = params.get("url", "")
-        method = params.get("method", "GET").upper()
-        headers = params.get("headers", {})
-        body = params.get("body")
-
-        if not url:
-            raise ValueError("URL is required for HTTP action")
-
-        req = urllib.request.Request(url, method=method)
-
-        for key, value in headers.items():
-            req.add_header(key, value)
-
-        if body and method in ("POST", "PUT", "PATCH"):
-            if isinstance(body, dict):
-                body = json.dumps(body).encode("utf-8")
-                req.add_header("Content-Type", "application/json")
-            elif isinstance(body, str):
-                body = body.encode("utf-8")
-
-        with urllib.request.urlopen(req, timeout=30) as response:
-            response_body = response.read().decode("utf-8")
-
-            try:
-                result_data = json.loads(response_body)
-            except json.JSONDecodeError:
-                result_data = {"raw": response_body}
-
-            return {
-                "status_code": response.status,
-                "body": result_data,
-            }
-
-    def _execute_script_action(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a script action."""
-        script = params.get("script", "")
-        language = params.get("language", "python")
-
-        if not script:
-            return {"executed": False, "error": "No script provided"}
-
-        if language == "python":
-            local_vars: Dict[str, Any] = {}
-            try:
-                exec(script, {}, local_vars)
-                return {"executed": True, "result": local_vars.get("result")}
-            except Exception as e:
-                return {"executed": False, "error": str(e)}
-
-        return {"executed": True, "script": script, "language": language}
-
-    def _execute_notification_action(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a notification action."""
-        channel = params.get("channel", "log")
-        message = params.get("message", "")
-        recipients = params.get("recipients", [])
-
-        return {
-            "executed": True,
-            "channel": channel,
-            "message": message,
-            "recipients": recipients,
-            "sent": True,
-        }
-
-    def _execute_transform_action(self, params: Dict[str, Any], trigger_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a data transformation action."""
-        transform_type = params.get("type", "map")
-        data = params.get("data", trigger_data)
-        mappings = params.get("mappings", {})
-
-        if transform_type == "map":
-            result = {}
-            for old_key, new_key in mappings.items():
-                result[new_key] = data.get(old_key, data.get(new_key))
-            return {"executed": True, "result": result}
-
-        return {"executed": True, "data": data}
-
-    def _execute_file_action(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a file operation action."""
-        operation = params.get("operation", "read")
-        file_path = params.get("path", "")
-        content = params.get("content", "")
-
-        if operation == "read":
-            if not os.path.exists(file_path):
-                return {"executed": False, "error": "File not found"}
-            with open(file_path, "r") as f:
-                return {"executed": True, "content": f.read()}
-
-        elif operation == "write":
-            with open(file_path, "w") as f:
-                f.write(content)
-            return {"executed": True, "path": file_path}
-
-        elif operation == "append":
-            with open(file_path, "a") as f:
-                f.write(content)
-            return {"executed": True, "path": file_path}
-
-        elif operation == "delete":
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            return {"executed": True, "deleted": file_path}
-
-        return {"executed": True, "operation": operation}
-
-    def _execute_subprocess_action(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a subprocess action."""
-        import subprocess
-
-        command = params.get("command", "")
-        shell = params.get("shell", True)
-        cwd = params.get("cwd")
-
-        if not command:
-            return {"executed": False, "error": "No command provided"}
-
-        result = subprocess.run(
-            command,
-            shell=shell,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=params.get("timeout", 30),
-        )
-
-        return {
-            "executed": True,
-            "returncode": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-        }
-
-    def _get_task(self, params: Dict[str, Any]) -> ActionResult:
-        """Get a task by ID."""
-        task_id = params.get("task_id", "")
-
-        if task_id not in self._tasks:
-            return ActionResult(success=False, message=f"Task not found: {task_id}")
-
-        task = self._tasks[task_id]
-        return ActionResult(
-            success=True,
-            data={
-                "task_id": task.task_id,
-                "name": task.name,
-                "description": task.description,
-                "trigger_type": task.trigger_type.value,
-                "enabled": task.enabled,
-                "timeout": task.timeout,
-                "schedule": task.schedule,
-            }
-        )
-
-    def _list_tasks(self, params: Dict[str, Any]) -> ActionResult:
-        """List all tasks with optional filters."""
-        enabled_only = params.get("enabled_only", False)
-        trigger_filter = params.get("trigger_type")
-
-        tasks = list(self._tasks.values())
-
-        if enabled_only:
-            tasks = [t for t in tasks if t.enabled]
-
-        if trigger_filter:
-            try:
-                trigger_type = TriggerType(trigger_filter)
-                tasks = [t for t in tasks if t.trigger_type == trigger_type]
-            except ValueError:
-                pass
-
-        task_list = [
-            {
-                "task_id": t.task_id,
-                "name": t.name,
-                "trigger_type": t.trigger_type.value,
-                "enabled": t.enabled,
-            }
-            for t in tasks
-        ]
-
-        return ActionResult(
-            success=True,
-            data={"tasks": task_list, "count": len(task_list)}
-        )
-
-    def _enable_task(self, params: Dict[str, Any]) -> ActionResult:
-        """Enable a task."""
-        task_id = params.get("task_id", "")
-
-        if task_id not in self._tasks:
-            return ActionResult(success=False, message=f"Task not found: {task_id}")
-
-        self._tasks[task_id].enabled = True
-        return ActionResult(success=True, message=f"Task enabled: {task_id}")
-
-    def _disable_task(self, params: Dict[str, Any]) -> ActionResult:
-        """Disable a task."""
-        task_id = params.get("task_id", "")
-
-        if task_id not in self._tasks:
-            return ActionResult(success=False, message=f"Task not found: {task_id}")
-
-        self._tasks[task_id].enabled = False
-        return ActionResult(success=True, message=f"Task disabled: {task_id}")
-
-    def _get_execution(self, params: Dict[str, Any]) -> ActionResult:
-        """Get an execution by ID."""
-        execution_id = params.get("execution_id", "")
-
-        if execution_id not in self._executions:
-            return ActionResult(success=False, message=f"Execution not found: {execution_id}")
-
-        exec_data = self._executions[execution_id]
-        return ActionResult(
-            success=True,
-            data={
-                "execution_id": exec_data.execution_id,
-                "task_id": exec_data.task_id,
-                "status": exec_data.status.value,
-                "started_at": exec_data.started_at,
-                "completed_at": exec_data.completed_at,
-                "result": exec_data.result,
-                "error": exec_data.error,
-            }
-        )
-
-    def _get_execution_history(self, params: Dict[str, Any]) -> ActionResult:
-        """Get execution history for a task."""
-        task_id = params.get("task_id", "")
-        limit = params.get("limit", 50)
-
-        executions = [
-            e for e in self._executions.values()
-            if e.task_id == task_id
-        ]
-
-        executions.sort(key=lambda e: e.started_at, reverse=True)
-
-        return ActionResult(
-            success=True,
-            data={
-                "executions": [
-                    {
-                        "execution_id": e.execution_id,
-                        "status": e.status.value,
-                        "started_at": e.started_at,
-                        "completed_at": e.completed_at,
-                        "duration": (e.completed_at - e.started_at) if e.completed_at else None,
-                    }
-                    for e in executions[:limit]
-                ],
-                "count": len(executions),
-            }
-        )
-
-    def _cancel_execution(self, params: Dict[str, Any]) -> ActionResult:
-        """Cancel a running execution."""
-        execution_id = params.get("execution_id", "")
-
-        if execution_id not in self._executions:
-            return ActionResult(success=False, message=f"Execution not found: {execution_id}")
-
-        execution = self._executions[execution_id]
-
-        if execution.status == ProcessStatus.RUNNING:
-            execution.status = ProcessStatus.CANCELLED
-            execution.completed_at = time.time()
-            return ActionResult(success=True, message=f"Execution cancelled: {execution_id}")
-        else:
-            return ActionResult(
-                success=False,
-                message=f"Cannot cancel execution in status: {execution.status.value}"
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                cwd=cwd,
             )
 
-    def _trigger_event(self, params: Dict[str, Any]) -> ActionResult:
-        """Trigger an event that may activate tasks."""
-        event_name = params.get("event_name", "")
-        event_data = params.get("event_data", {})
+        self._processes[process.pid] = process
 
-        if not event_name:
-            return ActionResult(success=False, message="event_name is required")
-
-        triggered_tasks = []
-
-        for task_id, task in self._tasks.items():
-            if not task.enabled:
-                continue
-
-            if task.trigger_type != TriggerType.EVENT:
-                continue
-
-            if task.trigger_config.get("event_name") == event_name:
-                result = self._run_task({
-                    "task_id": task_id,
-                    "trigger_data": {**event_data, "_event_name": event_name}
-                })
-
-                if result.success:
-                    triggered_tasks.append({
-                        "task_id": task_id,
-                        "name": task.name,
-                        "execution_id": result.data.get("execution_id"),
-                    })
-
-        return ActionResult(
-            success=True,
-            message=f"Event triggered {len(triggered_tasks)} tasks",
-            data={"triggered_tasks": triggered_tasks}
+        import os
+        name = command if isinstance(command, str) else command[0]
+        self._process_info[process.pid] = ProcessInfo(
+            pid=process.pid,
+            name=name,
+            command=str(command),
+            started_at=time.time(),
         )
 
-    def _delete_task(self, params: Dict[str, Any]) -> ActionResult:
-        """Delete a task."""
-        task_id = params.get("task_id", "")
+        return process.pid
 
-        if task_id not in self._tasks:
-            return ActionResult(success=False, message=f"Task not found: {task_id}")
+    def wait(
+        self,
+        pid: int,
+        timeout: Optional[float] = None,
+    ) -> Optional[ProcessResult]:
+        """
+        Wait for a process to complete.
 
-        del self._tasks[task_id]
+        Args:
+            pid: Process ID
+            timeout: Timeout in seconds
 
-        if task_id in self._schedules:
-            del self._schedules[task_id]
+        Returns:
+            ProcessResult or None if process not found
+        """
+        if pid not in self._processes:
+            return None
 
-        return ActionResult(success=True, message=f"Task deleted: {task_id}")
+        process = self._processes[pid]
+        timeout = timeout or self.config.default_timeout
 
-    def _build_schedule(self, schedule_data: Dict[str, Any]) -> Schedule:
-        """Build a Schedule from data."""
-        schedule_type_str = schedule_data.get("type", "once")
+        start_time = time.time()
 
         try:
-            schedule_type = ScheduleType(schedule_type_str)
-        except ValueError:
-            schedule_type = ScheduleType.ONCE
+            returncode = process.wait(timeout=timeout)
+            stdout, stderr = process.communicate() if hasattr(process, 'communicate') else ("", "")
+            duration = time.time() - start_time
 
-        return Schedule(
-            schedule_type=schedule_type,
-            start_time=schedule_data.get("start_time"),
-            end_time=schedule_data.get("end_time"),
-            interval_seconds=schedule_data.get("interval_seconds", 0),
-            cron_expression=schedule_data.get("cron_expression", ""),
-            max_runs=schedule_data.get("max_runs"),
-        )
+            del self._processes[pid]
+            if pid in self._process_info:
+                del self._process_info[pid]
 
-    def _evaluate_conditions(
-        self,
-        conditions: Dict[str, Any],
-        trigger_data: Dict[str, Any],
-    ) -> bool:
-        """Evaluate task conditions."""
-        condition_type = conditions.get("type", "always")
+            return ProcessResult(
+                returncode=returncode,
+                stdout=stdout or "",
+                stderr=stderr or "",
+                duration=duration,
+                state=ProcessState.COMPLETED if returncode == 0 else ProcessState.FAILED,
+            )
+        except subprocess.TimeoutExpired:
+            return ProcessResult(
+                returncode=-1,
+                stdout="",
+                stderr="Process timed out",
+                duration=timeout,
+                state=ProcessState.TIMEOUT,
+                timed_out=True,
+            )
+        except Exception as e:
+            logger.error(f"Wait failed: {e}")
+            return None
 
-        if condition_type == "always":
-            return True
-        elif condition_type == "never":
-            return False
-        elif condition_type == "expression":
-            expr = conditions.get("expression", "True")
+    def kill(self, pid: int) -> bool:
+        """
+        Kill a process.
+
+        Args:
+            pid: Process ID
+
+        Returns:
+            True if successful
+        """
+        if pid in self._processes:
             try:
-                context = {"data": trigger_data}
-                return eval(expr, {"__builtins__": {}}, context)
-            except Exception:
-                return False
-        elif condition_type == "data_match":
-            field_name = conditions.get("field")
-            expected_value = conditions.get("value")
-            operator = conditions.get("operator", "eq")
+                self._processes[pid].kill()
+                self._processes[pid].wait()
+                del self._processes[pid]
+                if pid in self._process_info:
+                    self._process_info[pid].state = ProcessState.CANCELLED
+                    del self._process_info[pid]
+                return True
+            except Exception as e:
+                logger.error(f"Kill failed: {e}")
 
-            actual_value = trigger_data.get(field_name)
+        return False
 
-            if operator == "eq":
-                return actual_value == expected_value
-            elif operator == "ne":
-                return actual_value != expected_value
-            elif operator == "gt":
-                return actual_value > expected_value
-            elif operator == "lt":
-                return actual_value < expected_value
-            elif operator == "in":
-                return actual_value in expected_value
+    def is_running(self, pid: int) -> bool:
+        """Check if process is running."""
+        if pid in self._processes:
+            return self._processes[pid].poll() is None
+        return False
 
-        return True
+    def get_process_info(self, pid: int) -> Optional[ProcessInfo]:
+        """Get process information."""
+        return self._process_info.get(pid)
 
-    def _notify(self, task: ProcessTask, execution: ProcessExecution, status: str) -> None:
-        """Send notifications for task completion."""
-        if status not in task.notifications:
-            return
+    def list_processes(self) -> List[ProcessInfo]:
+        """List all tracked processes."""
+        return list(self._process_info.values())
 
-        for channel in task.notifications[status]:
-            if channel == "log":
-                pass
+    def run_pipeline(
+        self,
+        commands: List[Union[str, List[str]]],
+        timeout: Optional[float] = None,
+    ) -> List[ProcessResult]:
+        """
+        Run a pipeline of commands.
 
-    def _generate_task_id(self, name: str) -> str:
-        """Generate a unique task ID."""
-        raw = f"{name}:{time.time()}"
-        return f"task_{hashlib.sha1(raw.encode()).hexdigest()[:10]}"
+        Args:
+            commands: List of commands to run in sequence
+            timeout: Timeout per command
 
-    def _generate_execution_id(self) -> str:
-        """Generate a unique execution ID."""
-        return f"exec_{hashlib.sha1(str(time.time_ns()).encode()).hexdigest()[:12]}"
+        Returns:
+            List of ProcessResult for each command
+        """
+        results = []
 
-    def get_task_statistics(self) -> Dict[str, Any]:
-        """Get statistics about tasks and executions."""
-        total_tasks = len(self._tasks)
-        enabled_tasks = sum(1 for t in self._tasks.values() if t.enabled)
+        for cmd in commands:
+            result = self.run(cmd, timeout=timeout)
+            results.append(result)
 
-        by_trigger: Dict[str, int] = {}
-        for task in self._tasks.values():
-            trigger = task.trigger_type.value
-            by_trigger[trigger] = by_trigger.get(trigger, 0) + 1
+            if result.state == ProcessState.FAILED:
+                break
 
-        total_executions = len(self._executions)
-        by_status: Dict[str, int] = {}
-        for exec_data in self._executions.values():
-            status = exec_data.status.value
-            by_status[status] = by_status.get(status, 0) + 1
+        return results
 
-        return {
-            "total_tasks": total_tasks,
-            "enabled_tasks": enabled_tasks,
-            "by_trigger": by_trigger,
-            "total_executions": total_executions,
-            "by_status": by_status,
-        }
+    def run_parallel(
+        self,
+        commands: List[Union[str, List[str]]],
+        timeout: Optional[float] = None,
+    ) -> List[ProcessResult]:
+        """
+        Run multiple commands in parallel.
 
-    def register_listener(self, event: str, listener: Callable) -> None:
-        """Register a listener for automation events."""
-        if event not in self._listeners:
-            self._listeners[event] = []
-        self._listeners[event].append(listener)
+        Args:
+            commands: List of commands to run
+            timeout: Timeout per command
+
+        Returns:
+            List of ProcessResult for each command
+        """
+        pids = [self.start(cmd) for cmd in commands]
+
+        results = []
+        for pid in pids:
+            result = self.wait(pid, timeout=timeout)
+            if result:
+                results.append(result)
+            else:
+                results.append(ProcessResult(
+                    returncode=-1,
+                    stdout="",
+                    stderr="Process not found",
+                    duration=0,
+                    state=ProcessState.FAILED,
+                ))
+
+        return results
+
+    def shell(self, command: str, timeout: Optional[float] = None) -> ProcessResult:
+        """
+        Run a shell command.
+
+        Args:
+            command: Shell command string
+            timeout: Timeout in seconds
+
+        Returns:
+            ProcessResult
+        """
+        return self.run(command, shell=True, timeout=timeout)
+
+
+def create_process_automation(
+    config: Optional[ProcessConfig] = None,
+) -> ProcessAutomation:
+    """Factory function to create a ProcessAutomation instance."""
+    return ProcessAutomation(config=config)
