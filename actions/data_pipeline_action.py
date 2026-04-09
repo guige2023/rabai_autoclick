@@ -1,234 +1,161 @@
-"""Data pipeline for processing API responses.
+"""Data Pipeline Action Module.
 
-This module provides data pipeline capabilities:
-- Chained data transformations
-- Parallel processing branches
-- Error handling and recovery
-- Pipeline monitoring
-
-Example:
-    >>> from actions.data_pipeline_action import DataPipeline
-    >>> pipeline = DataPipeline()
-    >>> pipeline.add_step(transform_func).add_step(filter_func)
-    >>> result = pipeline.execute(input_data)
+Composable data processing pipeline with parallel execution support.
 """
 
 from __future__ import annotations
 
-import time
-import logging
-import threading
-from typing import Any, Callable, Optional
+import asyncio
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from collections import deque
+from enum import Enum
+from typing import Any, Callable, Generic, TypeVar
 
-logger = logging.getLogger(__name__)
-
-
-@dataclass
-class PipelineStep:
-    """A single step in a data pipeline."""
-    name: str
-    func: Callable[[Any], Any]
-    args: tuple[Any, ...] = field(default_factory=tuple)
-    kwargs: dict[str, Any] = field(default_factory=dict)
-    error_handler: Optional[Callable[[Exception, Any], Any]] = None
+T = TypeVar("T")
+R = TypeVar("R")
 
 
-@dataclass
-class PipelineResult:
-    """Result of pipeline execution."""
-    success: bool
-    data: Any
-    steps_executed: list[str] = field(default_factory=list)
-    duration: float = 0.0
-    error: Optional[str] = None
+class PipelineStatus(Enum):
+    """Pipeline execution status."""
+    IDLE = "idle"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
-@dataclass
-class StepMetrics:
-    """Metrics for a pipeline step."""
-    name: str
-    invocations: int = 0
-    total_duration: float = 0.0
-    failures: int = 0
-    last_execution: Optional[float] = None
+class PipelineStage(ABC, Generic[T, R]):
+    """Abstract base class for pipeline stages."""
 
-
-class DataPipeline:
-    """Data processing pipeline with chained transformations.
-
-    Attributes:
-        name: Pipeline name for logging.
-    """
-
-    def __init__(self, name: str = "pipeline") -> None:
+    def __init__(self, name: str) -> None:
         self.name = name
-        self._steps: deque[PipelineStep] = deque()
-        self._metrics: dict[str, StepMetrics] = {}
-        self._lock = threading.RLock()
 
-    def add_step(
-        self,
-        func: Callable[[Any], Any],
-        name: Optional[str] = None,
-        *args: Any,
-        error_handler: Optional[Callable[[Exception, Any], Any]] = None,
-        **kwargs: Any,
-    ) -> DataPipeline:
-        """Add a transformation step to the pipeline.
+    @abstractmethod
+    async def process(self, input_data: T) -> R:
+        """Process input and return output."""
+        pass
 
-        Args:
-            func: Transformation function.
-            name: Step name (defaults to function name).
-            *args: Additional positional arguments for the function.
-            error_handler: Optional error handler for this step.
-            **kwargs: Additional keyword arguments for the function.
+    async def validate(self, input_data: Any) -> bool:
+        """Validate input data. Override for custom validation."""
+        return input_data is not None
 
-        Returns:
-            Self for chaining.
-        """
-        step_name = name or func.__name__
-        step = PipelineStep(
-            name=step_name,
-            func=func,
-            args=args,
-            kwargs=kwargs,
-            error_handler=error_handler,
+
+@dataclass
+class PipelineStats:
+    """Statistics for pipeline execution."""
+    stages_executed: int = 0
+    total_processing_time: float = 0.0
+    errors: list[str] = field(default_factory=list)
+
+
+class Pipeline:
+    """Data processing pipeline."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.stages: list[PipelineStage] = []
+        self.status = PipelineStatus.IDLE
+        self.stats = PipelineStats()
+        self._cancel_event = asyncio.Event()
+
+    def add_stage(self, stage: PipelineStage[T, R]) -> Pipeline:
+        """Add a stage to the pipeline. Returns self for chaining."""
+        self.stages.append(stage)
+        return self
+
+    def add_stage_func(self, name: str, func: Callable[[T], R | asyncio.coroutine]) -> Pipeline:
+        """Add a function as a pipeline stage."""
+        async def wrapper(input_data: T) -> R:
+            if asyncio.iscoroutinefunction(func):
+                return await func(input_data)
+            return func(input_data)
+        wrapper.__name__ = name
+        stage = PipelineStage(name)
+        stage.process = wrapper
+        self.stages.append(stage)
+        return self
+
+    async def execute(self, input_data: T) -> Any:
+        """Execute pipeline on input data."""
+        self.status = PipelineStatus.RUNNING
+        self.stats = PipelineStats()
+        current = input_data
+        import time
+        start_time = time.monotonic()
+        try:
+            for i, stage in enumerate(self.stages):
+                if self._cancel_event.is_set():
+                    self.status = PipelineStatus.CANCELLED
+                    return None
+                if not await stage.validate(current):
+                    raise ValueError(f"Validation failed at stage {i}: {stage.name}")
+                current = await stage.process(current)
+                self.stats.stages_executed += 1
+            self.status = PipelineStatus.COMPLETED
+            self.stats.total_processing_time = time.monotonic() - start_time
+            return current
+        except Exception as e:
+            self.status = PipelineStatus.FAILED
+            self.stats.errors.append(str(e))
+            self.stats.total_processing_time = time.monotonic() - start_time
+            raise
+        finally:
+            if self.status == PipelineStatus.RUNNING:
+                self.status = PipelineStatus.COMPLETED
+
+    def cancel(self) -> None:
+        """Cancel pipeline execution."""
+        self._cancel_event.set()
+
+
+class ParallelPipeline:
+    """Pipeline with parallel stage execution branches."""
+
+    def __init__(self, name: str, max_workers: int = 4) -> None:
+        self.name = name
+        self.branches: list[Pipeline] = []
+        self.max_workers = max_workers
+        self.status = PipelineStatus.IDLE
+
+    def add_branch(self, pipeline: Pipeline) -> ParallelPipeline:
+        """Add a parallel branch."""
+        self.branches.append(pipeline)
+        return self
+
+    async def execute(self, input_data: Any) -> list[Any]:
+        """Execute all branches in parallel."""
+        self.status = PipelineStatus.RUNNING
+        if not self.branches:
+            return []
+        semaphore = asyncio.Semaphore(self.max_workers)
+        async def run_branch(branch: Pipeline, data: Any) -> Any:
+            async with semaphore:
+                return await branch.execute(data)
+        results = await asyncio.gather(
+            *[run_branch(branch, input_data) for branch in self.branches],
+            return_exceptions=True
         )
-        self._steps.append(step)
-        with self._lock:
-            if step_name not in self._metrics:
-                self._metrics[step_name] = StepMetrics(name=step_name)
-        logger.debug(f"Added step to pipeline '{self.name}': {step_name}")
-        return self
-
-    def execute(self, data: Any) -> PipelineResult:
-        """Execute the pipeline on input data.
-
-        Args:
-            data: Input data to process.
-
-        Returns:
-            PipelineResult with output and metadata.
-        """
-        start_time = time.time()
-        current_data = data
-        steps_executed: list[str] = []
-
-        for step in self._steps:
-            try:
-                step_start = time.time()
-                current_data = step.func(current_data, *step.args, **step.kwargs)
-                step_duration = time.time() - step_start
-                steps_executed.append(step.name)
-                self._record_step_metric(step.name, step_duration, success=True)
-                logger.debug(f"Pipeline step '{step.name}' completed in {step_duration:.3f}s")
-            except Exception as e:
-                self._record_step_metric(step.name, 0, success=False)
-                logger.error(f"Pipeline step '{step.name}' failed: {e}")
-                if step.error_handler:
-                    try:
-                        current_data = step.error_handler(e, current_data)
-                    except Exception as handler_error:
-                        return PipelineResult(
-                            success=False,
-                            data=current_data,
-                            steps_executed=steps_executed,
-                            duration=time.time() - start_time,
-                            error=f"{type(e).__name__}: {e}",
-                        )
-                else:
-                    return PipelineResult(
-                        success=False,
-                        data=current_data,
-                        steps_executed=steps_executed,
-                        duration=time.time() - start_time,
-                        error=f"{type(e).__name__}: {e}",
-                    )
-
-        return PipelineResult(
-            success=True,
-            data=current_data,
-            steps_executed=steps_executed,
-            duration=time.time() - start_time,
-        )
-
-    def _record_step_metric(
-        self,
-        step_name: str,
-        duration: float,
-        success: bool,
-    ) -> None:
-        """Record metrics for a step execution."""
-        with self._lock:
-            if step_name not in self._metrics:
-                self._metrics[step_name] = StepMetrics(name=step_name)
-            metrics = self._metrics[step_name]
-            metrics.invocations += 1
-            metrics.total_duration += duration
-            metrics.last_execution = time.time()
-            if not success:
-                metrics.failures += 1
-
-    def get_metrics(self) -> dict[str, Any]:
-        """Get pipeline metrics."""
-        with self._lock:
-            return {
-                "pipeline": self.name,
-                "total_steps": len(self._steps),
-                "steps": {
-                    name: {
-                        "invocations": m.invocations,
-                        "avg_duration": m.total_duration / m.invocations if m.invocations else 0,
-                        "failures": m.failures,
-                        "last_execution": m.last_execution,
-                    }
-                    for name, m in self._metrics.items()
-                },
-            }
-
-    def clear(self) -> None:
-        """Remove all steps from the pipeline."""
-        self._steps.clear()
-        logger.debug(f"Pipeline '{self.name}' cleared")
+        self.status = PipelineStatus.COMPLETED
+        return results
 
 
-class PipelineBuilder:
-    """Builder for constructing pipelines with shared context."""
+class DataTransformStage(PipelineStage):
+    """Stage that applies a transformation function."""
 
-    def __init__(self, name: str = "pipeline") -> None:
-        self.pipeline = DataPipeline(name=name)
-        self._context: dict[str, Any] = {}
+    def __init__(self, name: str, transform: Callable[[T], R]) -> None:
+        super().__init__(name)
+        self.transform = transform
 
-    def add_step(
-        self,
-        func: Callable[[Any, dict[str, Any]], Any],
-        name: Optional[str] = None,
-    ) -> PipelineBuilder:
-        """Add a step with access to shared context.
+    async def process(self, input_data: T) -> R:
+        return self.transform(input_data)
 
-        Args:
-            func: Function that receives (data, context).
-            name: Optional step name.
 
-        Returns:
-            Self for chaining.
-        """
-        def wrapper(data: Any, *args: Any, **kwargs: Any) -> Any:
-            return func(data, self._context, *args, **kwargs)
-        self.pipeline.add_step(wrapper, name=name)
-        return self
+class DataFilterStage(PipelineStage):
+    """Stage that filters data based on predicate."""
 
-    def set_context(self, key: str, value: Any) -> PipelineBuilder:
-        """Set a shared context value."""
-        self._context[key] = value
-        return self
+    def __init__(self, name: str, predicate: Callable[[T], bool]) -> None:
+        super().__init__(name)
+        self.predicate = predicate
 
-    def execute(self, data: Any) -> PipelineResult:
-        """Execute the pipeline."""
-        return self.pipeline.execute(data)
-
-    def get_context(self) -> dict[str, Any]:
-        """Get shared context."""
-        return self._context
+    async def process(self, input_data: list[T]) -> list[T]:
+        return [item for item in input_data if self.predicate(item)]

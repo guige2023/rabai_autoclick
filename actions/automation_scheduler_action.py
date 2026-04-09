@@ -1,305 +1,177 @@
-"""Automation scheduling action module for RabAI AutoClick.
+"""Automation Scheduler Action Module.
 
-Provides scheduling operations:
-- CronScheduleAction: Cron-based scheduling
-- IntervalScheduleAction: Interval-based scheduling
-- CalendarScheduleAction: Calendar-based scheduling
-- ScheduleManagerAction: Manage scheduled tasks
+Schedule and execute automation tasks with cron-like support.
 """
 
-import sys
-import os
-import time
-import logging
-from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta
+from __future__ import annotations
+
+import asyncio
+import croniter
 from dataclasses import dataclass, field
-import threading
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Callable, Any
+import time
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
 
-logger = logging.getLogger(__name__)
+class ScheduleType(Enum):
+    """Type of schedule."""
+    ONCE = "once"
+    CRON = "cron"
+    INTERVAL = "interval"
+    IMMEDIATE = "immediate"
+
+
+@dataclass
+class Schedule:
+    """Schedule definition."""
+    schedule_type: ScheduleType
+    cron_expression: str | None = None
+    interval_seconds: float | None = None
+    run_at: datetime | None = None
 
 
 @dataclass
 class ScheduledTask:
-    """Represents a scheduled automation task."""
+    """A scheduled automation task."""
     task_id: str
     name: str
-    action_type: str
-    params: Dict[str, Any]
-    schedule_type: str
-    schedule_value: str
+    schedule: Schedule
+    func: Callable
+    args: tuple = field(default_factory=tuple)
+    kwargs: dict = field(default_factory=dict)
     enabled: bool = True
-    last_run: Optional[datetime] = None
-    next_run: Optional[datetime] = None
+    last_run: datetime | None = None
+    next_run: datetime | None = None
     run_count: int = 0
     error_count: int = 0
 
 
-class ScheduleRegistry:
-    """Registry for scheduled tasks."""
-    
-    _instance = None
-    _lock = threading.Lock()
-
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-                    cls._instance._tasks = {}
-                    cls._instance._running = False
-        return cls._instance
-
-    def add_task(self, task: ScheduledTask) -> None:
-        self._tasks[task.task_id] = task
-
-    def remove_task(self, task_id: str) -> bool:
-        if task_id in self._tasks:
-            del self._tasks[task_id]
-            return True
-        return False
-
-    def get_task(self, task_id: str) -> Optional[ScheduledTask]:
-        return self._tasks.get(task_id)
-
-    def list_tasks(self, enabled: Optional[bool] = None) -> List[ScheduledTask]:
-        tasks = list(self._tasks.values())
-        if enabled is not None:
-            tasks = [t for t in tasks if t.enabled == enabled]
-        return tasks
-
-    def update_next_run(self, task_id: str, next_run: datetime) -> None:
-        task = self.get_task(task_id)
-        if task:
-            task.next_run = next_run
+class TaskExecutionError(Exception):
+    """Raised when task execution fails."""
+    pass
 
 
-_registry = ScheduleRegistry()
+class AutomationScheduler:
+    """Scheduler for automation tasks."""
 
+    def __init__(self) -> None:
+        self.tasks: dict[str, ScheduledTask] = {}
+        self._running = False
+        self._task_handle: asyncio.Task | None = None
+        self._lock = asyncio.Lock()
 
-def parse_cron(cron_expr: str) -> Dict[str, int]:
-    """Parse a simple cron expression (min hour day month dow)."""
-    parts = cron_expr.split()
-    if len(parts) != 5:
-        raise ValueError("Cron expression must have 5 fields")
-    return {
-        "minute": int(parts[0]) if parts[0] != "*" else -1,
-        "hour": int(parts[1]) if parts[1] != "*" else -1,
-        "day": int(parts[2]) if parts[2] != "*" else -1,
-        "month": int(parts[3]) if parts[3] != "*" else -1,
-        "dow": int(parts[4]) if parts[4] != "*" else -1
-    }
-
-
-def get_next_cron_run(cron_expr: str, from_time: Optional[datetime] = None) -> datetime:
-    """Calculate next run time from cron expression."""
-    parts = parse_cron(cron_expr)
-    dt = from_time or datetime.now()
-    for _ in range(366 * 24 * 60):
-        dt += timedelta(minutes=1)
-        match = True
-        if parts["minute"] != -1 and dt.minute != parts["minute"]:
-            match = False
-        if parts["hour"] != -1 and dt.hour != parts["hour"]:
-            match = False
-        if parts["day"] != -1 and dt.day != parts["day"]:
-            match = False
-        if parts["month"] != -1 and dt.month != parts["month"]:
-            match = False
-        if parts["dow"] != -1 and dt.weekday() != parts["dow"]:
-            match = False
-        if match:
-            return dt
-    raise RuntimeError("Could not find next cron run in 1 year")
-
-
-class CronScheduleAction(BaseAction):
-    """Schedule a task using cron expression."""
-    action_type = "automation_cron_schedule"
-    display_name = "Cron定时调度"
-    description = "使用Cron表达式调度自动化任务"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        task_id = params.get("task_id", "")
-        name = params.get("name", "")
-        action_type = params.get("action_type", "")
-        cron_expr = params.get("cron_expr", "")
-        params_dict = params.get("params", {})
-
-        if not task_id or not name or not cron_expr:
-            return ActionResult(success=False, message="task_id、name和cron_expr都是必需的")
-
-        try:
-            next_run = get_next_cron_run(cron_expr)
-        except ValueError as e:
-            return ActionResult(success=False, message=f"Cron表达式错误: {e}")
-
-        task = ScheduledTask(
-            task_id=task_id,
-            name=name,
-            action_type=action_type,
-            params=params_dict,
-            schedule_type="cron",
-            schedule_value=cron_expr,
-            next_run=next_run
-        )
-        _registry.add_task(task)
-
-        return ActionResult(
-            success=True,
-            message=f"任务 {name} 已调度，下次于 {next_run.strftime('%Y-%m-%d %H:%M')}",
-            data={"task_id": task_id, "next_run": next_run.isoformat()}
-        )
-
-
-class IntervalScheduleAction(BaseAction):
-    """Schedule a task using interval."""
-    action_type = "automation_interval_schedule"
-    display_name = "间隔定时调度"
-    description = "使用固定间隔调度自动化任务"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        task_id = params.get("task_id", "")
-        name = params.get("name", "")
-        action_type = params.get("action_type", "")
-        interval_seconds = params.get("interval_seconds", 60)
-        params_dict = params.get("params", {})
-
-        if not task_id or not name:
-            return ActionResult(success=False, message="task_id和name是必需的")
-
-        valid, msg = self.validate_positive(interval_seconds, "interval_seconds", allow_zero=False)
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        next_run = datetime.now() + timedelta(seconds=interval_seconds)
-        task = ScheduledTask(
-            task_id=task_id,
-            name=name,
-            action_type=action_type,
-            params=params_dict,
-            schedule_type="interval",
-            schedule_value=str(interval_seconds),
-            next_run=next_run
-        )
-        _registry.add_task(task)
-
-        return ActionResult(
-            success=True,
-            message=f"任务 {name} 已调度，间隔 {interval_seconds}秒",
-            data={"task_id": task_id, "next_run": next_run.isoformat()}
-        )
-
-
-class CalendarScheduleAction(BaseAction):
-    """Schedule a task using calendar dates."""
-    action_type = "automation_calendar_schedule"
-    display_name = "日历定时调度"
-    description = "使用日历日期调度自动化任务"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        task_id = params.get("task_id", "")
-        name = params.get("name", "")
-        action_type = params.get("action_type", "")
-        run_times = params.get("run_times", [])
-        params_dict = params.get("params", {})
-
-        if not task_id or not name or not run_times:
-            return ActionResult(success=False, message="task_id、name和run_times是必需的")
-
-        if not isinstance(run_times, list):
-            return ActionResult(success=False, message="run_times必须是时间字符串列表")
-
-        next_run = None
-        now = datetime.now()
-        for rt in run_times:
-            try:
-                dt = datetime.strptime(rt, "%Y-%m-%d %H:%M")
-                if dt > now:
-                    if next_run is None or dt < next_run:
-                        next_run = dt
-            except ValueError:
-                continue
-
-        if next_run is None:
-            return ActionResult(success=False, message="没有找到有效的未来运行时间")
-
-        task = ScheduledTask(
-            task_id=task_id,
-            name=name,
-            action_type=action_type,
-            params=params_dict,
-            schedule_type="calendar",
-            schedule_value=",".join(run_times),
-            next_run=next_run
-        )
-        _registry.add_task(task)
-
-        return ActionResult(
-            success=True,
-            message=f"任务 {name} 已调度，首次运行于 {next_run.strftime('%Y-%m-%d %H:%M')}",
-            data={"task_id": task_id, "next_run": next_run.isoformat()}
-        )
-
-
-class ScheduleManagerAction(BaseAction):
-    """Manage scheduled tasks (list, cancel, pause, resume)."""
-    action_type = "automation_schedule_manager"
-    display_name = "调度任务管理"
-    description = "管理已调度的自动化任务"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        operation = params.get("operation", "list")
-        task_id = params.get("task_id", "")
-
-        if operation == "list":
-            enabled_only = params.get("enabled_only", False)
-            tasks = _registry.list_tasks(enabled=None if not enabled_only else True)
-            result = [
-                {
-                    "task_id": t.task_id,
-                    "name": t.name,
-                    "schedule_type": t.schedule_type,
-                    "schedule_value": t.schedule_value,
-                    "enabled": t.enabled,
-                    "next_run": t.next_run.isoformat() if t.next_run else None,
-                    "last_run": t.last_run.isoformat() if t.last_run else None,
-                    "run_count": t.run_count
-                }
-                for t in tasks
-            ]
-            return ActionResult(
-                success=True,
-                message=f"找到 {len(result)} 个调度任务",
-                data={"tasks": result}
+    async def add_task(
+        self,
+        task_id: str,
+        name: str,
+        schedule: Schedule,
+        func: Callable,
+        *args,
+        **kwargs
+    ) -> ScheduledTask:
+        """Add a task to the scheduler."""
+        async with self._lock:
+            task = ScheduledTask(
+                task_id=task_id,
+                name=name,
+                schedule=schedule,
+                func=func,
+                args=args,
+                kwargs=kwargs
             )
+            task.next_run = self._calculate_next_run(task)
+            self.tasks[task_id] = task
+            return task
 
-        if not task_id:
-            return ActionResult(success=False, message="operation为list时不需要task_id，其他操作需要")
+    def _calculate_next_run(self, task: ScheduledTask) -> datetime | None:
+        """Calculate next run time for a task."""
+        now = datetime.now(timezone.utc)
+        stype = task.schedule.schedule_type
+        if stype == ScheduleType.IMMEDIATE:
+            return now
+        if stype == ScheduleType.ONCE and task.schedule.run_at:
+            return task.schedule.run_at
+        if stype == ScheduleType.INTERVAL:
+            if task.last_run:
+                from datetime import timedelta
+                return task.last_run + timedelta(seconds=task.schedule.interval_seconds or 0)
+            return now
+        if stype == ScheduleType.CRON and task.schedule.cron_expression:
+            try:
+                cron = croniter.croniter(task.schedule.cron_expression, now)
+                return cron.get_next(datetime)
+            except Exception:
+                return None
+        return None
 
-        task = _registry.get_task(task_id)
-        if not task:
-            return ActionResult(success=False, message=f"任务 {task_id} 不存在")
+    async def remove_task(self, task_id: str) -> bool:
+        """Remove a task from scheduler."""
+        async with self._lock:
+            if task_id in self.tasks:
+                del self.tasks[task_id]
+                return True
+            return False
 
-        if operation == "cancel":
-            _registry.remove_task(task_id)
-            return ActionResult(success=True, message=f"任务 {task_id} 已取消")
+    async def enable_task(self, task_id: str) -> bool:
+        """Enable a task."""
+        async with self._lock:
+            if task_id in self.tasks:
+                self.tasks[task_id].enabled = True
+                return True
+            return False
 
-        if operation == "pause":
-            task.enabled = False
-            return ActionResult(success=True, message=f"任务 {task_id} 已暂停")
+    async def disable_task(self, task_id: str) -> bool:
+        """Disable a task."""
+        async with self._lock:
+            if task_id in self.tasks:
+                self.tasks[task_id].enabled = False
+                return True
+            return False
 
-        if operation == "resume":
-            task.enabled = True
-            if task.schedule_type == "cron":
-                task.next_run = get_next_cron_run(task.schedule_value)
-            elif task.schedule_type == "interval":
-                interval = float(task.schedule_value)
-                task.next_run = datetime.now() + timedelta(seconds=interval)
-            return ActionResult(success=True, message=f"任务 {task_id} 已恢复")
+    async def execute_task(self, task: ScheduledTask) -> Any:
+        """Execute a single task."""
+        try:
+            if asyncio.iscoroutinefunction(task.func):
+                result = await task.func(*task.args, **task.kwargs)
+            else:
+                result = task.func(*task.args, **task.kwargs)
+            task.last_run = datetime.now(timezone.utc)
+            task.run_count += 1
+            return result
+        except Exception as e:
+            task.error_count += 1
+            raise TaskExecutionError(f"Task {task.task_id} failed: {e}") from e
 
-        return ActionResult(success=False, message=f"未知操作: {operation}")
+    async def _run_loop(self) -> None:
+        """Main scheduler loop."""
+        while self._running:
+            now = datetime.now(timezone.utc)
+            async with self._lock:
+                for task in list(self.tasks.values()):
+                    if not task.enabled:
+                        continue
+                    if task.next_run and now >= task.next_run:
+                        asyncio.create_task(self.execute_task(task))
+                        task.next_run = self._calculate_next_run(task)
+            await asyncio.sleep(1)
+
+    async def start(self) -> None:
+        """Start the scheduler."""
+        self._running = True
+        self._task_handle = asyncio.create_task(self._run_loop())
+
+    async def stop(self) -> None:
+        """Stop the scheduler."""
+        self._running = False
+        if self._task_handle:
+            self._task_handle.cancel()
+            try:
+                await self._task_handle
+            except asyncio.CancelledError:
+                pass
+
+    def get_pending_tasks(self) -> list[ScheduledTask]:
+        """Get list of tasks ready to run."""
+        now = datetime.now(timezone.utc)
+        return [t for t in self.tasks.values() if t.enabled and t.next_run and now >= t.next_run]

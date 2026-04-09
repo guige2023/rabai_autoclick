@@ -1,282 +1,156 @@
-"""Data serialization and deserialization utilities.
+"""Data Serializer Action Module.
 
-This module provides serialization support for:
-- Multiple formats (JSON, CSV, XML, YAML)
-- Schema validation during deserialization
-- Custom type handling
-- Streaming serialization
-
-Example:
-    >>> from actions.data_serializer_action import Serializer
-    >>> serializer = Serializer(format="json")
-    >>> data = serializer.deserialize(json_string)
+Serialize/deserialize data with support for multiple formats.
 """
 
 from __future__ import annotations
 
+import base64
 import json
-import csv
-import logging
-import io
-from typing import Any, Optional, Callable
-from dataclasses import dataclass
+import pickle
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, is_dataclass
+from datetime import datetime, timezone
 from enum import Enum
+from typing import Any, Generic, TypeVar
+import yaml
 
-logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 
 class SerializationFormat(Enum):
     """Supported serialization formats."""
     JSON = "json"
-    CSV = "csv"
-    XML = "xml"
     YAML = "yaml"
+    PICKLE = "pickle"
+    MSGPACK = "msgpack"
+    BASE64_JSON = "base64_json"
 
 
-@dataclass
-class SerializationOptions:
-    """Options for serialization."""
-    format: SerializationFormat = SerializationFormat.JSON
-    pretty: bool = False
-    include_none: bool = False
-    datetime_format: str = "iso"
-    custom_encoders: dict[type, Callable[[Any], Any]] = None
+class SerializerError(Exception):
+    """Serializer error."""
+    pass
 
 
-class Serializer:
-    """Serialize and deserialize data.
+class Serializer(ABC, Generic[T]):
+    """Abstract serializer interface."""
 
-    Attributes:
-        options: Serialization options.
-    """
+    @abstractmethod
+    def serialize(self, data: T) -> str | bytes:
+        """Serialize data to string or bytes."""
+        pass
 
-    def __init__(self, options: Optional[SerializationOptions] = None) -> None:
-        self.options = options or SerializationOptions()
+    @abstractmethod
+    def deserialize(self, data: str | bytes) -> T:
+        """Deserialize data from string or bytes."""
+        pass
+
+
+class JSONSerializer(Serializer[Any]):
+    """JSON serializer with datetime support."""
+
+    def __init__(self, indent: int | None = None, ensure_ascii: bool = False) -> None:
+        self.indent = indent
+        self.ensure_ascii = ensure_ascii
 
     def serialize(self, data: Any) -> str:
-        """Serialize data to string.
-
-        Args:
-            data: Data to serialize.
-
-        Returns:
-            Serialized string.
-
-        Raises:
-            ValueError: If format is unsupported.
-        """
-        if self.options.format == SerializationFormat.JSON:
-            return self._serialize_json(data)
-        elif self.options.format == SerializationFormat.CSV:
-            return self._serialize_csv(data)
-        elif self.options.format == SerializationFormat.XML:
-            return self._serialize_xml(data)
-        elif self.options.format == SerializationFormat.YAML:
-            return self._serialize_yaml(data)
-        else:
-            raise ValueError(f"Unsupported format: {self.options.format}")
-
-    def deserialize(self, data: str) -> Any:
-        """Deserialize string to data.
-
-        Args:
-            data: String to deserialize.
-
-        Returns:
-            Deserialized data.
-
-        Raises:
-            ValueError: If format is unsupported or parsing fails.
-        """
-        if self.options.format == SerializationFormat.JSON:
-            return self._deserialize_json(data)
-        elif self.options.format == SerializationFormat.CSV:
-            return self._deserialize_csv(data)
-        elif self.options.format == SerializationFormat.XML:
-            return self._deserialize_xml(data)
-        elif self.options.format == SerializationFormat.YAML:
-            return self._deserialize_yaml(data)
-        else:
-            raise ValueError(f"Unsupported format: {self.options.format}")
-
-    def _serialize_json(self, data: Any) -> str:
-        """Serialize to JSON."""
-        kwargs = {"indent": 2} if self.options.pretty else {}
-        return json.dumps(data, **kwargs)
-
-    def _deserialize_json(self, data: str) -> Any:
-        """Deserialize from JSON."""
-        return json.loads(data)
-
-    def _serialize_csv(self, data: Any) -> str:
-        """Serialize to CSV."""
-        if not isinstance(data, list):
-            data = [data]
-        if not data:
-            return ""
-        output = io.StringIO()
-        fieldnames = list(data[0].keys()) if isinstance(data[0], dict) else []
-        writer = csv.DictWriter(output, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in data:
-            if isinstance(row, dict):
-                writer.writerow(row)
-            else:
-                writer.writerow({})
-        return output.getvalue()
-
-    def _deserialize_csv(self, data: str) -> list[dict[str, Any]]:
-        """Deserialize from CSV."""
-        input_stream = io.StringIO(data)
-        reader = csv.DictReader(input_stream)
-        return list(reader)
-
-    def _serialize_xml(self, data: Any) -> str:
-        """Serialize to XML (basic implementation)."""
-        def to_xml(obj: Any, root: str = "root") -> str:
-            if isinstance(obj, dict):
-                items = "".join(f"<{k}>{to_xml(v, k)}</{k}>" for k, v in obj.items())
-                return f"<{root}>{items}</{root}>"
-            elif isinstance(obj, list):
-                items = "".join(f"<item>{to_xml(i, 'item')}</item>" for i in obj)
-                return f"<{root}>{items}</{root}>"
-            else:
-                return str(obj)
-        return to_xml(data, "data")
-
-    def _deserialize_xml(self, data: str) -> Any:
-        """Deserialize from XML (basic implementation)."""
-        import xml.etree.ElementTree as ET
-        root = ET.fromstring(data)
-        return self._xml_to_dict(root)
-
-    def _xml_to_dict(self, element) -> Any:
-        """Convert XML element to dict."""
-        result = {}
-        for child in element:
-            value = self._xml_to_dict(child)
-            if child.tag in result:
-                if not isinstance(result[child.tag], list):
-                    result[child.tag] = [result[child.tag]]
-                result[child.tag].append(value)
-            else:
-                result[child.tag] = value
-        if not result and element.text:
-            return element.text
-        return result
-
-    def _serialize_yaml(self, data: Any) -> str:
-        """Serialize to YAML."""
+        def default_handler(obj: Any) -> Any:
+            if isinstance(obj, datetime):
+                return {"__datetime__": True, "value": obj.isoformat()}
+            if isinstance(obj, bytes):
+                return {"__bytes__": True, "value": base64.b64encode(obj).decode()}
+            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
         try:
-            import yaml
-            return yaml.dump(data, default_flow_style=False)
-        except ImportError:
-            logger.warning("PyYAML not installed, falling back to JSON")
-            return self._serialize_json(data)
+            return json.dumps(data, indent=self.indent, ensure_ascii=self.ensure_ascii, default=default_handler)
+        except Exception as e:
+            raise SerializerError(f"JSON serialization failed: {e}") from e
 
-    def _deserialize_yaml(self, data: str) -> Any:
-        """Deserialize from YAML."""
+    def deserialize(self, data: str | bytes) -> Any:
+        def object_hook(obj: dict) -> Any:
+            if "__datetime__" in obj:
+                return datetime.fromisoformat(obj["value"])
+            if "__bytes__" in obj:
+                return base64.b64decode(obj["value"])
+            return obj
         try:
-            import yaml
+            return json.loads(data, object_hook=object_hook)
+        except Exception as e:
+            raise SerializerError(f"JSON deserialization failed: {e}") from e
+
+
+class YAMLSerializer(Serializer[Any]):
+    """YAML serializer."""
+
+    def __init__(self) -> None:
+        self._yaml = yaml.SafeDumper
+        self._yaml_add_representer(datetime, lambda dumper, dt: dumper.represent_scalar("tag:yaml.org,2002:timestamp", dt.isoformat()))
+
+    def serialize(self, data: Any) -> str:
+        try:
+            return yaml.dump(data, Dumper=self._yaml, default_flow_style=False, allow_unicode=True)
+        except Exception as e:
+            raise SerializerError(f"YAML serialization failed: {e}") from e
+
+    def deserialize(self, data: str | bytes) -> Any:
+        try:
             return yaml.safe_load(data)
-        except ImportError:
-            logger.warning("PyYAML not installed, falling back to JSON")
-            return self._deserialize_json(data)
+        except Exception as e:
+            raise SerializerError(f"YAML deserialization failed: {e}") from e
 
 
-class StreamingSerializer:
-    """Serialize large datasets in chunks."""
+class PickleSerializer(Serializer[Any]):
+    """Pickle serializer for Python objects."""
 
-    def __init__(self, chunk_size: int = 1000) -> None:
-        self.chunk_size = chunk_size
+    def __init__(self, protocol: int = pickle.HIGHEST_PROTOCOL) -> None:
+        self.protocol = protocol
 
-    def serialize_chunks(
-        self,
-        data: list[dict[str, Any]],
-        format: SerializationFormat = SerializationFormat.JSON,
-    ) -> list[str]:
-        """Serialize data in chunks.
+    def serialize(self, data: Any) -> bytes:
+        try:
+            return pickle.dumps(data, protocol=self.protocol)
+        except Exception as e:
+            raise SerializerError(f"Pickle serialization failed: {e}") from e
 
-        Args:
-            data: Data to serialize.
-            format: Output format.
-
-        Returns:
-            List of serialized chunks.
-        """
-        chunks = []
-        for i in range(0, len(data), self.chunk_size):
-            chunk = data[i:i + self.chunk_size]
-            serializer = Serializer(SerializationOptions(format=format))
-            chunks.append(serializer.serialize(chunk))
-        return chunks
-
-    def deserialize_chunks(
-        self,
-        chunks: list[str],
-        format: SerializationFormat = SerializationFormat.JSON,
-    ) -> list[Any]:
-        """Deserialize chunks into single dataset.
-
-        Args:
-            chunks: List of serialized chunks.
-            format: Input format.
-
-        Returns:
-            Combined deserialized data.
-        """
-        result = []
-        for chunk in chunks:
-            serializer = Serializer(SerializationOptions(format=format))
-            data = serializer.deserialize(chunk)
-            if isinstance(data, list):
-                result.extend(data)
-            else:
-                result.append(data)
-        return result
+    def deserialize(self, data: str | bytes) -> Any:
+        try:
+            return pickle.loads(data)
+        except Exception as e:
+            raise SerializerError(f"Pickle deserialization failed: {e}") from e
 
 
-def serialize(data: Any, format: str = "json", **kwargs: Any) -> str:
-    """Quick serialize function.
+class Base64JSONSerializer(Serializer[Any]):
+    """JSON serializer wrapped in base64."""
 
-    Args:
-        data: Data to serialize.
-        format: Format name.
-        **kwargs: Additional options.
+    def __init__(self) -> None:
+        self.json_serializer = JSONSerializer()
 
-    Returns:
-        Serialized string.
-    """
-    fmt_map = {
-        "json": SerializationFormat.JSON,
-        "csv": SerializationFormat.CSV,
-        "xml": SerializationFormat.XML,
-        "yaml": SerializationFormat.YAML,
+    def serialize(self, data: Any) -> str:
+        json_str = self.json_serializer.serialize(data)
+        return base64.b64encode(json_str.encode()).decode()
+
+    def deserialize(self, data: str | bytes) -> Any:
+        decoded = base64.b64decode(data.encode()).decode()
+        return self.json_serializer.deserialize(decoded)
+
+
+class SerializerFactory:
+    """Factory for creating serializers."""
+
+    _serializers: dict[SerializationFormat, type[Serializer]] = {
+        SerializationFormat.JSON: JSONSerializer,
+        SerializationFormat.YAML: YAMLSerializer,
+        SerializationFormat.PICKLE: PickleSerializer,
+        SerializationFormat.BASE64_JSON: Base64JSONSerializer,
     }
-    options = SerializationOptions(
-        format=fmt_map.get(format.lower(), SerializationFormat.JSON),
-        pretty=kwargs.get("pretty", False),
-    )
-    return Serializer(options).serialize(data)
 
+    @classmethod
+    def create(cls, format: SerializationFormat) -> Serializer:
+        """Create a serializer for the given format."""
+        serializer_class = cls._serializers.get(format)
+        if not serializer_class:
+            raise ValueError(f"Unknown format: {format}")
+        return serializer_class()
 
-def deserialize(data: str, format: str = "json") -> Any:
-    """Quick deserialize function.
-
-    Args:
-        data: String to deserialize.
-        format: Format name.
-
-    Returns:
-        Deserialized data.
-    """
-    fmt_map = {
-        "json": SerializationFormat.JSON,
-        "csv": SerializationFormat.CSV,
-        "xml": SerializationFormat.XML,
-        "yaml": SerializationFormat.YAML,
-    }
-    options = SerializationOptions(
-        format=fmt_map.get(format.lower(), SerializationFormat.JSON),
-    )
-    return Serializer(options).deserialize(data)
+    @classmethod
+    def register(cls, format: SerializationFormat, serializer_class: type[Serializer]) -> None:
+        """Register a custom serializer."""
+        cls._serializers[format] = serializer_class
