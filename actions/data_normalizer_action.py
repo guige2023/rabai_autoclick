@@ -1,225 +1,292 @@
-"""Data normalization and standardization action."""
+"""
+Data Normalizer Action Module.
 
-from __future__ import annotations
+Provides data normalization and transformation utilities including
+scaling, standardization, min-max normalization, and robust scaling.
+"""
 
-import re
-from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Sequence
+import math
+from typing import Optional, List, Dict, Any, Callable, Union
+from dataclasses import dataclass
+from enum import Enum
+import numpy as np
+
+
+class NormalizationMethod(Enum):
+    """Normalization method types."""
+    MIN_MAX = "min_max"
+    Z_SCORE = "z_score"
+    ROBUST = "robust"
+    LOG = "log"
+    LOG10 = "log10"
+    SQUARE_ROOT = "square_root"
+    MAX_ABS = "max_abs"
+    L2 = "l2"
 
 
 @dataclass
-class NormalizationConfig:
-    """Configuration for normalization."""
+class NormalizerConfig:
+    """Configuration for data normalization."""
+    method: NormalizationMethod = NormalizationMethod.MIN_MAX
+    feature_range: tuple = (0, 1)  # for MIN_MAX
+    robust_quantiles: tuple = (0.25, 0.75)  # for ROBUST
+    log_offset: float = 1.0  # offset for log normalization
+    epsilon: float = 1e-10  # small value to prevent division by zero
 
-    input_field: str
-    output_field: str
-    operation: str  # lowercase, uppercase, trim, strip_html, remove_special, normalize_whitespace, etc.
-    custom_func: Optional[Callable[[str], str]] = None
 
+class DataStatistics:
+    """Statistics for a data series."""
 
-@dataclass
-class NormalizationResult:
-    """Result of normalization."""
+    def __init__(self, data: List[float]):
+        self.data = data
+        self.n = len(data)
+        self.mean = sum(data) / self.n if self.n > 0 else 0
+        self.min_val = min(data) if self.n > 0 else 0
+        self.max_val = max(data) if self.n > 0 else 0
+        self.range = self.max_val - self.min_val
 
-    total_records: int
-    success_count: int
-    error_count: int
-    transformed_count: int
-    unchanged_count: int
+        # Calculate variance and std
+        if self.n > 0:
+            variance = sum((x - self.mean) ** 2 for x in data) / self.n
+            self.std = math.sqrt(variance)
+            self.var = variance
+        else:
+            self.std = 0
+            self.var = 0
+
+        # Median
+        sorted_data = sorted(data)
+        if self.n % 2 == 0:
+            self.median = (sorted_data[self.n // 2 - 1] + sorted_data[self.n // 2]) / 2
+        else:
+            self.median = sorted_data[self.n // 2]
+
+        # Quartiles for robust scaling
+        q1_idx = self.n // 4
+        q3_idx = 3 * self.n // 4
+        self.q1 = sorted_data[q1_idx] if self.n > 0 else 0
+        self.q3 = sorted_data[q3_idx] if self.n > 0 else 0
+        self.iqr = self.q3 - self.q1
 
 
 class DataNormalizerAction:
-    """Normalizes and standardizes data values."""
+    """
+    Data normalization and transformation action.
 
-    def __init__(self):
-        """Initialize normalizer."""
-        self._transformations: dict[str, Callable[[str], str]] = {
-            "lowercase": lambda s: s.lower() if s else "",
-            "uppercase": lambda s: s.upper() if s else "",
-            "titlecase": lambda s: s.title() if s else "",
-            "trim": lambda s: s.strip() if s else "",
-            "strip_html": self._strip_html,
-            "remove_special": self._remove_special_chars,
-            "normalize_whitespace": lambda s: " ".join(s.split()) if s else "",
-            "remove_digits": lambda s: re.sub(r"\d", "", s) if s else "",
-            "remove_alpha": lambda s: re.sub(r"[a-zA-Z]", "", s) if s else "",
-            "slugify": self._slugify,
-            "camel_to_snake": self._camel_to_snake,
-            "snake_to_camel": self._snake_to_camel,
-            "remove_punctuation": lambda s: re.sub(r"[^\w\s]", "", s) if s else "",
-            "remove_urls": lambda s: re.sub(r"https?://\S+", "", s) if s else "",
-            "remove_emails": lambda s: re.sub(r"\S+@\S+", "", s) if s else "",
-        }
+    Provides various normalization methods for preparing data
+    for machine learning or analysis pipelines.
+    """
 
-    def _strip_html(self, s: str) -> str:
-        """Remove HTML tags from string."""
-        return re.sub(r"<[^>]+>", "", s)
+    def __init__(self, config: Optional[NormalizerConfig] = None):
+        self.config = config or NormalizerConfig()
+        self._stats: Dict[str, DataStatistics] = {}
+        self._fitted = False
+        self._feature_range = self.config.feature_range
 
-    def _remove_special_chars(self, s: str) -> str:
-        """Remove special characters."""
-        return re.sub(r"[^a-zA-Z0-9\s]", "", s)
-
-    def _slugify(self, s: str) -> str:
-        """Convert string to URL-friendly slug."""
-        s = s.lower()
-        s = re.sub(r"[^\w\s-]", "", s)
-        s = re.sub(r"[-\s]+", "-", s)
-        return s.strip("-")
-
-    def _camel_to_snake(self, s: str) -> str:
-        """Convert camelCase to snake_case."""
-        s = re.sub("(.)([A-Z][a-z]+)", r"\1_\2", s)
-        return re.sub("([a-z0-9])([A-Z])", r"\1_\2", s).lower()
-
-    def _snake_to_camel(self, s: str) -> str:
-        """Convert snake_case to camelCase."""
-        components = s.split("_")
-        return components[0] + "".join(x.title() for x in components[1:])
-
-    def normalize_string(
-        self,
-        value: str,
-        operation: str,
-        custom_func: Optional[Callable[[str], str]] = None,
-    ) -> str:
-        """Normalize a single string.
+    def fit(self, data: Union[List[float], List[List[float]]]) -> "DataNormalizerAction":
+        """
+        Fit the normalizer to the data.
 
         Args:
-            value: Input string.
-            operation: Normalization operation name.
-            custom_func: Optional custom transformation function.
+            data: Training data for computing normalization parameters
 
         Returns:
-            Normalized string.
+            self for chaining
         """
-        if value is None:
-            return ""
+        if isinstance(data[0], (int, float)):
+            # 1D data
+            self._stats["default"] = DataStatistics(data)
+        else:
+            # 2D data (multiple features)
+            n_features = len(data[0])
+            for i in range(n_features):
+                feature_data = [row[i] for row in data]
+                self._stats[f"feature_{i}"] = DataStatistics(feature_data)
 
-        value = str(value)
+        self._fitted = True
+        return self
 
-        if custom_func:
-            return custom_func(value)
-
-        transform = self._transformations.get(operation)
-        if transform:
-            return transform(value)
-
-        return value
-
-    def normalize_phone(self, phone: str) -> str:
-        """Normalize phone number to digits only."""
-        if not phone:
-            return ""
-        return re.sub(r"\D", "", phone)
-
-    def normalize_email(self, email: str) -> str:
-        """Normalize email to lowercase and trim."""
-        if not email:
-            return ""
-        return email.lower().strip()
-
-    def normalize_url(self, url: str) -> str:
-        """Normalize URL."""
-        if not url:
-            return ""
-        url = url.strip()
-        if not url.startswith(("http://", "https://")):
-            url = "https://" + url
-        return url
-
-    def normalize_record(
-        self,
-        record: dict[str, Any],
-        config: NormalizationConfig,
-    ) -> tuple[dict[str, Any], bool]:
-        """Normalize a single record.
+    def transform(self, data: Union[List[float], List[List[float]]]) -> List[float]:
+        """
+        Transform data using fitted normalization.
 
         Args:
-            record: Input record.
-            config: Normalization configuration.
+            data: Data to normalize
 
         Returns:
-            Tuple of (normalized_record, was_changed).
+            Normalized data
         """
-        try:
-            value = record.get(config.input_field, "")
-            original = str(value) if value is not None else ""
+        if not self._fitted:
+            raise ValueError("Normalizer must be fitted before transform")
 
-            if config.custom_func:
-                normalized = config.custom_func(original)
-            else:
-                normalized = self.normalize_string(original, config.operation)
-
-            result = record.copy()
-            result[config.output_field] = normalized
-
-            return result, normalized != original
-
-        except Exception:
-            return record, False
-
-    def normalize_batch(
-        self,
-        records: Sequence[dict[str, Any]],
-        configs: list[NormalizationConfig],
-    ) -> NormalizationResult:
-        """Normalize a batch of records.
-
-        Args:
-            records: Input records.
-            configs: List of normalization configurations.
-
-        Returns:
-            NormalizationResult with statistics.
-        """
-        success_count = 0
-        error_count = 0
-        transformed_count = 0
-        unchanged_count = 0
-
-        for record in records:
-            try:
-                was_changed = False
-                for config in configs:
-                    record, changed = self.normalize_record(record, config)
-                    if changed:
-                        was_changed = True
-
-                if was_changed:
-                    transformed_count += 1
-                else:
-                    unchanged_count += 1
-                success_count += 1
-
-            except Exception:
-                error_count += 1
-
-        return NormalizationResult(
-            total_records=len(records),
-            success_count=success_count,
-            error_count=error_count,
-            transformed_count=transformed_count,
-            unchanged_count=unchanged_count,
-        )
-
-    def chain_normalizations(
-        self,
-        operations: list[str],
-    ) -> Callable[[str], str]:
-        """Create a chain of normalization operations.
-
-        Args:
-            operations: List of operation names.
-
-        Returns:
-            Composed transformation function.
-        """
-        transforms = [self._transformations[op] for op in operations if op in self._transformations]
-
-        def chain(value: str) -> str:
-            result = str(value) if value else ""
-            for transform in transforms:
-                result = transform(result)
+        if isinstance(data[0], (int, float)):
+            # 1D data
+            stats = self._stats.get("default")
+            return self._normalize_1d(data, stats)
+        else:
+            # 2D data
+            result = []
+            for row in data:
+                normalized_row = []
+                for i, val in enumerate(row):
+                    stats = self._stats.get(f"feature_{i}")
+                    if stats:
+                        normalized_row.append(
+                            self._normalize_value(val, stats)[0]
+                        )
+                    else:
+                        normalized_row.append(val)
+                result.append(normalized_row)
             return result
 
-        return chain
+    def fit_transform(self, data: Union[List[float], List[List[float]]]) -> List[float]:
+        """Fit and transform in one step."""
+        return self.fit(data).transform(data)
+
+    def _normalize_1d(self, data: List[float], stats: DataStatistics) -> List[float]:
+        """Normalize 1D data."""
+        return [self._normalize_value(val, stats)[0] for val in data]
+
+    def _normalize_value(
+        self, value: float, stats: DataStatistics
+    ) -> tuple[float, str]:
+        """Normalize a single value using configured method."""
+        method = self.config.method
+        epsilon = self.config.epsilon
+
+        if method == NormalizationMethod.MIN_MAX:
+            if stats.range < epsilon:
+                return (self._feature_range[0], "clipped")
+            normalized = self._feature_range[0] + (
+                (value - stats.min_val) / stats.range
+            ) * (self._feature_range[1] - self._feature_range[0])
+            return (normalized, "ok")
+
+        elif method == NormalizationMethod.Z_SCORE:
+            if stats.std < epsilon:
+                return (0.0, "clipped")
+            normalized = (value - stats.mean) / stats.std
+            return (normalized, "ok")
+
+        elif method == NormalizationMethod.ROBUST:
+            iqr = stats.q3 - stats.q1
+            if iqr < epsilon:
+                return (0.0, "clipped")
+            normalized = (value - stats.median) / iqr
+            return (normalized, "ok")
+
+        elif method == NormalizationMethod.LOG:
+            normalized = math.log(value + self.config.log_offset)
+            return (normalized, "ok")
+
+        elif method == NormalizationMethod.LOG10:
+            normalized = math.log10(value + self.config.log_offset)
+            return (normalized, "ok")
+
+        elif method == NormalizationMethod.SQUARE_ROOT:
+            normalized = math.sqrt(max(0, value))
+            return (normalized, "ok")
+
+        elif method == NormalizationMethod.MAX_ABS:
+            max_abs = max(abs(stats.min_val), abs(stats.max_val))
+            if max_abs < epsilon:
+                return (0.0, "clipped")
+            return (value / max_abs, "ok")
+
+        elif method == NormalizationMethod.L2:
+            norm = math.sqrt(sum(x ** 2 for x in [value]))
+            if norm < epsilon:
+                return (0.0, "clipped")
+            return (value / norm, "ok")
+
+        return (value, "unsupported")
+
+    def inverse_transform(
+        self, data: Union[List[float], List[List[float]]]
+    ) -> List[float]:
+        """
+        Reverse normalization to original scale.
+
+        Args:
+            data: Normalized data
+
+        Returns:
+            Original scale data
+        """
+        if not self._fitted:
+            raise ValueError("Normalizer must be fitted before inverse_transform")
+
+        # This is a simplified version - full implementation would
+        # need to track the actual normalization parameters
+        if isinstance(data[0], (int, float)):
+            stats = self._stats.get("default")
+            if stats is None:
+                return data
+
+            if self.config.method == NormalizationMethod.MIN_MAX:
+                min_f, max_f = self._feature_range
+                result = []
+                for val in data:
+                    original = min_f + val * (stats.max_val - stats.min_val) / (max_f - min_f)
+                    result.append(original)
+                return result
+
+        return data
+
+    def get_stats(self, feature: str = "default") -> Optional[DataStatistics]:
+        """Get statistics for a feature."""
+        return self._stats.get(feature)
+
+    def is_fitted(self) -> bool:
+        """Check if normalizer has been fitted."""
+        return self._fitted
+
+
+class OutlierClipper:
+    """Clip outliers to specified quantiles."""
+
+    def __init__(
+        self,
+        lower_quantile: float = 0.05,
+        upper_quantile: float = 0.95,
+    ):
+        self.lower_quantile = lower_quantile
+        self.upper_quantile = upper_quantile
+        self._lower_bound: Optional[float] = None
+        self._upper_bound: Optional[float] = None
+
+    def fit(self, data: List[float]) -> "OutlierClipper":
+        """Fit clipper bounds to data."""
+        sorted_data = sorted(data)
+        n = len(sorted_data)
+        self._lower_bound = sorted_data[int(n * self.lower_quantile)]
+        self._upper_bound = sorted_data[int(n * self.upper_quantile)]
+        return self
+
+    def transform(self, data: List[float]) -> List[float]:
+        """Clip outliers in data."""
+        if self._lower_bound is None:
+            raise ValueError("Clipper must be fitted first")
+        return [
+            max(self._lower_bound, min(self._upper_bound, val))
+            for val in data
+        ]
+
+    def fit_transform(self, data: List[float]) -> List[float]:
+        """Fit and transform in one step."""
+        return self.fit(data).transform(data)
+
+
+class CustomTransformer:
+    """Apply custom transformation functions."""
+
+    def __init__(self, func: Callable[[float], float]):
+        self.func = func
+
+    def transform(self, data: List[float]) -> List[float]:
+        """Apply custom function to data."""
+        return [self.func(val) for val in data]
+
+    def fit_transform(self, data: List[float]) -> List[float]:
+        """Fit and transform in one step."""
+        return self.transform(data)
