@@ -1,342 +1,402 @@
-"""API authentication utilities supporting multiple auth schemes.
+"""API Authentication Action Module.
 
-Supports API keys, Bearer tokens, Basic auth, OAuth2, and AWS Signature.
+Provides comprehensive API authentication support including OAuth 2.0,
+API Key, Bearer Token, Basic Auth, and JWT authentication schemes.
 """
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
+import json
+import logging
 import time
-import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable
-from urllib.parse import urlencode
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-try:
-    import secrets
-except ImportError:
-    import uuid as secrets
-
-
-@dataclass
-class AuthConfig:
-    """Base authentication configuration."""
-
-    auth_type: str = "bearer"
-    header_name: str = "Authorization"
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
-@dataclass
-class APIKeyConfig(AuthConfig):
-    """API key authentication configuration."""
-
-    api_key: str = ""
-    api_secret: str | None = None
-    auth_type: str = "api_key"
-    key_location: str = "header"
-    key_prefix: str = ""
+logger = logging.getLogger(__name__)
 
 
-@dataclass
-class BearerTokenConfig(AuthConfig):
-    """Bearer token configuration."""
-
-    token: str = ""
-    auth_type: str = "bearer"
-    header_name: str = "Authorization"
-
-
-@dataclass
-class BasicAuthConfig(AuthConfig):
-    """Basic authentication configuration."""
-
-    username: str = ""
-    password: str = ""
-    auth_type: str = "basic"
-    header_name: str = "Authorization"
+class AuthType(Enum):
+    """Supported authentication types."""
+    NONE = "none"
+    API_KEY = "api_key"
+    BEARER_TOKEN = "bearer_token"
+    BASIC_AUTH = "basic_auth"
+    OAUTH2_PASSWORD = "oauth2_password"
+    OAUTH2_CLIENT_CREDENTIALS = "oauth2_client_credentials"
+    OAUTH2_REFRESH_TOKEN = "oauth2_refresh_token"
+    JWT = "jwt"
+    HMAC_SIGNATURE = "hmac_signature"
 
 
-@dataclass
-class OAuth2Config:
-    """OAuth2 configuration."""
-
-    client_id: str = ""
-    client_secret: str = ""
-    token_url: str = ""
-    authorization_url: str = ""
-    redirect_uri: str = ""
-    scope: str = ""
-    state: str | None = None
+class APIKeyLocation(Enum):
+    """Where to place the API key in the request."""
+    HEADER = "header"
+    QUERY_PARAM = "query_param"
+    BODY = "body"
 
 
 @dataclass
 class OAuth2Token:
-    """OAuth2 token data."""
-
+    """OAuth2 token storage."""
     access_token: str
     token_type: str = "Bearer"
-    expires_in: int = 0
-    refresh_token: str | None = None
-    scope: str = ""
-    expires_at: float = field(default_factory=lambda: time.time())
-    raw: dict[str, Any] = field(default_factory=dict)
+    expires_at: float = 0.0
+    refresh_token: Optional[str] = None
+    scope: Optional[str] = None
 
-    def is_expired(self, buffer_seconds: int = 60) -> bool:
+    def is_expired(self, buffer_seconds: float = 60.0) -> bool:
         """Check if token is expired or about to expire."""
         return time.time() >= (self.expires_at - buffer_seconds)
 
-    def to_header(self) -> dict[str, str]:
-        """Convert to Authorization header."""
-        return {"Authorization": f"{self.token_type} {self.access_token}"}
-
-
-class OAuth2Handler:
-    """OAuth2 token management and refresh."""
-
-    def __init__(self, config: OAuth2Config, token_store: Callable[[str | None, OAuth2Token], None] | None = None) -> None:
-        self.config = config
-        self.token_store = token_store
-        self._token: OAuth2Token | None = None
-
-    @property
-    def token(self) -> OAuth2Token | None:
-        """Get current token."""
-        return self._token
-
-    @token.setter
-    def token(self, value: OAuth2Token) -> None:
-        """Set token and persist if store provided."""
-        self._token = value
-        if self.token_store:
-            self.token_store(None, value)
-
-    def get_authorization_url(self, state: str | None = None) -> str:
-        """Generate OAuth2 authorization URL."""
-        import secrets
-
-        state = state or secrets.token_urlsafe(32)
-        params = {
-            "response_type": "code",
-            "client_id": self.config.client_id,
-            "redirect_uri": self.config.redirect_uri,
-            "scope": self.config.scope,
-            "state": state,
-        }
-        return f"{self.config.authorization_url}?{urlencode(params)}"
-
-    async def exchange_code(self, code: str) -> OAuth2Token:
-        """Exchange authorization code for access token."""
-        import aiohttp
-
-        data = {
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": self.config.redirect_uri,
-            "client_id": self.config.client_id,
-            "client_secret": self.config.client_secret,
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize token to dictionary."""
+        return {
+            "access_token": self.access_token,
+            "token_type": self.token_type,
+            "expires_at": self.expires_at,
+            "refresh_token": self.refresh_token,
+            "scope": self.scope,
         }
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(self.config.token_url, data=data) as resp:
-                resp.raise_for_status()
-                token_data = await resp.json()
-
-        token = OAuth2Token(
-            access_token=token_data["access_token"],
-            token_type=token_data.get("token_type", "Bearer"),
-            expires_in=token_data.get("expires_in", 0),
-            refresh_token=token_data.get("refresh_token"),
-            scope=token_data.get("scope", ""),
-            expires_at=time.time() + token_data.get("expires_in", 0),
-            raw=token_data,
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> OAuth2Token:
+        """Deserialize token from dictionary."""
+        return cls(
+            access_token=data["access_token"],
+            token_type=data.get("token_type", "Bearer"),
+            expires_at=data.get("expires_at", 0.0),
+            refresh_token=data.get("refresh_token"),
+            scope=data.get("scope"),
         )
-        self.token = token
+
+
+@dataclass
+class AuthCredentials:
+    """Authentication credentials container."""
+    auth_type: AuthType
+    # API Key
+    api_key: Optional[str] = None
+    api_key_name: Optional[str] = None
+    api_key_location: APIKeyLocation = APIKeyLocation.HEADER
+    # Basic Auth
+    username: Optional[str] = None
+    password: Optional[str] = None
+    # OAuth2
+    oauth2_token_url: Optional[str] = None
+    oauth2_client_id: Optional[str] = None
+    oauth2_client_secret: Optional[str] = None
+    oauth2_scope: Optional[str] = None
+    # JWT
+    jwt_secret: Optional[str] = None
+    jwt_algorithm: str = "HS256"
+    jwt_claims: Optional[Dict[str, Any]] = None
+    # HMAC
+    hmac_secret: Optional[str] = None
+    hmac_algorithm: str = "sha256"
+    # Token storage
+    cached_token: Optional[OAuth2Token] = None
+    # Custom headers
+    extra_headers: Optional[Dict[str, str]] = None
+
+
+class APITokenManager:
+    """Manages API tokens with caching and refresh."""
+
+    def __init__(self, credentials: AuthCredentials):
+        self.credentials = credentials
+        self._token_cache: Dict[str, OAuth2Token] = {}
+
+    def get_token(self, force_refresh: bool = False) -> Optional[OAuth2Token]:
+        """Get current valid token, refreshing if needed."""
+        cache_key = self._get_cache_key()
+        token = self._token_cache.get(cache_key)
+
+        if token is None or token.is_expired() or force_refresh:
+            token = self._refresh_oauth2_token()
+            if token:
+                self._token_cache[cache_key] = token
+
         return token
 
-    async def refresh(self) -> OAuth2Token:
-        """Refresh the access token."""
-        if not self._token or not self._token.refresh_token:
-            raise ValueError("No refresh token available")
+    def _get_cache_key(self) -> str:
+        """Generate cache key for credentials."""
+        auth = self.credentials
+        key_parts = [
+            str(auth.auth_type.value),
+            auth.oauth2_client_id or "",
+            auth.oauth2_token_url or "",
+        ]
+        return hashlib.sha256("|".join(key_parts).encode()).hexdigest()
 
-        import aiohttp
+    def _refresh_oauth2_token(self) -> Optional[OAuth2Token]:
+        """Refresh OAuth2 token from provider."""
+        import urllib.request
+        import urllib.parse
 
-        data = {
-            "grant_type": "refresh_token",
-            "refresh_token": self._token.refresh_token,
-            "client_id": self.config.client_id,
-            "client_secret": self.config.client_secret,
-        }
+        auth = self.credentials
+        if not auth.oauth2_token_url:
+            return None
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(self.config.token_url, data=data) as resp:
-                resp.raise_for_status()
-                token_data = await resp.json()
+        try:
+            data: Dict[str, str] = {
+                "grant_type": "client_credentials",
+                "client_id": auth.oauth2_client_id or "",
+                "client_secret": auth.oauth2_client_secret or "",
+            }
 
-        token = OAuth2Token(
-            access_token=token_data["access_token"],
-            token_type=token_data.get("token_type", "Bearer"),
-            expires_in=token_data.get("expires_in", 0),
-            refresh_token=token_data.get("refresh_token", self._token.refresh_token),
-            scope=token_data.get("scope", self._token.scope),
-            expires_at=time.time() + token_data.get("expires_in", 0),
-            raw=token_data,
-        )
-        self.token = token
-        return token
+            if auth.oauth2_scope:
+                data["scope"] = auth.oauth2_scope
 
-    async def get_valid_token(self) -> str:
-        """Get a valid access token, refreshing if necessary."""
-        if not self._token:
-            raise ValueError("No token available")
+            body = urllib.parse.urlencode(data).encode("utf-8")
+            req = urllib.request.Request(
+                auth.oauth2_token_url,
+                data=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
 
-        if self._token.is_expired():
-            await self.refresh()
+            with urllib.request.urlopen(req, timeout=30) as response:
+                result = json.loads(response.read().decode("utf-8"))
 
-        return self._token.access_token
+            expires_in = result.get("expires_in", 3600)
+            return OAuth2Token(
+                access_token=result["access_token"],
+                token_type=result.get("token_type", "Bearer"),
+                expires_at=time.time() + expires_in,
+                refresh_token=result.get("refresh_token"),
+                scope=result.get("scope"),
+            )
+        except Exception as e:
+            logger.error(f"Token refresh failed: {e}")
+            return None
 
-
-class AWSV4Signer:
-    """AWS Signature Version 4 request signer."""
-
-    def __init__(self, access_key: str, secret_key: str, region: str = "us-east-1", service: str = "execute-api") -> None:
-        self.access_key = access_key
-        self.secret_key = secret_key
-        self.region = region
-        self.service = service
-
-    def sign(self, method: str, url: str, headers: dict[str, str], body: bytes | None = None) -> dict[str, str]:
-        """Sign an AWS API request with AWS Signature V4."""
-        from urllib.parse import urlparse
-
-        parsed = urlparse(url)
-        now = time.gmtime()
-        date_stamp = time.strftime("%Y%m%d", now)
-        amz_date = time.strftime("%Y%m%dT%H%M%SZ", now)
-
-        if "x-amz-date" not in headers and "X-Amz-Date" not in headers:
-            headers["X-Amz-Date"] = amz_date
-
-        host = parsed.netloc
-        if "host" not in headers and "Host" not in headers:
-            headers["Host"] = host
-
-        method = method.upper()
-        canonical_uri = parsed.path or "/"
-        canonical_querystring = parsed.query
-
-        payload_hash = hashlib.sha256(body or b"").hexdigest()
-        headers["X-Amz-Content-Sha256"] = payload_hash
-
-        sorted_headers = sorted(headers.items(), key=lambda x: x[0].lower())
-        canonical_headers = "".join(f"{k.lower()}:{v.strip()}\n" for k, v in sorted_headers)
-        signed_headers = ";".join(k.lower() for k, v in sorted_headers)
-
-        canonical_request = f"{method}\n{canonical_uri}\n{canonical_querystring}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
-        algorithm = "AWS4-HMAC-SHA256"
-        credential_scope = f"{date_stamp}/{self.region}/{self.service}/aws4_request"
-        string_to_sign = f"{algorithm}\n{amz_date}\n{credential_scope}\n{hashlib.sha256(canonical_request.encode()).hexdigest()}"
-
-        k_date = self._hmac_sha256(f"AWS4{self.secret_key}".encode(), date_stamp)
-        k_region = self._hmac_sha256(k_date, self.region)
-        k_service = self._hmac_sha256(k_region, self.service)
-        k_signing = self._hmac_sha256(k_service, "aws4_request")
-        signature = hmac.new(k_signing, string_to_sign.encode(), hashlib.sha256).hexdigest()
-
-        authorization_header = f"{algorithm} Credential={self.access_key}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}"
-
-        return {**headers, "Authorization": authorization_header}
-
-    def _hmac_sha256(self, key: bytes, data: str) -> bytes:
-        """Compute HMAC-SHA256."""
-        return hmac.new(key, data.encode(), hashlib.sha256).digest()
+    def clear_cache(self) -> None:
+        """Clear token cache."""
+        self._token_cache.clear()
 
 
-class AuthBuilder:
-    """Builder for creating auth configurations."""
+class APIAuthAction(BaseAction):
+    """API Authentication Action supporting multiple auth schemes.
 
-    def __init__(self) -> None:
-        self._config: AuthConfig = BearerTokenConfig()
-
-    def api_key(self, key: str, location: str = "header", prefix: str = "") -> "AuthBuilder":
-        """Configure API key auth."""
-        self._config = APIKeyConfig(api_key=key, key_location=location, key_prefix=prefix)
-        return self
-
-    def bearer(self, token: str) -> "AuthBuilder":
-        """Configure Bearer token auth."""
-        self._config = BearerTokenConfig(token=token)
-        return self
-
-    def basic(self, username: str, password: str) -> "AuthBuilder":
-        """Configure Basic auth."""
-        self._config = BasicAuthConfig(username=username, password=password)
-        return self
-
-    def oauth2(self, config: OAuth2Config) -> "AuthBuilder":
-        """Configure OAuth2."""
-        self._config = config  # type: ignore
-        return self
-
-    def build(self) -> AuthConfig:
-        """Build the auth configuration."""
-        return self._config
-
-    def apply_to_headers(self, headers: dict[str, str]) -> dict[str, str]:
-        """Apply auth config to headers."""
-        config = self._config
-
-        if isinstance(config, APIKeyConfig):
-            if config.key_location == "header":
-                headers[config.header_name] = f"{config.key_prefix}{config.api_key}"
-            return headers
-
-        elif isinstance(config, BearerTokenConfig):
-            headers[config.header_name] = f"Bearer {config.token}"
-            return headers
-
-        elif isinstance(config, BasicAuthConfig):
-            credentials = base64.b64encode(f"{config.username}:{config.password}".encode()).decode()
-            headers[config.header_name] = f"Basic {credentials}"
-            return headers
-
-        return headers
-
-
-def apply_auth(headers: dict[str, str], config: AuthConfig | dict[str, Any]) -> dict[str, str]:
-    """Apply authentication to request headers.
-
-    Args:
-        headers: Base headers dict.
-        config: Auth configuration.
-
-    Returns:
-        Headers with auth applied.
+    Examples:
+        >>> action = APIAuthAction()
+        >>> creds = AuthCredentials(
+        ...     auth_type=AuthType.BEARER_TOKEN,
+        ...     api_key="my-secret-token"
+        ... )
+        >>> result = action.execute(ctx, {
+        ...     "credentials": creds,
+        ...     "url": "https://api.example.com/data",
+        ... })
     """
-    if isinstance(config, dict):
-        auth_type = config.get("type", "bearer")
-        if auth_type == "api_key":
-            key = config.get("key", "")
-            prefix = config.get("prefix", "")
-            location = config.get("location", "header")
-            header_name = config.get("header", "X-API-Key")
-            if location == "header":
-                headers[header_name] = f"{prefix}{key}"
-        elif auth_type == "bearer":
-            token = config.get("token", "")
-            headers["Authorization"] = f"Bearer {token}"
-        elif auth_type == "basic":
-            username = config.get("username", "")
-            password = config.get("password", "")
-            credentials = base64.b64encode(f"{username}:{password}".encode()).decode()
-            headers["Authorization"] = f"Basic {credentials}"
-    elif isinstance(config, APIKeyConfig):
-        headers[config.header_name] = f"{config.key_prefix}{config.api_key}"
-    elif isinstance(config, BearerTokenConfig):
-        headers[config.header_name] = f"Bearer {config.token}"
-    elif isinstance(config, BasicAuthConfig):
-        credentials = base64.b64encode(f"{config.username}:{config.password}".encode()).decode()
-        headers[config.header_name] = f"Basic {credentials}"
 
-    return headers
+    action_type = "api_auth"
+    display_name = "API认证"
+    description = "支持OAuth2/API Key/Bearer Token/JWT等多种认证方式"
+
+    def __init__(self):
+        super().__init__()
+        self._token_managers: Dict[str, APITokenManager] = {}
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute API authentication and return auth headers.
+
+        Args:
+            context: Execution context.
+            params: Dict with keys:
+                - credentials: AuthCredentials instance or dict
+                - url: Target URL (optional, for validation)
+                - auth_type_override: Override auth type (optional)
+                - include_query_params: Add auth to query params (bool)
+
+        Returns:
+            ActionResult with auth_headers and credentials info.
+        """
+        try:
+            credentials = self._resolve_credentials(params.get("credentials"))
+            if credentials is None:
+                return ActionResult(
+                    success=False,
+                    message="Missing or invalid credentials"
+                )
+
+            auth_type = credentials.auth_type
+            auth_headers, auth_params = self._build_auth(credentials, params)
+
+            # Store token manager if OAuth2
+            if auth_type in (AuthType.OAUTH2_PASSWORD,
+                           AuthType.OAUTH2_CLIENT_CREDENTIALS,
+                           AuthType.OAUTH2_REFRESH_TOKEN):
+                cache_key = self._get_manager_cache_key(credentials)
+                if cache_key not in self._token_managers:
+                    self._token_managers[cache_key] = APITokenManager(credentials)
+
+            return ActionResult(
+                success=True,
+                message=f"Authentication prepared: {auth_type.value}",
+                data={
+                    "auth_headers": auth_headers,
+                    "auth_params": auth_params,
+                    "auth_type": auth_type.value,
+                    "has_token": bool(credentials.cached_token),
+                }
+            )
+
+        except Exception as e:
+            logger.exception("API auth action failed")
+            return ActionResult(
+                success=False,
+                message=f"Authentication error: {str(e)}"
+            )
+
+    def _resolve_credentials(self, creds: Any) -> Optional[AuthCredentials]:
+        """Resolve credentials from various input formats."""
+        if creds is None:
+            return None
+        if isinstance(creds, AuthCredentials):
+            return creds
+        if isinstance(creds, dict):
+            try:
+                auth_type = AuthType(creds.get("auth_type", "none"))
+                return AuthCredentials(
+                    auth_type=auth_type,
+                    api_key=creds.get("api_key"),
+                    api_key_name=creds.get("api_key_name", "X-API-Key"),
+                    api_key_location=APIKeyLocation(
+                        creds.get("api_key_location", "header")
+                    ),
+                    username=creds.get("username"),
+                    password=creds.get("password"),
+                    oauth2_token_url=creds.get("oauth2_token_url"),
+                    oauth2_client_id=creds.get("oauth2_client_id"),
+                    oauth2_client_secret=creds.get("oauth2_client_secret"),
+                    oauth2_scope=creds.get("oauth2_scope"),
+                    jwt_secret=creds.get("jwt_secret"),
+                    jwt_algorithm=creds.get("jwt_algorithm", "HS256"),
+                    jwt_claims=creds.get("jwt_claims"),
+                    hmac_secret=creds.get("hmac_secret"),
+                    hmac_algorithm=creds.get("hmac_algorithm", "sha256"),
+                    extra_headers=creds.get("extra_headers"),
+                )
+            except (ValueError, KeyError) as e:
+                logger.error(f"Invalid credentials dict: {e}")
+                return None
+        return None
+
+    def _build_auth(
+        self, credentials: AuthCredentials, params: Dict[str, Any]
+    ) -> Tuple[Dict[str, str], Dict[str, str]]:
+        """Build authentication headers and query params."""
+        headers: Dict[str, str] = {}
+        query_params: Dict[str, str] = {}
+
+        if credentials.extra_headers:
+            headers.update(credentials.extra_headers)
+
+        auth_type = credentials.auth_type
+
+        if auth_type == AuthType.API_KEY:
+            key_name = credentials.api_key_name or "X-API-Key"
+            key_value = credentials.api_key or ""
+            if credentials.api_key_location == APIKeyLocation.HEADER:
+                headers[key_name] = key_value
+            elif credentials.api_key_location == APIKeyLocation.QUERY_PARAM:
+                query_params[key_name] = key_value
+            else:
+                pass  # Body handled separately
+
+        elif auth_type == AuthType.BEARER_TOKEN:
+            token = credentials.api_key or ""
+            headers["Authorization"] = f"Bearer {token}"
+
+        elif auth_type == AuthType.BASIC_AUTH:
+            import base64
+            credentials_b64 = base64.b64encode(
+                f"{credentials.username}:{credentials.password}".encode()
+            ).decode()
+            headers["Authorization"] = f"Basic {credentials_b64}"
+
+        elif auth_type in (AuthType.OAUTH2_PASSWORD, AuthType.OAUTH2_CLIENT_CREDENTIALS,
+                          AuthType.OAUTH2_REFRESH_TOKEN):
+            cache_key = self._get_manager_cache_key(credentials)
+            manager = self._token_managers.get(cache_key)
+            if manager:
+                token = manager.get_token()
+                if token:
+                    headers["Authorization"] = f"{token.token_type} {token.access_token}"
+
+        elif auth_type == AuthType.JWT:
+            jwt_token = self._generate_jwt(credentials)
+            if jwt_token:
+                headers["Authorization"] = f"Bearer {jwt_token}"
+
+        elif auth_type == AuthType.HMAC_SIGNATURE:
+            url = params.get("url", "")
+            signature = self._generate_hmac_signature(credentials, url)
+            headers["X-HMAC-Signature"] = signature
+            headers["X-Timestamp"] = str(int(time.time()))
+
+        return headers, query_params
+
+    def _generate_jwt(self, credentials: AuthCredentials) -> Optional[str]:
+        """Generate a JWT token."""
+        import jwt
+
+        if not credentials.jwt_secret:
+            return None
+
+        payload = dict(credentials.jwt_claims) if credentials.jwt_claims else {}
+        payload["exp"] = int(time.time()) + 3600
+        payload["iat"] = int(time.time())
+
+        try:
+            return jwt.encode(
+                payload,
+                credentials.jwt_secret,
+                algorithm=credentials.jwt_algorithm,
+            )
+        except Exception as e:
+            logger.error(f"JWT generation failed: {e}")
+            return None
+
+    def _generate_hmac_signature(
+        self, credentials: AuthCredentials, message: str
+    ) -> Optional[str]:
+        """Generate HMAC signature for request."""
+        import hmac
+        import hashlib
+
+        if not credentials.hmac_secret:
+            return None
+
+        algo = getattr(hashlib, credentials.hmac_algorithm, hashlib.sha256)
+        signature = hmac.new(
+            credentials.hmac_secret.encode(),
+            message.encode(),
+            algo,
+        ).hexdigest()
+        return signature
+
+    def _get_manager_cache_key(self, credentials: AuthCredentials) -> str:
+        """Get cache key for token manager."""
+        return hashlib.sha256(
+            f"{credentials.oauth2_client_id}:{credentials.oauth2_token_url}".encode()
+        ).hexdigest()
+
+    def get_required_params(self) -> List[str]:
+        return ["credentials"]
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {
+            "url": "",
+            "auth_type_override": None,
+            "include_query_params": False,
+        }
