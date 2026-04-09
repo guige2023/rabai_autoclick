@@ -1,488 +1,375 @@
-"""
-Data Pipeline Action Module.
+"""Data pipeline orchestration module.
 
-Provides composable data processing pipelines with
-filtering, transformation, and aggregation stages.
+This module provides a flexible data pipeline system for chaining operations,
+managing data flow, handling errors, and supporting parallel processing.
 
 Author: rabai_autoclick team
+License: MIT
 """
 
-import logging
-from typing import (
-    Optional, Dict, Any, List, Callable, Union,
-    TypeVar, Generic, Awaitable
-)
-from dataclasses import dataclass, field
-from enum import Enum
+from __future__ import annotations
 
-logger = logging.getLogger(__name__)
+import asyncio
+from typing import Any, Dict, List, Optional, Callable, TypeVar, Generic, Union
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from abc import ABC, abstractmethod
+import logging
+import traceback
+
 
 T = TypeVar("T")
 R = TypeVar("R")
 
 
+class PipelineStatus(Enum):
+    """Status of pipeline execution."""
+    IDLE = "idle"
+    RUNNING = "running"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class StageType(Enum):
-    """Pipeline stage types."""
+    """Types of pipeline stages."""
     SOURCE = "source"
+    TRANSFORM = "transform"
     FILTER = "filter"
-    MAP = "map"
-    FLATMAP = "flatmap"
-    REDUCE = "reduce"
     AGGREGATE = "aggregate"
-    SORT = "sort"
-    GROUP = "group"
-    LIMIT = "limit"
-    SKIP = "skip"
-    DEDUP = "dedup"
+    SINK = "sink"
     BRANCH = "branch"
     MERGE = "merge"
 
 
 @dataclass
-class PipelineStage:
-    """A single pipeline stage."""
-    stage_type: StageType
-    func: Callable
-    name: Optional[str] = None
-    config: Dict[str, Any] = field(default_factory=dict)
-
-    def __repr__(self) -> str:
-        return f"PipelineStage({self.stage_type.value}, name={self.name})"
+class PipelineContext:
+    """Context passed through pipeline stages."""
+    execution_id: str
+    started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    counters: Dict[str, int] = field(default_factory=lambda: {"processed": 0, "filtered": 0, "errors": 0})
+    errors: List[Dict[str, Any]] = field(default_factory=list)
+    
+    def add_error(self, stage: str, error: Exception) -> None:
+        """Record an error."""
+        self.errors.append({
+            "stage": stage,
+            "error": str(error),
+            "traceback": traceback.format_exc(),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        })
+        self.counters["errors"] += 1
+    
+    def increment(self, counter: str, value: int = 1) -> None:
+        """Increment a counter."""
+        self.counters[counter] = self.counters.get(counter, 0) + value
 
 
 @dataclass
-class PipelineConfig:
-    """Configuration for pipeline execution."""
-    name: str = "pipeline"
-    parallel: bool = False
-    max_workers: int = 4
-    buffer_size: int = 100
-    error_mode: str = "stop"
-    log_level: str = "INFO"
+class StageResult:
+    """Result of a stage execution."""
+    stage_name: str
+    success: bool
+    data: Any = None
+    error: Optional[str] = None
+    duration_ms: float = 0.0
+    records_in: int = 0
+    records_out: int = 0
 
 
 @dataclass
 class PipelineResult:
-    """Result of pipeline execution."""
-    success: bool
-    output: Any = None
+    """Result of complete pipeline execution."""
+    execution_id: str
+    status: PipelineStatus
+    total_duration_ms: float = 0.0
+    stages: List[StageResult] = field(default_factory=list)
+    final_data: Any = None
+    context: Optional[PipelineContext] = None
     error: Optional[str] = None
-    processed_count: int = 0
-    skipped_count: int = 0
-    error_count: int = 0
 
 
-class DataPipelineAction:
-    """
-    Composable Data Processing Pipeline.
-
-    Provides a fluent API for building data processing
-    pipelines with various transformation stages.
-
+class PipelineStage(ABC, Generic[T, R]):
+    """Abstract base class for pipeline stages.
+    
     Example:
-        >>> pipeline = DataPipelineAction()
-        >>> result = (pipeline
-        ...     .source(data)
-        ...     .filter(lambda x: x["active"])
-        ...     .map(lambda x: x["value"] * 2)
-        ...     .execute())
+        >>> class UppercaseStage(PipelineStage[str, str]):
+        ...     def execute(self, data: str, ctx: PipelineContext) -> str:
+        ...         return data.upper()
+        ...     def get_type(self) -> StageType:
+        ...         return StageType.TRANSFORM
     """
+    
+    def __init__(self, name: str):
+        self.name = name
+        self._logger = logging.getLogger(f"pipeline.{name}")
+    
+    @abstractmethod
+    def execute(self, data: T, ctx: PipelineContext) -> R:
+        """Execute the stage transformation."""
+        pass
+    
+    @abstractmethod
+    def get_type(self) -> StageType:
+        """Get the type of this stage."""
+        pass
+    
+    def validate_input(self, data: Any) -> bool:
+        """Validate input data. Override for custom validation."""
+        return True
+    
+    def on_error(self, error: Exception, ctx: PipelineContext) -> Optional[R]:
+        """Handle errors. Override for custom error handling."""
+        ctx.add_error(self.name, error)
+        return None
 
-    def __init__(self, config: Optional[PipelineConfig] = None):
-        self.config = config or PipelineConfig()
+
+class SourceStage(PipelineStage[Any, Any]):
+    """Stage that generates or fetches initial data."""
+    
+    def __init__(self, name: str, source_fn: Callable[[PipelineContext], Any]):
+        super().__init__(name)
+        self._source_fn = source_fn
+    
+    def execute(self, data: Any, ctx: PipelineContext) -> Any:
+        return self._source_fn(ctx)
+    
+    def get_type(self) -> StageType:
+        return StageType.SOURCE
+
+
+class TransformStage(PipelineStage[T, R]):
+    """Stage that transforms data."""
+    
+    def __init__(self, name: str, transform_fn: Callable[[T, PipelineContext], R]):
+        super().__init__(name)
+        self._transform_fn = transform_fn
+    
+    def execute(self, data: T, ctx: PipelineContext) -> R:
+        return self._transform_fn(data, ctx)
+    
+    def get_type(self) -> StageType:
+        return StageType.TRANSFORM
+
+
+class FilterStage(PipelineStage[T, Optional[T]]):
+    """Stage that filters data based on predicate."""
+    
+    def __init__(self, name: str, predicate: Callable[[T, PipelineContext], bool]):
+        super().__init__(name)
+        self._predicate = predicate
+    
+    def execute(self, data: T, ctx: PipelineContext) -> Optional[T]:
+        if self._predicate(data, ctx):
+            return data
+        ctx.increment("filtered")
+        return None
+    
+    def get_type(self) -> StageType:
+        return StageType.FILTER
+
+
+class SinkStage(PipelineStage[T, None]):
+    """Stage that writes data to destination."""
+    
+    def __init__(self, name: str, sink_fn: Callable[[T, PipelineContext], None]):
+        super().__init__(name)
+        self._sink_fn = sink_fn
+    
+    def execute(self, data: T, ctx: PipelineContext) -> None:
+        self._sink_fn(data, ctx)
+    
+    def get_type(self) -> StageType:
+        return StageType.SINK
+
+
+class Pipeline:
+    """Data pipeline orchestrator.
+    
+    Example:
+        >>> pipeline = Pipeline("etl_pipeline")
+        >>> pipeline.source(lambda ctx: [1, 2, 3, 4, 5])\\
+        ...     .filter(lambda x, ctx: x > 2)\\
+        ...     .transform(lambda x, ctx: x * 10)\\
+        ...     .sink(lambda x, ctx: print(f"Result: {x}"))
+        >>> result = pipeline.execute()
+        >>> print(result.status)
+    """
+    
+    def __init__(self, name: str):
+        self.name = name
         self._stages: List[PipelineStage] = []
-        self._source_data: Any = None
-
-    def source(self, data: Any) -> "DataPipelineAction":
-        """
-        Set the data source.
-
-        Args:
-            data: Source data (list, generator, etc.)
-
-        Returns:
-            Self for chaining
-        """
-        self._source_data = data
-        self._stages.append(
-            PipelineStage(
-                stage_type=StageType.SOURCE,
-                func=lambda x: x,
-                name="source",
-            )
-        )
+        self._logger = logging.getLogger(f"pipeline.{name}")
+        self._status = PipelineStatus.IDLE
+    
+    def source(self, source_fn: Callable[[PipelineContext], Any]) -> "Pipeline":
+        """Add a source stage."""
+        stage = SourceStage(f"{self.name}_source", source_fn)
+        self._stages.append(stage)
         return self
-
+    
+    def transform(
+        self,
+        transform_fn: Callable[[Any, PipelineContext], Any],
+        name: Optional[str] = None
+    ) -> "Pipeline":
+        """Add a transform stage."""
+        stage_name = name or f"{self.name}_transform_{len(self._stages)}"
+        stage = TransformStage(stage_name, transform_fn)
+        self._stages.append(stage)
+        return self
+    
     def filter(
         self,
-        predicate: Callable[[Any], bool],
-        name: Optional[str] = None,
-    ) -> "DataPipelineAction":
-        """
-        Add a filter stage.
-
-        Args:
-            predicate: Function that returns True to keep item
-            name: Optional stage name
-
-        Returns:
-            Self for chaining
-        """
-        self._stages.append(
-            PipelineStage(
-                stage_type=StageType.FILTER,
-                func=predicate,
-                name=name or f"filter_{len(self._stages)}",
-            )
-        )
+        predicate: Callable[[Any, PipelineContext], bool],
+        name: Optional[str] = None
+    ) -> "Pipeline":
+        """Add a filter stage."""
+        stage_name = name or f"{self.name}_filter_{len(self._stages)}"
+        stage = FilterStage(stage_name, predicate)
+        self._stages.append(stage)
         return self
-
-    def map(
+    
+    def sink(
         self,
-        transform: Callable[[Any], Any],
-        name: Optional[str] = None,
-    ) -> "DataPipelineAction":
-        """
-        Add a map (transform) stage.
-
-        Args:
-            transform: Transformation function
-            name: Optional stage name
-
-        Returns:
-            Self for chaining
-        """
-        self._stages.append(
-            PipelineStage(
-                stage_type=StageType.MAP,
-                func=transform,
-                name=name or f"map_{len(self._stages)}",
-            )
-        )
+        sink_fn: Callable[[Any, PipelineContext], None],
+        name: Optional[str] = None
+    ) -> "Pipeline":
+        """Add a sink stage."""
+        stage_name = name or f"{self.name}_sink_{len(self._stages)}"
+        stage = SinkStage(stage_name, sink_fn)
+        self._stages.append(stage)
         return self
-
-    def flatmap(
-        self,
-        func: Callable[[Any], List[Any]],
-        name: Optional[str] = None,
-    ) -> "DataPipelineAction":
-        """
-        Add a flatmap stage (map + flatten).
-
-        Args:
-            func: Function that returns list of items
-            name: Optional stage name
-
-        Returns:
-            Self for chaining
-        """
-        self._stages.append(
-            PipelineStage(
-                stage_type=StageType.FLATMAP,
-                func=func,
-                name=name or f"flatmap_{len(self._stages)}",
-            )
-        )
+    
+    def add_stage(self, stage: PipelineStage) -> "Pipeline":
+        """Add a custom stage."""
+        self._stages.append(stage)
         return self
-
-    def reduce(
-        self,
-        reducer: Callable[[Any, Any], Any],
-        initial: Any = None,
-        name: Optional[str] = None,
-    ) -> "DataPipelineAction":
-        """
-        Add a reduce stage.
-
-        Args:
-            reducer: Reduction function (accumulator, item) -> new_accumulator
-            initial: Initial accumulator value
-            name: Optional stage name
-
-        Returns:
-            Self for chaining
-        """
-        self._stages.append(
-            PipelineStage(
-                stage_type=StageType.REDUCE,
-                func=reducer,
-                name=name or f"reduce_{len(self._stages)}",
-                config={"initial": initial},
-            )
-        )
-        return self
-
-    def sort(
-        self,
-        key: Optional[Callable[[Any], Any]] = None,
-        reverse: bool = False,
-        name: Optional[str] = None,
-    ) -> "DataPipelineAction":
-        """
-        Add a sort stage.
-
-        Args:
-            key: Optional sort key function
-            reverse: Sort in descending order
-            name: Optional stage name
-
-        Returns:
-            Self for chaining
-        """
-        self._stages.append(
-            PipelineStage(
-                stage_type=StageType.SORT,
-                func=key,
-                name=name or f"sort_{len(self._stages)}",
-                config={"reverse": reverse},
-            )
-        )
-        return self
-
-    def group_by(
-        self,
-        key: Callable[[Any], Any],
-        name: Optional[str] = None,
-    ) -> "DataPipelineAction":
-        """
-        Add a group by stage.
-
-        Args:
-            key: Group key function
-            name: Optional stage name
-
-        Returns:
-            Self for chaining
-        """
-        self._stages.append(
-            PipelineStage(
-                stage_type=StageType.GROUP,
-                func=key,
-                name=name or f"group_{len(self._stages)}",
-            )
-        )
-        return self
-
-    def limit(self, n: int, name: Optional[str] = None) -> "DataPipelineAction":
-        """
-        Add a limit stage.
-
-        Args:
-            n: Maximum number of items
-            name: Optional stage name
-
-        Returns:
-            Self for chaining
-        """
-        self._stages.append(
-            PipelineStage(
-                stage_type=StageType.LIMIT,
-                func=lambda x, n=n: x[:n],
-                name=name or f"limit_{len(self._stages)}",
-                config={"n": n},
-            )
-        )
-        return self
-
-    def skip(self, n: int, name: Optional[str] = None) -> "DataPipelineAction":
-        """
-        Add a skip stage.
-
-        Args:
-            n: Number of items to skip
-            name: Optional stage name
-
-        Returns:
-            Self for chaining
-        """
-        self._stages.append(
-            PipelineStage(
-                stage_type=StageType.SKIP,
-                func=lambda x, n=n: x[n:],
-                name=name or f"skip_{len(self._stages)}",
-                config={"n": n},
-            )
-        )
-        return self
-
-    def dedup(
-        self,
-        key: Optional[Callable[[Any], Any]] = None,
-        name: Optional[str] = None,
-    ) -> "DataPipelineAction":
-        """
-        Add a deduplication stage.
-
-        Args:
-            key: Optional key function for dedup
-            name: Optional stage name
-
-        Returns:
-            Self for chaining
-        """
-        self._stages.append(
-            PipelineStage(
-                stage_type=StageType.DEDUP,
-                func=key,
-                name=name or f"dedup_{len(self._stages)}",
-            )
-        )
-        return self
-
-    def execute(self) -> PipelineResult:
-        """
-        Execute the pipeline.
-
-        Returns:
-            PipelineResult with output and statistics
-        """
-        result = PipelineResult(success=False)
-
-        if self._source_data is None:
-            result.error = "No source data set"
-            return result
-
-        try:
-            data = self._source_data
-            processed = 0
-            skipped = 0
-            errors = 0
-
-            for stage in self._stages:
-                if stage.stage_type == StageType.SOURCE:
-                    continue
-
-                try:
-                    data, p, s = self._execute_stage(stage, data)
-                    processed += p
-                    skipped += s
-                except Exception as e:
-                    logger.error(f"Stage '{stage.name}' failed: {e}")
-                    errors += 1
-                    if self.config.error_mode == "stop":
-                        result.error = f"Stage '{stage.name}': {str(e)}"
-                        return result
-
-            result.success = True
-            result.output = data
-            result.processed_count = processed
-            result.skipped_count = skipped
-            result.error_count = errors
-
-        except Exception as e:
-            logger.error(f"Pipeline execution failed: {e}")
-            result.error = str(e)
-
-        return result
-
-    def _execute_stage(
-        self,
-        stage: PipelineStage,
-        data: Any,
-    ) -> tuple:
-        """Execute a single pipeline stage."""
-        processed = 0
-        skipped = 0
-
-        if stage.stage_type == StageType.FILTER:
-            if isinstance(data, list):
-                filtered = []
-                for item in data:
-                    try:
-                        if stage.func(item):
-                            filtered.append(item)
-                            processed += 1
-                        else:
-                            skipped += 1
-                    except Exception:
-                        skipped += 1
-                return filtered, processed, skipped
-            return data, processed, skipped
-
-        elif stage.stage_type == StageType.MAP:
-            if isinstance(data, list):
-                result = []
-                for item in data:
-                    try:
-                        result.append(stage.func(item))
-                        processed += 1
-                    except Exception:
-                        pass
-                return result, processed, skipped
-            return stage.func(data), processed, skipped
-
-        elif stage.stage_type == StageType.FLATMAP:
-            if isinstance(data, list):
-                result = []
-                for item in data:
-                    try:
-                        items = stage.func(item)
-                        result.extend(items)
-                        processed += len(items)
-                    except Exception:
-                        pass
-                return result, processed, skipped
-            return stage.func(data), processed, skipped
-
-        elif stage.stage_type == StageType.REDUCE:
-            initial = stage.config.get("initial")
-            if isinstance(data, list):
-                return functools.reduce(stage.func, data, initial), processed, skipped
-            return data, processed, skipped
-
-        elif stage.stage_type == StageType.SORT:
-            if isinstance(data, list):
-                reverse = stage.config.get("reverse", False)
-                return sorted(data, key=stage.func, reverse=reverse), len(data), skipped
-            return data, processed, skipped
-
-        elif stage.stage_type == StageType.GROUP:
-            if isinstance(data, list):
-                groups: Dict[Any, List] = {}
-                for item in data:
-                    try:
-                        key = stage.func(item)
-                        if key not in groups:
-                            groups[key] = []
-                        groups[key].append(item)
-                    except Exception:
-                        pass
-                return groups, len(data), skipped
-            return data, processed, skipped
-
-        elif stage.stage_type == StageType.LIMIT:
-            n = stage.config.get("n", 0)
-            if isinstance(data, list):
-                return data[:n], min(len(data), n), skipped
-            return data, processed, skipped
-
-        elif stage.stage_type == StageType.SKIP:
-            n = stage.config.get("n", 0)
-            if isinstance(data, list):
-                return data[n:], max(len(data) - n, 0), skipped
-            return data, processed, skipped
-
-        elif stage.stage_type == StageType.DEDUP:
-            if isinstance(data, list):
-                seen: Set = set()
-                result = []
-                for item in data:
-                    key = stage.func(item) if stage.func else item
-                    if key not in seen:
-                        seen.add(key)
-                        result.append(item)
-                return result, len(result), len(data) - len(result)
-            return data, processed, skipped
-
+    
+    def execute(self, context: Optional[PipelineContext] = None) -> PipelineResult:
+        """Execute the pipeline synchronously."""
+        import time
+        
+        execution_id = f"{self.name}_{int(time.time() * 1000)}"
+        if context is None:
+            context = PipelineContext(execution_id=execution_id)
         else:
-            if callable(stage.func):
-                return stage.func(data), processed, skipped
-            return data, processed, skipped
+            context.execution_id = execution_id
+        
+        start_time = time.time()
+        self._status = PipelineStatus.RUNNING
+        stage_results: List[StageResult] = []
+        
+        try:
+            data = None
+            current_data = None
+            
+            for i, stage in enumerate(self._stages):
+                stage_start = time.time()
+                
+                if stage.get_type() == StageType.SOURCE:
+                    current_data = stage.execute(None, context)
+                    data = current_data
+                else:
+                    if current_data is None and stage.get_type() != StageType.SOURCE:
+                        self._logger.warning(f"Stage {stage.name}: No data to process")
+                        continue
+                    
+                    current_data = stage.execute(current_data, context)
+                
+                stage_duration = (time.time() - stage_start) * 1000
+                
+                stage_results.append(StageResult(
+                    stage_name=stage.name,
+                    success=True,
+                    data=current_data,
+                    duration_ms=stage_duration,
+                    records_in=context.counters.get("processed", 0),
+                    records_out=context.counters.get("processed", 0)
+                ))
+                
+                if current_data is None:
+                    break
+                
+                context.increment("processed")
+            
+            self._status = PipelineStatus.COMPLETED
+            
+            return PipelineResult(
+                execution_id=execution_id,
+                status=self._status,
+                total_duration_ms=(time.time() - start_time) * 1000,
+                stages=stage_results,
+                final_data=data,
+                context=context
+            )
+            
+        except Exception as e:
+            self._status = PipelineStatus.FAILED
+            return PipelineResult(
+                execution_id=execution_id,
+                status=self._status,
+                total_duration_ms=(time.time() - start_time) * 1000,
+                stages=stage_results,
+                error=str(e),
+                context=context
+            )
+    
+    async def execute_async(self, context: Optional[PipelineContext] = None) -> PipelineResult:
+        """Execute the pipeline asynchronously."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.execute, context)
+    
+    def pause(self) -> None:
+        """Pause pipeline execution."""
+        self._status = PipelineStatus.PAUSED
+    
+    def resume(self) -> None:
+        """Resume pipeline execution."""
+        if self._status == PipelineStatus.PAUSED:
+            self._status = PipelineStatus.RUNNING
+    
+    def cancel(self) -> None:
+        """Cancel pipeline execution."""
+        self._status = PipelineStatus.CANCELLED
 
-    def __repr__(self) -> str:
-        stages = " -> ".join(s.name or s.stage_type.value for s in self._stages)
-        return f"DataPipelineAction({stages})"
+
+class ParallelPipeline:
+    """Pipeline that executes branches in parallel."""
+    
+    def __init__(self, name: str, max_workers: int = 4):
+        self.name = name
+        self._pipelines: List[Pipeline] = []
+        self._max_workers = max_workers
+    
+    def add_branch(self, pipeline: Pipeline) -> "ParallelPipeline":
+        """Add a branch pipeline."""
+        self._pipelines.append(pipeline)
+        return self
+    
+    def execute(self) -> List[PipelineResult]:
+        """Execute all branches in parallel."""
+        import concurrent.futures
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+            futures = [executor.submit(p.execute) for p in self._pipelines]
+            return [f.result() for f in concurrent.futures.as_completed(futures)]
 
 
-import functools
-from collections import defaultdict
+__all__ = [
+    "PipelineStatus",
+    "StageType",
+    "PipelineContext",
+    "StageResult",
+    "PipelineResult",
+    "PipelineStage",
+    "SourceStage",
+    "TransformStage",
+    "FilterStage",
+    "SinkStage",
+    "Pipeline",
+    "ParallelPipeline",
+]
