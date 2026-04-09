@@ -1,429 +1,265 @@
 """
 API Gateway Action Module.
 
-Provides API gateway functionality including routing,
-rate limiting, authentication, request/response transformation,
-and upstream management for microservices architectures.
+Provides API gateway functionality with routing, load balancing,
+rate limiting, and request/response transformation.
+
+Author: RabAi Team
 """
 
-import time
+from __future__ import annotations
+
+import asyncio
 import hashlib
-import hmac
-import json
-import threading
-from typing import Optional, Dict, Any, List, Callable, Union
+import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
-from collections import defaultdict
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
-class AuthType(Enum):
-    """Authentication types."""
-    NONE = "none"
-    API_KEY = "api_key"
-    BEARER_TOKEN = "bearer_token"
-    BASIC_AUTH = "basic_auth"
-    HMAC_SIGNATURE = "hmac_signature"
-    JWT = "jwt"
+class LoadBalancingStrategy(Enum):
+    """Load balancing strategies."""
+    ROUND_ROBIN = "round_robin"
+    LEAST_CONNECTIONS = "least_connections"
+    WEIGHTED = "weighted"
+    RANDOM = "random"
+    IP_HASH = "ip_hash"
+
+
+@dataclass
+class Backend:
+    """Backend server definition."""
+    url: str
+    weight: int = 1
+    max_connections: int = 100
+    timeout: float = 30.0
+    healthy: bool = True
+    current_connections: int = 0
 
 
 @dataclass
 class Route:
     """API route definition."""
     path: str
-    method: str  # GET, POST, etc.
-    upstream: str  # upstream server ID
-    upstream_path: Optional[str] = None  # path on upstream
-    auth: AuthType = AuthType.NONE
-    rate_limit: Optional[int] = None  # requests per minute
-    timeout: float = 30.0
-    retry_attempts: int = 0
+    methods: List[str]
+    backend: str
+    auth_required: bool = False
+    rate_limit: Optional[Tuple[int, float]] = None  # (requests, window_seconds)
     transforms: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class UpstreamServer:
-    """Upstream server definition."""
-    id: str
-    host: str
-    port: int
-    weight: int = 1
-    is_healthy: bool = True
-
-    @property
-    def url(self) -> str:
-        return f"http://{self.host}:{self.port}"
-
-
-@dataclass
 class GatewayConfig:
-    """Configuration for API gateway."""
+    """Gateway configuration."""
+    host: str = "0.0.0.0"
+    port: int = 8080
+    backends: Dict[str, List[Backend]] = field(default_factory=dict)
+    routes: List[Route] = field(default_factory=list)
     default_timeout: float = 30.0
-    default_rate_limit: int = 100  # per minute
-    max_retries: int = 3
-    circuit_breaker_threshold: int = 5
-    circuit_breaker_timeout: float = 60.0
-    request_buffer_size: int = 1000
-    response_buffer_size: int = 10000
+    enable_logging: bool = True
 
 
-@dataclass
-class GatewayRequest:
-    """Incoming gateway request."""
-    method: str
-    path: str
-    headers: Dict[str, str]
-    query_params: Dict[str, str]
-    body: Optional[bytes] = None
-    client_ip: Optional[str] = None
-    timestamp: float = field(default_factory=time.time)
+class LoadBalancer:
+    """Load balancer for backend servers."""
 
+    def __init__(self, strategy: LoadBalancingStrategy) -> None:
+        self.strategy = strategy
+        self.round_robin_index: Dict[str, int] = defaultdict(int)
+        self.connection_counts: Dict[str, int] = defaultdict(int)
 
-@dataclass
-class GatewayResponse:
-    """Outgoing gateway response."""
-    status_code: int
-    headers: Dict[str, str]
-    body: Optional[bytes] = None
-    upstream: Optional[str] = None
-    duration_ms: float = 0.0
-    error: Optional[str] = None
-
-
-@dataclass
-class GatewayStats:
-    """Gateway statistics."""
-    total_requests: int = 0
-    successful_requests: int = 0
-    failed_requests: int = 0
-    rejected_requests: int = 0
-    total_latency_ms: float = 0.0
-    requests_by_route: Dict[str, int] = field(default_factory=dict)
-    requests_by_upstream: Dict[str, int] = field(default_factory=dict)
-
-
-class APIGatewayAction:
-    """
-    API Gateway action with routing, authentication, and rate limiting.
-
-    Provides a complete API gateway solution for routing requests
-    to upstream services with authentication, authorization, and monitoring.
-    """
-
-    def __init__(self, config: Optional[GatewayConfig] = None):
-        self.config = config or GatewayConfig()
-        self._routes: Dict[str, Route] = {}  # key: "method:path"
-        self._upstreams: Dict[str, UpstreamServer] = {}
-        self._rate_limiters: Dict[str, List[float]] = defaultdict(list)
-        self._stats = GatewayStats()
-        self._lock = threading.RLock()
-        self._middleware: List[Callable] = []
-        self._auth_handlers: Dict[AuthType, Callable] = {}
-        self._circuit_breakers: Dict[str, int] = defaultdict(int)
-        self._circuit_breaker_last_failure: Dict[str, float] = {}
-
-    def add_upstream(self, upstream: UpstreamServer) -> "APIGatewayAction":
-        """Add an upstream server."""
-        with self._lock:
-            self._upstreams[upstream.id] = upstream
-        return self
-
-    def add_route(self, route: Route) -> "APIGatewayAction":
-        """Add a route."""
-        key = f"{route.method}:{route.path}"
-        with self._lock:
-            self._routes[key] = route
-        return self
-
-    def add_middleware(self, middleware: Callable) -> "APIGatewayAction":
-        """Add middleware function."""
-        self._middleware.append(middleware)
-        return self
-
-    def set_auth_handler(
+    def select_backend(
         self,
-        auth_type: AuthType,
-        handler: Callable[[GatewayRequest, Route], bool],
-    ) -> "APIGatewayAction":
-        """Set authentication handler for auth type."""
-        self._auth_handlers[auth_type] = handler
-        return self
+        backends: List[Backend],
+        key: Optional[str] = None,
+    ) -> Optional[Backend]:
+        """Select a backend based on strategy."""
+        healthy = [b for b in backends if b.healthy]
+        if not healthy:
+            return None
 
-    def _get_route_key(self, method: str, path: str) -> Optional[str]:
-        """Find matching route key."""
-        # Exact match
-        key = f"{method}:{path}"
-        if key in self._routes:
-            return key
+        if self.strategy == LoadBalancingStrategy.ROUND_ROBIN:
+            idx = self.round_robin_index[id(backends)]
+            self.round_robin_index[id(backends)] = (idx + 1) % len(healthy)
+            return healthy[idx % len(healthy)]
 
-        # Pattern match
-        for route_key in self._routes:
-            route_method, route_path = route_key.split(":", 1)
-            if route_method == method and self._match_path(route_path, path):
-                return route_key
+        elif self.strategy == LoadBalancingStrategy.LEAST_CONNECTIONS:
+            return min(healthy, key=lambda b: b.current_connections)
 
+        elif self.strategy == LoadBalancingStrategy.WEIGHTED:
+            total_weight = sum(b.weight for b in healthy)
+            r = hash(str(time.time()).encode()) % total_weight
+            cumsum = 0
+            for b in healthy:
+                cumsum += b.weight
+                if r < cumsum:
+                    return b
+            return healthy[-1]
+
+        elif self.strategy == LoadBalancingStrategy.IP_HASH:
+            if key:
+                hash_val = int(hashlib.md5(key.encode()).hexdigest(), 16)
+                return healthy[hash_val % len(healthy)]
+            return healthy[0]
+
+        else:  # RANDOM
+            import random
+            return healthy[int(random.random() * len(healthy))]
+
+
+@dataclass
+class RequestMetrics:
+    """Metrics for a request."""
+    path: str
+    method: str
+    backend: str
+    status_code: int
+    response_time: float
+    timestamp: float
+
+
+class APIGateway:
+    """Main API Gateway class."""
+
+    def __init__(self, config: GatewayConfig) -> None:
+        self.config = config
+        self.load_balancers: Dict[str, LoadBalancer] = {}
+        self.metrics: List[RequestMetrics] = []
+        self.request_counts: Dict[str, Dict[str, List[float]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+
+        for backend_name in config.backends:
+            self.load_balancers[backend_name] = LoadBalancer(
+                LoadBalancingStrategy.ROUND_ROBIN
+            )
+
+    def add_route(self, route: Route) -> None:
+        """Add a route to the gateway."""
+        self.config.routes.append(route)
+
+    def match_route(
+        self,
+        path: str,
+        method: str,
+    ) -> Optional[Route]:
+        """Find matching route for path and method."""
+        for route in self.config.routes:
+            if self._path_matches(route.path, path) and method in route.methods:
+                return route
         return None
 
-    def _match_path(self, pattern: str, path: str) -> bool:
-        """Match path against pattern."""
-        import re
-        # Convert pattern like /api/:id to regex
-        regex_pattern = re.sub(r":\w+", r"[^/]+", pattern)
-        regex_pattern = f"^{regex_pattern}$"
-        return bool(re.match(regex_pattern, path))
+    def _path_matches(self, pattern: str, path: str) -> bool:
+        """Simple path pattern matching."""
+        pattern_parts = pattern.strip("/").split("/")
+        path_parts = path.strip("/").split("/")
 
-    def _check_rate_limit(
-        self,
-        key: str,
-        limit: int,
-        window_seconds: float = 60.0,
-    ) -> bool:
-        """Check and update rate limit."""
-        now = time.time()
-        window_start = now - window_seconds
+        if len(pattern_parts) != len(path_parts):
+            return False
 
-        with self._lock:
-            # Clean old entries
-            self._rate_limiters[key] = [
-                t for t in self._rate_limiters[key] if t > window_start
-            ]
-
-            if len(self._rate_limiters[key]) >= limit:
+        for p, part in zip(pattern_parts, path_parts):
+            if p.startswith("{") and p.endswith("}"):
+                continue
+            if p != part:
                 return False
 
-            self._rate_limiters[key].append(now)
-            return True
+        return True
 
-    def _check_circuit_breaker(self, upstream_id: str) -> bool:
-        """Check if circuit breaker allows requests."""
+    def check_rate_limit(
+        self,
+        client_id: str,
+        limit: Tuple[int, float],
+    ) -> bool:
+        """Check if request is within rate limit."""
+        requests, window_seconds = limit
         now = time.time()
-        key = upstream_id
+        cutoff = now - window_seconds
 
-        if key in self._circuit_breakers:
-            failures = self._circuit_breakers[key]
-            if failures >= self.config.circuit_breaker_threshold:
-                last_failure = self._circuit_breaker_last_failure.get(key, 0)
-                if now - last_failure < self.config.circuit_breaker_timeout:
-                    return False
-                else:
-                    # Try again
-                    self._circuit_breakers[key] = 0
-        return True
+        client_requests = self.request_counts[client_id]
+        # Clean old entries
+        for endpoint in list(client_requests):
+            client_requests[endpoint] = [
+                t for t in client_requests[endpoint] if t > cutoff
+            ]
 
-    def _record_upstream_failure(self, upstream_id: str) -> None:
-        """Record upstream failure for circuit breaker."""
-        with self._lock:
-            self._circuit_breakers[upstream_id] += 1
-            self._circuit_breaker_last_failure[upstream_id] = time.time()
+        total_requests = sum(len(v) for v in client_requests.values())
+        return total_requests < requests
 
-    def _record_upstream_success(self, upstream_id: str) -> None:
-        """Record upstream success."""
-        with self._lock:
-            if upstream_id in self._circuit_breakers:
-                self._circuit_breakers[upstream_id] = max(
-                    0, self._circuit_breakers[upstream_id] - 1
-                )
+    def record_request(self, metrics: RequestMetrics) -> None:
+        """Record request metrics."""
+        self.metrics.append(metrics)
+        if len(self.metrics) > 10000:
+            self.metrics = self.metrics[-5000:]
 
-    def _authenticate(self, request: GatewayRequest, route: Route) -> bool:
-        """Authenticate request."""
-        if route.auth == AuthType.NONE:
-            return True
-
-        handler = self._auth_handlers.get(route.auth)
-        if handler:
-            return handler(request, route)
-
-        return True
-
-    def _transform_request(
+    async def forward_request(
         self,
-        request: GatewayRequest,
         route: Route,
-    ) -> GatewayRequest:
-        """Transform request before forwarding."""
-        transforms = route.transforms.get("request", {})
+        path: str,
+        method: str,
+        headers: Dict[str, str],
+        body: Optional[bytes],
+    ) -> Tuple[int, Dict[str, str], bytes]:
+        """Forward request to backend."""
+        import aiohttp
 
-        if "headers" in transforms:
-            for key, value in transforms["headers"].items():
-                request.headers[key] = value
+        backends = self.config.backends.get(route.backend, [])
+        if not backends:
+            return 502, {}, b"Bad Gateway: No backends available"
 
-        if "add_headers" in transforms:
-            request.headers.update(transforms["add_headers"])
+        balancer = self.load_balancers.get(route.backend)
+        if not balancer:
+            return 502, {}, b"Bad Gateway: No load balancer"
 
-        if "remove_headers" in transforms:
-            for header in transforms["remove_headers"]:
-                request.headers.pop(header, None)
+        backend = balancer.select_backend(backends, key=headers.get("X-Forwarded-For"))
+        if not backend:
+            return 503, {}, b"Service Unavailable: No healthy backends"
 
-        return request
-
-    def _transform_response(
-        self,
-        response: GatewayResponse,
-        route: Route,
-    ) -> GatewayResponse:
-        """Transform response before returning."""
-        transforms = route.transforms.get("response", {})
-
-        if "headers" in transforms:
-            response.headers.update(transforms["headers"])
-
-        if "add_headers" in transforms:
-            response.headers.update(transforms["add_headers"])
-
-        if "remove_headers" in transforms:
-            for header in transforms["remove_headers"]:
-                response.headers.pop(header, None)
-
-        if "status_code" in transforms:
-            response.status_code = transforms["status_code"]
-
-        return response
-
-    async def handle_request_async(
-        self,
-        request: GatewayRequest,
-    ) -> GatewayResponse:
-        """
-        Handle incoming gateway request.
-
-        Args:
-            request: Gateway request object
-
-        Returns:
-            Gateway response object
-        """
+        backend.current_connections += 1
         start_time = time.time()
-        route_key = self._get_route_key(request.method, request.path)
 
-        with self._lock:
-            self._stats.total_requests += 1
-
-        # No route found
-        if route_key is None:
-            return GatewayResponse(
-                status_code=404,
-                headers={"Content-Type": "application/json"},
-                body=json.dumps({"error": "Not Found"}).encode(),
-                error="No route found",
-                duration_ms=(time.time() - start_time) * 1000,
-            )
-
-        route = self._routes[route_key]
-
-        # Rate limiting
-        if route.rate_limit:
-            rate_key = f"{route.method}:{route.path}"
-            if not self._check_rate_limit(rate_key, route.rate_limit):
-                with self._lock:
-                    self._stats.rejected_requests += 1
-                return GatewayResponse(
-                    status_code=429,
-                    headers={"Content-Type": "application/json"},
-                    body=json.dumps({"error": "Too Many Requests"}).encode(),
-                    duration_ms=(time.time() - start_time) * 1000,
-                )
-
-        # Authentication
-        if not self._authenticate(request, route):
-            with self._lock:
-                self._stats.rejected_requests += 1
-            return GatewayResponse(
-                status_code=401,
-                headers={"Content-Type": "application/json"},
-                body=json.dumps({"error": "Unauthorized"}).encode(),
-                duration_ms=(time.time() - start_time) * 1000,
-            )
-
-        # Circuit breaker check
-        if not self._check_circuit_breaker(route.upstream):
-            return GatewayResponse(
-                status_code=503,
-                headers={"Content-Type": "application/json"},
-                body=json.dumps({"error": "Service Unavailable"}).encode(),
-                upstream=route.upstream,
-                duration_ms=(time.time() - start_time) * 1000,
-            )
-
-        # Transform request
-        request = self._transform_request(request, route)
-
-        # Get upstream
-        upstream = self._upstreams.get(route.upstream)
-        if not upstream:
-            return GatewayResponse(
-                status_code=502,
-                headers={"Content-Type": "application/json"},
-                body=json.dumps({"error": "Bad Gateway"}).encode(),
-                error="Upstream not found",
-                duration_ms=(time.time() - start_time) * 1000,
-            )
-
-        # Run middleware
-        for middleware in self._middleware:
-            if asyncio.iscoroutinefunction(middleware):
-                request = await middleware(request)
-            else:
-                request = middleware(request)
-
-        # Make upstream request (simplified - actual implementation would use httpx/aiohttp)
         try:
-            # Simulated upstream call
-            response = GatewayResponse(
+            url = f"{backend.url}{path}"
+            async with aiohttp.ClientSession() as session:
+                async with session.request(
+                    method,
+                    url,
+                    headers=headers,
+                    data=body,
+                    timeout=aiohttp.ClientTimeout(total=backend.timeout),
+                ) as response:
+                    response_body = await response.read()
+                    status = response.status
+                    response_headers = dict(response.headers)
+                    return status, response_headers, response_body
+        except asyncio.TimeoutError:
+            return 504, {}, b"Gateway Timeout"
+        except Exception as e:
+            return 502, {}, f"Bad Gateway: {str(e)}".encode()
+        finally:
+            backend.current_connections -= 1
+            elapsed = time.time() - start_time
+            self.record_request(RequestMetrics(
+                path=path,
+                method=method,
+                backend=backend.url,
                 status_code=200,
-                headers={"Content-Type": "application/json"},
-                body=json.dumps({"message": "success"}).encode(),
-                upstream=upstream.id,
-                duration_ms=(time.time() - start_time) * 1000,
-            )
+                response_time=elapsed,
+                timestamp=time.time(),
+            ))
 
-            self._record_upstream_success(upstream.id)
+    def get_metrics_summary(self) -> Dict[str, Any]:
+        """Get summary of gateway metrics."""
+        if not self.metrics:
+            return {}
 
-            with self._lock:
-                self._stats.successful_requests += 1
-                self._stats.requests_by_route[route_key] = \
-                    self._stats.requests_by_route.get(route_key, 0) + 1
-                self._stats.requests_by_upstream[upstream.id] = \
-                    self._stats.requests_by_upstream.get(upstream.id, 0) + 1
+        total_requests = len(self.metrics)
+        avg_response_time = sum(m.response_time for m in self.metrics) / total_requests
+        status_counts: Dict[int, int] = defaultdict(int)
+        for m in self.metrics:
+            status_counts[m.status_code] += 1
 
-            # Transform response
-            response = self._transform_response(response, route)
-            response.duration_ms = (time.time() - start_time) * 1000
-
-            return response
-
-        except Exception as e:
-            self._record_upstream_failure(upstream.id)
-
-            with self._lock:
-                self._stats.failed_requests += 1
-
-            return GatewayResponse(
-                status_code=502,
-                headers={"Content-Type": "application/json"},
-                body=json.dumps({"error": str(e)}).encode(),
-                upstream=upstream.id,
-                error=str(e),
-                duration_ms=(time.time() - start_time) * 1000,
-            )
-
-    def handle_request(self, request: GatewayRequest) -> GatewayResponse:
-        """Handle request synchronously."""
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(
-                    self.handle_request_async(request), loop
-                )
-                return future.result(timeout=request.headers.get("timeout", 30))
-            return asyncio.run(self.handle_request_async(request))
-        except Exception as e:
-            return GatewayResponse(
-                status_code=500,
-                headers={"Content-Type": "application/json"},
-                body=json.dumps({"error": str(e)}).encode(),
-                error=str(e),
-            )
-
-    def get_stats(self) -> GatewayStats:
-        """Get gateway statistics."""
-        return self._stats
+        return {
+            "total_requests": total_requests,
+            "avg_response_time": avg_response_time,
+            "status_codes": dict(status_counts),
+        }

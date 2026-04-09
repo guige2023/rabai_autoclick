@@ -1,272 +1,263 @@
 """
 Data Aggregation Action Module.
 
-Real-time data aggregation with grouping, filtering,
-windowing, and multiple aggregation functions.
+Provides data aggregation capabilities with groupby, windowing,
+and custom aggregation functions for analytics workflows.
+
+Author: RabAi Team
 """
 
-from dataclasses import dataclass, field
-from typing import Any, Callable, Generic, TypeVar, Optional
-from enum import Enum
+from __future__ import annotations
+
 from collections import defaultdict
-import logging
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
-logger = logging.getLogger(__name__)
 T = TypeVar("T")
-
-
-class AggregationType(Enum):
-    """Aggregation function types."""
-    SUM = "sum"
-    AVG = "avg"
-    MIN = "min"
-    MAX = "max"
-    COUNT = "count"
-    FIRST = "first"
-    LAST = "last"
-    LIST = "list"
-    DICT = "dict"
-    CUSTOM = "custom"
-
-
-@dataclass
-class AggregationConfig:
-    """
-    Configuration for a single aggregation.
-
-    Attributes:
-        name: Output field name.
-        agg_type: Type of aggregation.
-        field_name: Source field to aggregate.
-        filter_func: Optional filter condition.
-        custom_func: Custom aggregation function.
-    """
-    name: str
-    agg_type: AggregationType
-    field_name: Optional[str] = None
-    filter_func: Optional[Callable[[Any], bool]] = None
-    custom_func: Optional[Callable[[list], Any]] = None
 
 
 @dataclass
 class AggregationResult:
     """Result of an aggregation operation."""
-    group_key: Any
-    values: dict[str, Any]
-    record_count: int
+    key: Any
+    value: Any
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-class DataAggregationAction(Generic[T]):
-    """
-    Data aggregation with support for grouping and multiple aggregation types.
+@dataclass
+class GroupByConfig:
+    """Configuration for groupby operations."""
+    keys: List[str]
+    aggregations: Dict[str, List[str]]  # field -> list of agg functions
+    having: Optional[Callable[[Dict], bool]] = None
+    order_by: Optional[List[Tuple[str, str]]] = None  # (field, asc|desc)
 
-    Example:
-        aggregator = DataAggregationAction[dict]()
-        aggregator.group_by("category")
-        aggregator.add_aggregation("total", AggregationType.SUM, "amount")
-        aggregator.add_aggregation("count", AggregationType.COUNT)
-        result = aggregator.compute(data_records)
-    """
 
-    def __init__(self):
-        """Initialize data aggregation action."""
-        self.group_by_fields: list[str] = []
-        self.aggregations: list[AggregationConfig] = []
-        self._groups: dict = {}
+class AggregationFunction:
+    """Built-in aggregation functions."""
 
-    def group_by(self, *fields: str) -> "DataAggregationAction":
-        """
-        Set grouping fields.
+    @staticmethod
+    def sum_(values: List[float]) -> float:
+        return sum(values)
 
-        Args:
-            *fields: Field names to group by.
+    @staticmethod
+    def avg(values: List[float]) -> float:
+        return sum(values) / len(values) if values else 0.0
 
-        Returns:
-            Self for method chaining.
-        """
-        self.group_by_fields = list(fields)
-        return self
+    @staticmethod
+    def min_(values: List[float]) -> float:
+        return min(values) if values else None
 
-    def add_aggregation(
+    @staticmethod
+    def max_(values: List[float]) -> float:
+        return max(values) if values else None
+
+    @staticmethod
+    def count(values: List[Any]) -> int:
+        return len(values)
+
+    @staticmethod
+    def count_distinct(values: List[Any]) -> int:
+        return len(set(values))
+
+    @staticmethod
+    def first(values: List[Any]) -> Any:
+        return values[0] if values else None
+
+    @staticmethod
+    def last(values: List[Any]) -> Any:
+        return values[-1] if values else None
+
+    @staticmethod
+    def std_dev(values: List[float]) -> float:
+        if len(values) < 2:
+            return 0.0
+        import statistics
+        return statistics.stdev(values)
+
+    @staticmethod
+    def median(values: List[float]) -> float:
+        if not values:
+            return 0.0
+        import statistics
+        return statistics.median(values)
+
+
+class DataAggregator:
+    """Main aggregation engine."""
+
+    def __init__(self) -> None:
+        self.agg_functions: Dict[str, Callable] = {
+            "sum": AggregationFunction.sum_,
+            "avg": AggregationFunction.avg,
+            "mean": AggregationFunction.avg,
+            "min": AggregationFunction.min_,
+            "max": AggregationFunction.max_,
+            "count": AggregationFunction.count,
+            "count_distinct": AggregationFunction.count_distinct,
+            "first": AggregationFunction.first,
+            "last": AggregationFunction.last,
+            "std_dev": AggregationFunction.std_dev,
+            "median": AggregationFunction.median,
+        }
+
+    def register_function(self, name: str, func: Callable) -> None:
+        """Register a custom aggregation function."""
+        self.agg_functions[name] = func
+
+    def _get_nested_value(self, obj: Dict, key: str) -> Any:
+        """Get value from nested dictionary using dot notation."""
+        keys = key.split(".")
+        value = obj
+        for k in keys:
+            if isinstance(value, dict):
+                value = value.get(k)
+            else:
+                return None
+        return value
+
+    def _group_data(
         self,
-        name: str,
-        agg_type: AggregationType,
-        field_name: Optional[str] = None,
-        filter_func: Optional[Callable] = None,
-        custom_func: Optional[Callable] = None
-    ) -> "DataAggregationAction":
-        """
-        Add an aggregation configuration.
-
-        Args:
-            name: Output field name.
-            agg_type: Aggregation type.
-            field_name: Source field for aggregation.
-            filter_func: Optional filter.
-            custom_func: Custom aggregation function.
-
-        Returns:
-            Self for method chaining.
-        """
-        config = AggregationConfig(
-            name=name,
-            agg_type=agg_type,
-            field_name=field_name,
-            filter_func=filter_func,
-            custom_func=custom_func
-        )
-        self.aggregations.append(config)
-        return self
-
-    def sum(self, field_name: str, output_name: Optional[str] = None) -> "DataAggregationAction":
-        """Add SUM aggregation."""
-        name = output_name or f"{field_name}_sum"
-        self.add_aggregation(name, AggregationType.SUM, field_name)
-        return self
-
-    def avg(self, field_name: str, output_name: Optional[str] = None) -> "DataAggregationAction":
-        """Add AVG aggregation."""
-        name = output_name or f"{field_name}_avg"
-        self.add_aggregation(name, AggregationType.AVG, field_name)
-        return self
-
-    def min(self, field_name: str, output_name: Optional[str] = None) -> "DataAggregationAction":
-        """Add MIN aggregation."""
-        name = output_name or f"{field_name}_min"
-        self.add_aggregation(name, AggregationType.MIN, field_name)
-        return self
-
-    def max(self, field_name: str, output_name: Optional[str] = None) -> "DataAggregationAction":
-        """Add MAX aggregation."""
-        name = output_name or f"{field_name}_max"
-        self.add_aggregation(name, AggregationType.MAX, field_name)
-        return self
-
-    def count(self, output_name: str = "count") -> "DataAggregationAction":
-        """Add COUNT aggregation."""
-        self.add_aggregation(output_name, AggregationType.COUNT)
-        return self
-
-    def _get_group_key(self, record: T) -> Any:
-        """Extract group key from record."""
-        if not self.group_by_fields:
-            return "__all__"
-
-        if isinstance(record, dict):
-            return tuple(record.get(f) for f in self.group_by_fields)
-        return tuple(getattr(record, f, None) for f in self.group_by_fields)
-
-    def _get_field_value(self, record: T, field_name: str) -> Any:
-        """Extract field value from record."""
-        if isinstance(record, dict):
-            return record.get(field_name)
-        return getattr(record, field_name, None)
-
-    def _aggregate_values(self, values: list) -> Any:
-        """Perform aggregation on a list of values."""
-        return values
-
-    def compute(self, data: list[T]) -> list[AggregationResult]:
-        """
-        Compute aggregations on data.
-
-        Args:
-            data: List of records to aggregate.
-
-        Returns:
-            List of AggregationResult, one per group.
-        """
-        self._groups = defaultdict(lambda: {"__records__": []})
-
+        data: List[Dict],
+        keys: List[str],
+    ) -> Dict[Tuple, List[Dict]]:
+        """Group data by specified keys."""
+        groups: Dict[Tuple, List[Dict]] = defaultdict(list)
         for record in data:
-            key = self._get_group_key(record)
-            self._groups[key]["__records__"].append(record)
+            key_values = tuple(self._get_nested_value(record, k) for k in keys)
+            groups[key_values].append(record)
+        return groups
 
+    def aggregate(
+        self,
+        data: List[Dict],
+        config: GroupByConfig,
+    ) -> List[Dict]:
+        """Perform aggregation on data."""
+        groups = self._group_data(data, config.keys)
         results = []
 
-        for group_key, group_data in self._groups.items():
-            records = group_data["__records__"]
-            values = {}
+        for key_tuple, records in groups.items():
+            result = {}
+            for i, k in enumerate(config.keys):
+                result[k] = key_tuple[i]
 
-            for agg in self.aggregations:
-                field_values = []
-
-                for record in records:
-                    if agg.filter_func and not agg.filter_func(record):
+            for field_name, agg_funcs in config.aggregations.items():
+                for agg_name in agg_funcs:
+                    if agg_name not in self.agg_functions:
                         continue
 
-                    if agg.field_name:
-                        val = self._get_field_value(record, agg.field_name)
-                        field_values.append(val)
-                    else:
-                        field_values.append(record)
+                    values = []
+                    for record in records:
+                        val = self._get_nested_value(record, field_name)
+                        if val is not None:
+                            values.append(val)
 
-                result = self._compute_single_aggregation(agg, field_values)
-                values[agg.name] = result
+                    agg_func = self.agg_functions[agg_name]
+                    result[f"{field_name}_{agg_name}"] = agg_func(values)
 
-            results.append(AggregationResult(
-                group_key=group_key,
-                values=values,
-                record_count=len(records)
-            ))
+            if config.having and not config.having(result):
+                continue
+
+            results.append(result)
+
+        if config.order_by:
+            for field_name, direction in reversed(config.order_by):
+                reverse = direction.lower() == "desc"
+                results.sort(key=lambda x: x.get(field_name, 0), reverse=reverse)
 
         return results
 
-    def _compute_single_aggregation(self, agg: AggregationConfig, values: list) -> Any:
-        """Compute a single aggregation."""
-        if not values:
-            return None
+    def rolling_aggregate(
+        self,
+        data: List[Dict],
+        window_size: int,
+        field_name: str,
+        agg_name: str,
+    ) -> List[Dict]:
+        """Compute rolling aggregation over a window."""
+        if agg_name not in self.agg_functions:
+            raise ValueError(f"Unknown aggregation: {agg_name}")
 
-        if agg.agg_type == AggregationType.SUM:
-            return sum(v for v in values if v is not None)
+        agg_func = self.agg_functions[agg_name]
+        results = []
 
-        elif agg.agg_type == AggregationType.AVG:
-            valid = [v for v in values if v is not None]
-            return sum(valid) / len(valid) if valid else None
+        for i in range(len(data)):
+            window_start = max(0, i - window_size + 1)
+            window_values = [
+                self._get_nested_value(data[j], field_name)
+                for j in range(window_start, i + 1)
+            ]
+            window_values = [v for v in window_values if v is not None]
 
-        elif agg.agg_type == AggregationType.MIN:
-            return min(v for v in values if v is not None) if values else None
+            result = data[i].copy()
+            result[f"{field_name}_rolling_{agg_name}"] = agg_func(window_values)
+            results.append(result)
 
-        elif agg.agg_type == AggregationType.MAX:
-            return max(v for v in values if v is not None) if values else None
+        return results
 
-        elif agg.agg_type == AggregationType.COUNT:
-            return len(values)
+    def cumulative_aggregate(
+        self,
+        data: List[Dict],
+        field_name: str,
+        agg_name: str,
+    ) -> List[Dict]:
+        """Compute cumulative aggregation."""
+        if agg_name not in self.agg_functions:
+            raise ValueError(f"Unknown aggregation: {agg_name}")
 
-        elif agg.agg_type == AggregationType.FIRST:
-            return values[0] if values else None
+        agg_func = self.agg_functions[agg_name]
+        results = []
+        cumulative_values = []
 
-        elif agg.agg_type == AggregationType.LAST:
-            return values[-1] if values else None
+        for record in data:
+            value = self._get_nested_value(record, field_name)
+            if value is not None:
+                cumulative_values.append(value)
 
-        elif agg.agg_type == AggregationType.LIST:
-            return values
+            result = record.copy()
+            result[f"{field_name}_cumulative_{agg_name}"] = agg_func(cumulative_values)
+            results.append(result)
 
-        elif agg.agg_type == AggregationType.DICT:
-            return {i: v for i, v in enumerate(values)}
+        return results
 
-        elif agg.agg_type == AggregationType.CUSTOM and agg.custom_func:
-            return agg.custom_func(values)
 
-        return values
+class TimeSeriesAggregator(DataAggregator):
+    """Specialized aggregator for time series data."""
 
-    def compute_totals(self, data: list[T]) -> dict[str, Any]:
-        """
-        Compute aggregations across entire dataset (no grouping).
+    def aggregate_by_time_bucket(
+        self,
+        data: List[Dict],
+        timestamp_field: str,
+        bucket_seconds: int,
+        aggregations: Dict[str, List[str]],
+    ) -> List[Dict]:
+        """Aggregate by time bucket."""
+        import time
 
-        Args:
-            data: List of records.
+        groups: Dict[int, List[Dict]] = defaultdict(list)
+        for record in data:
+            ts = self._get_nested_value(record, timestamp_field)
+            if ts is None:
+                continue
+            if isinstance(ts, (int, float)):
+                bucket = int(ts // bucket_seconds) * bucket_seconds
+            else:
+                bucket = int(time.mktime(ts.timetuple()) // bucket_seconds) * bucket_seconds
+            groups[bucket].append(record)
 
-        Returns:
-            Dictionary of aggregated values.
-        """
-        self._groups = {"__all__": {"__records__": data}}
+        results = []
+        for bucket_time, records in sorted(groups.items()):
+            result = {timestamp_field: bucket_time}
+            for field_name, agg_funcs in aggregations.items():
+                for agg_name in agg_funcs:
+                    values = [
+                        self._get_nested_value(r, field_name)
+                        for r in records
+                        if self._get_nested_value(r, field_name) is not None
+                    ]
+                    if agg_name in self.agg_functions:
+                        result[f"{field_name}_{agg_name}"] = self.agg_functions[agg_name](values)
+            results.append(result)
 
-        results = self.compute(data)
-        return results[0].values if results else {}
-
-    def clear(self) -> None:
-        """Clear all aggregations and groupings."""
-        self.group_by_fields.clear()
-        self.aggregations.clear()
-        self._groups.clear()
+        return results
