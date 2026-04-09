@@ -1,0 +1,46 @@
+include LICENSE
+include README.md
+include CHANGELOG.md
+include CONTRIBUTING.md
+include CODE_OF_CONDUCT.md
+include SUPPORT.md
+include SECURITY.md
+include INSTALL.md
+include ARCHITECTURE.md
+include TODO.md
+include Makefile
+include requirements.txt
+include pyproject.toml
+include setup.py
+
+recursive-include src *.py
+recursive-include src/data *.json
+recursive-include cli *.py *.md
+recursive-include core *.py *.md
+recursive-include actions *.py *.md
+recursive-include ui *.py
+recursive-include utils *.py
+recursive-include gui *.py
+recursive-include workflows *.json *.yaml *.yml
+recursive-include templates *.json *.yaml *.yml *.md
+recursive-include docs *.md *.rst *.txt
+recursive-include tests *.py
+recursive-include tests/fixtures *
+recursive-include screenshots *.png *.jpg *.jpeg *.gif
+recursive-include resources *
+recursive-include hooks *
+
+recursive-exclude __pycache__ *
+recursive-exclude *.pyc
+recursive-exclude *.pyo
+recursive-exclude .git *
+recursive-exclude .github *
+recursive-exclude venv *
+recursive-exclude .venv *
+recursive-exclude *.egg-info *
+recursive-exclude .pytest_cache *
+recursive-exclude .mypy_cache *
+recursive-exclude .ruff_cache *
+recursive-exclude build *
+recursive-exclude dist *
+recursive-exclude logs *

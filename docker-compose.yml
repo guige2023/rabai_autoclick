@@ -1,0 +1,74 @@
+# Docker Compose for RabAI AutoClick
+# Usage:
+#   docker-compose run --rm test        # Run tests
+#   docker-compose run --rm gui-test    # Run GUI tests
+#   docker-compose run --rm cli         # Run CLI
+#   docker-compose up build             # Build distribution
+
+version: '3.8'
+
+services:
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rabai-autoclick:test
+    container_name: rabai-test
+    environment:
+      - DISPLAY=:99
+    volumes:
+      - ./dist:/app/dist:ro
+      - ./data:/app/data:rw
+      - ./logs:/app/logs:rw
+    command: xvfb-run -a pytest tests/ -v --tb=short
+
+  gui-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rabai-autoclick:test
+    container_name: rabai-gui-test
+    environment:
+      - DISPLAY=:99
+    volumes:
+      - ./data:/app/data:rw
+      - ./logs:/app/logs:rw
+      - ./screenshots:/app/screenshots:rw
+    command: xvfb-run -a python -m pytest tests/gui/ -v
+
+  build-dist:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rabai-autoclick:test
+    container_name: rabai-build
+    volumes:
+      - ./dist:/app/dist
+    command: python scripts/build_dist.py --skip-tests --skip-checks
+
+  cli:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rabai-autoclick:test
+    container_name: rabai-cli
+    environment:
+      - DISPLAY=:99
+    volumes:
+      - ./data:/app/data:rw
+      - ./workflows:/app/workflows:rw
+    command: xvfb-run -a python -m cli.main
+
+  shell:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rabai-autoclick:test
+    container_name: rabai-shell
+    environment:
+      - DISPLAY=:99
+    volumes:
+      - ./data:/app/data:rw
+      - ./workflows:/app/workflows:rw
+      - ./logs:/app/logs:rw
+    entrypoint: /bin/bash
