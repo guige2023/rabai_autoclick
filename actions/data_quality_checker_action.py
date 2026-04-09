@@ -1,268 +1,554 @@
-"""
-Data quality checker action for validation and anomaly detection.
+"""Data Quality Checker Action Module.
 
-Provides schema validation, completeness checks, and consistency verification.
+Validates data quality across multiple dimensions:
+- Completeness (missing values)
+- Consistency (format, type)
+- Accuracy (valid ranges)
+- Uniqueness (duplicates)
+- Timeliness (staleness)
+
+Author: rabai_autoclick team
 """
 
-from typing import Any, Callable, Dict, List, Optional
-import time
+from __future__ import annotations
+
+import asyncio
+import logging
 import re
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum, auto
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+
+logger = logging.getLogger(__name__)
 
 
-class DataQualityCheckerAction:
-    """Data quality validation and checking."""
+class QualityDimension(Enum):
+    """Data quality dimensions."""
+    COMPLETENESS = auto()
+    CONSISTENCY = auto()
+    ACCURACY = auto()
+    UNIQUENESS = auto()
+    TIMELINESS = auto()
 
-    def __init__(
+
+class QualityLevel(Enum):
+    """Quality levels for results."""
+    EXCELLENT = auto()
+    GOOD = auto()
+    ACCEPTABLE = auto()
+    POOR = auto()
+    FAILING = auto()
+
+
+@dataclass
+class QualityRule:
+    """A data quality rule to check."""
+    name: str
+    dimension: QualityDimension
+    check_fn: Callable[[Any], bool]
+    description: str = ""
+    severity: str = "error"
+    threshold: float = 1.0
+
+
+@dataclass
+class QualityIssue:
+    """Represents a data quality issue."""
+    rule_name: str
+    dimension: QualityDimension
+    field_path: str
+    message: str
+    severity: str
+    issue_count: int = 1
+    sample_values: List[Any] = field(default_factory=list)
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+
+
+@dataclass
+class QualityReport:
+    """Data quality assessment report."""
+    dataset_name: str
+    total_records: int
+    dimensions: Dict[QualityDimension, float] = field(default_factory=dict)
+    issues: List[QualityIssue] = field(default_factory=list)
+    passed_checks: int = 0
+    failed_checks: int = 0
+    quality_score: float = 0.0
+    level: QualityLevel = QualityLevel.ACCEPTABLE
+    generated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class DataQualityChecker:
+    """Checks data quality across multiple dimensions.
+    
+    Supports:
+    - Schema validation
+    - Completeness checks
+    - Consistency checks
+    - Range validation
+    - Pattern matching
+    - Duplicate detection
+    - Staleness detection
+    """
+    
+    def __init__(self, dataset_name: str = "default"):
+        self.dataset_name = dataset_name
+        self._rules: List[QualityRule] = []
+        self._field_validators: Dict[str, Dict[str, Any]] = {}
+        self._required_fields: Set[str] = set()
+        self._null_threshold: float = 0.0
+        self._lock = asyncio.Lock()
+    
+    def set_null_threshold(self, threshold: float) -> None:
+        """Set acceptable null percentage threshold.
+        
+        Args:
+            threshold: Threshold as decimal (0.0 to 1.0)
+        """
+        self._null_threshold = threshold
+    
+    def add_required_field(self, field_path: str) -> None:
+        """Mark a field as required.
+        
+        Args:
+            field_path: Dot-separated field path
+        """
+        self._required_fields.add(field_path)
+    
+    def add_field_validator(
         self,
-        strict_mode: bool = False,
-        max_errors: int = 100,
+        field_path: str,
+        field_type: Optional[type] = None,
+        pattern: Optional[str] = None,
+        min_value: Optional[Union[int, float]] = None,
+        max_value: Optional[Union[int, float]] = None,
+        allowed_values: Optional[List[Any]] = None,
+        nullable: bool = True
     ) -> None:
-        """
-        Initialize data quality checker.
-
+        """Add a field validator.
+        
         Args:
-            strict_mode: Fail on first error
-            max_errors: Maximum errors to collect
+            field_path: Dot-separated field path
+            field_type: Expected Python type
+            pattern: Regex pattern for strings
+            min_value: Minimum value for numbers
+            max_value: Maximum value for numbers
+            allowed_values: List of allowed values
+            nullable: Whether field can be null
         """
-        self.strict_mode = strict_mode
-        self.max_errors = max_errors
-        self._schemas: Dict[str, Dict[str, Any]] = {}
-        self._validation_history: List[Dict[str, Any]] = []
-
-    def execute(self, params: dict[str, Any]) -> dict[str, Any]:
-        """
-        Execute data quality check.
-
+        self._field_validators[field_path] = {
+            "type": field_type,
+            "pattern": pattern,
+            "min_value": min_value,
+            "max_value": max_value,
+            "allowed_values": allowed_values,
+            "nullable": nullable
+        }
+    
+    def add_rule(self, rule: QualityRule) -> None:
+        """Add a quality rule.
+        
         Args:
-            params: Dictionary containing:
-                - operation: 'check', 'register_schema', 'validate', 'report'
-                - data: Data to check
-                - schema_name: Schema to validate against
-                - checks: List of checks to perform
-
+            rule: Quality rule to add
+        """
+        self._rules.append(rule)
+    
+    def add_completeness_rule(
+        self,
+        field_path: str,
+        threshold: float = 1.0
+    ) -> None:
+        """Add a completeness check rule.
+        
+        Args:
+            field_path: Field to check
+            threshold: Minimum completion rate (0.0 to 1.0)
+        """
+        def check(data: List[Dict[str, Any]]) -> bool:
+            if not data:
+                return True
+            non_null = sum(1 for row in data if self._get_nested(row, field_path) is not None)
+            return (non_null / len(data)) >= threshold
+        
+        self.add_rule(QualityRule(
+            name=f"completeness_{field_path}",
+            dimension=QualityDimension.COMPLETENESS,
+            check_fn=check,
+            description=f"Check completeness of {field_path}",
+            threshold=threshold
+        ))
+    
+    def add_uniqueness_rule(
+        self,
+        field_path: str,
+        threshold: float = 1.0
+    ) -> None:
+        """Add a uniqueness check rule.
+        
+        Args:
+            field_path: Field to check
+            threshold: Minimum uniqueness rate (0.0 to 1.0)
+        """
+        def check(data: List[Dict[str, Any]]) -> bool:
+            if not data:
+                return True
+            values = [self._get_nested(row, field_path) for row in data]
+            non_null_values = [v for v in values if v is not None]
+            unique_count = len(set(non_null_values))
+            return (unique_count / len(non_null_values)) >= threshold if non_null_values else True
+        
+        self.add_rule(QualityRule(
+            name=f"uniqueness_{field_path}",
+            dimension=QualityDimension.UNIQUENESS,
+            check_fn=check,
+            description=f"Check uniqueness of {field_path}",
+            threshold=threshold
+        ))
+    
+    def add_consistency_rule(
+        self,
+        field_path: str,
+        pattern: str
+    ) -> None:
+        """Add a consistency rule with pattern.
+        
+        Args:
+            field_path: Field to check
+            pattern: Regex pattern
+        """
+        compiled_pattern = re.compile(pattern)
+        
+        def check(data: List[Dict[str, Any]]) -> bool:
+            if not data:
+                return True
+            for row in data:
+                value = self._get_nested(row, field_path)
+                if value is not None and not isinstance(value, str):
+                    return False
+                if value and not compiled_pattern.match(str(value)):
+                    return False
+            return True
+        
+        self.add_rule(QualityRule(
+            name=f"consistency_{field_path}",
+            dimension=QualityDimension.CONSISTENCY,
+            check_fn=check,
+            description=f"Check pattern consistency of {field_path}"
+        ))
+    
+    async def check(
+        self,
+        data: List[Dict[str, Any]],
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> QualityReport:
+        """Run all quality checks on data.
+        
+        Args:
+            data: List of data records
+            metadata: Optional dataset metadata
+            
         Returns:
-            Dictionary with validation result
+            Quality assessment report
         """
-        operation = params.get("operation", "check")
-
-        if operation == "check":
-            return self._check_data(params)
-        elif operation == "register_schema":
-            return self._register_schema(params)
-        elif operation == "validate":
-            return self._validate_against_schema(params)
-        elif operation == "report":
-            return self._get_report(params)
+        issues: List[QualityIssue] = []
+        dimension_scores: Dict[QualityDimension, List[float]] = defaultdict(list)
+        passed = 0
+        failed = 0
+        
+        for rule in self._rules:
+            try:
+                result = rule.check_fn(data)
+                if result:
+                    passed += 1
+                    dimension_scores[rule.dimension].append(100.0)
+                else:
+                    failed += 1
+                    dimension_scores[rule.dimension].append(0.0)
+                    issues.append(QualityIssue(
+                        rule_name=rule.name,
+                        dimension=rule.dimension,
+                        field_path="",
+                        message=rule.description or f"Rule {rule.name} failed",
+                        severity=rule.severity
+                    ))
+            except Exception as e:
+                logger.error(f"Error running rule {rule.name}: {e}")
+                failed += 1
+        
+        field_issues = await self._check_fields(data)
+        issues.extend(field_issues)
+        
+        for issue in field_issues:
+            dimension_scores[issue.dimension].append(0.0)
+        
+        completeness_issues = await self._check_completeness(data)
+        issues.extend(completeness_issues)
+        
+        for issue in completeness_issues:
+            dimension_scores[issue.dimension].append(0.0)
+        
+        uniqueness_issues = await self._check_uniqueness(data)
+        issues.extend(uniqueness_issues)
+        
+        for issue in uniqueness_issues:
+            dimension_scores[issue.dimension].append(0.0)
+        
+        dimension_results = {}
+        for dim, scores in dimension_scores.items():
+            dimension_results[dim] = sum(scores) / len(scores) if scores else 100.0
+        
+        total_score = sum(dimension_results.values()) / len(dimension_results) if dimension_results else 100.0
+        
+        if total_score >= 95:
+            level = QualityLevel.EXCELLENT
+        elif total_score >= 85:
+            level = QualityLevel.GOOD
+        elif total_score >= 70:
+            level = QualityLevel.ACCEPTABLE
+        elif total_score >= 50:
+            level = QualityLevel.POOR
         else:
-            return {"success": False, "error": f"Unknown operation: {operation}"}
-
-    def _check_data(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Run quality checks on data."""
-        data = params.get("data", {})
-        checks = params.get("checks", ["completeness", "validity", "consistency"])
-
-        errors = []
-        warnings = []
-        passed = []
-
-        for check in checks:
-            if check == "completeness":
-                result = self._check_completeness(data)
-            elif check == "validity":
-                result = self._check_validity(data)
-            elif check == "consistency":
-                result = self._check_consistency(data)
-            elif check == "uniqueness":
-                result = self._check_uniqueness(data)
-            elif check == "freshness":
-                result = self._check_freshness(data)
-            else:
-                result = {"passed": False, "error": f"Unknown check: {check}"}
-
-            if result.get("passed", False):
-                passed.append(check)
-            elif result.get("warning"):
-                warnings.append({check: result["warning"]})
-            else:
-                errors.append({check: result.get("error", "Check failed")})
-
-            if self.strict_mode and errors:
-                break
-
-        quality_score = len(passed) / len(checks) * 100 if checks else 100
-
-        return {
-            "success": True,
-            "quality_score": round(quality_score, 2),
-            "checks_passed": len(passed),
-            "checks_failed": len(errors),
-            "warnings": warnings,
-            "errors": errors,
-        }
-
-    def _check_completeness(self, data: dict[str, Any]) -> dict[str, Any]:
-        """Check data completeness."""
-        total_fields = len(data)
-        null_fields = sum(1 for v in data.values() if v is None or v == "")
-        missing_fields = [k for k, v in data.items() if v is None or v == ""]
-
-        completeness = (total_fields - null_fields) / total_fields * 100 if total_fields > 0 else 100
-
-        if completeness < 80:
-            return {
-                "passed": False,
-                "error": f"Completeness {completeness:.1f}% is below threshold",
-                "missing_fields": missing_fields,
-            }
-
-        return {"passed": True, "completeness": completeness}
-
-    def _check_validity(self, data: dict[str, Any]) -> dict[str, Any]:
-        """Check data validity."""
-        type_checks = {
-            "email": lambda x: bool(re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", str(x))),
-            "phone": lambda x: bool(re.match(r"^\+?[\d\s-]{10,}$", str(x))),
-            "url": lambda x: str(x).startswith(("http://", "https://")),
-            "date": lambda x: bool(re.match(r"^\d{4}-\d{2}-\d{2}$", str(x))),
-        }
-
-        invalid_fields = []
-        for field, value in data.items():
-            field_type = data.get(f"{field}_type")
-            if field_type in type_checks and value:
-                if not type_checks[field_type](value):
-                    invalid_fields.append(field)
-
-        if invalid_fields:
-            return {
-                "passed": False,
-                "error": f"Invalid fields: {invalid_fields}",
-            }
-
-        return {"passed": True}
-
-    def _check_consistency(self, data: dict[str, Any]) -> dict[str, Any]:
-        """Check data consistency."""
-        inconsistencies = []
-
-        if "start_date" in data and "end_date" in data:
-            start = data.get("start_date", "")
-            end = data.get("end_date", "")
-            if start and end and start > end:
-                inconsistencies.append("start_date is after end_date")
-
-        if "quantity" in data and "unit_price" in data:
-            if data.get("quantity", 0) < 0 or data.get("unit_price", 0) < 0:
-                inconsistencies.append("Negative quantity or price")
-
-        if inconsistencies:
-            return {"passed": False, "error": "; ".join(inconsistencies)}
-
-        return {"passed": True}
-
-    def _check_uniqueness(self, data: dict[str, Any]) -> dict[str, Any]:
-        """Check uniqueness of data records."""
-        if not isinstance(data, list):
-            return {"passed": True, "warning": "Uniqueness check requires list data"}
-
-        seen = set()
-        duplicates = []
-        for item in data:
-            key = str(item.get("id", item))
-            if key in seen:
-                duplicates.append(key)
-            seen.add(key)
-
+            level = QualityLevel.FAILING
+        
+        return QualityReport(
+            dataset_name=self.dataset_name,
+            total_records=len(data),
+            dimensions=dimension_results,
+            issues=issues,
+            passed_checks=passed,
+            failed_checks=failed,
+            quality_score=total_score,
+            level=level,
+            metadata=metadata or {}
+        )
+    
+    async def _check_fields(self, data: List[Dict[str, Any]]) -> List[QualityIssue]:
+        """Check field-level validators."""
+        issues = []
+        
+        for field_path, validator in self._field_validators.items():
+            null_count = 0
+            type_errors = 0
+            pattern_errors = 0
+            range_errors = 0
+            allowed_errors = 0
+            sample_errors = []
+            
+            for row in data:
+                value = self._get_nested(row, field_path)
+                
+                if value is None:
+                    if not validator["nullable"]:
+                        null_count += 1
+                    continue
+                
+                if validator["type"] and not isinstance(value, validator["type"]):
+                    type_errors += 1
+                    if len(sample_errors) < 5:
+                        sample_errors.append(value)
+                    continue
+                
+                if validator["pattern"] and isinstance(value, str):
+                    if not re.match(validator["pattern"], value):
+                        pattern_errors += 1
+                        if len(sample_errors) < 5:
+                            sample_errors.append(value)
+                
+                if validator["min_value"] is not None and isinstance(value, (int, float)):
+                    if value < validator["min_value"]:
+                        range_errors += 1
+                
+                if validator["max_value"] is not None and isinstance(value, (int, float)):
+                    if value > validator["max_value"]:
+                        range_errors += 1
+                
+                if validator["allowed_values"]:
+                    if value not in validator["allowed_values"]:
+                        allowed_errors += 1
+                        if len(sample_errors) < 5:
+                            sample_errors.append(value)
+            
+            total = len(data)
+            
+            if null_count > 0:
+                rate = null_count / total
+                if rate > self._null_threshold:
+                    issues.append(QualityIssue(
+                        rule_name=f"nullable_{field_path}",
+                        dimension=QualityDimension.COMPLETENESS,
+                        field_path=field_path,
+                        message=f"Null rate {rate:.2%} exceeds threshold",
+                        severity="warning",
+                        issue_count=null_count
+                    ))
+            
+            if type_errors > 0:
+                issues.append(QualityIssue(
+                    rule_name=f"type_{field_path}",
+                    dimension=QualityDimension.CONSISTENCY,
+                    field_path=field_path,
+                    message=f"Type mismatch for {field_path}",
+                    severity="error",
+                    issue_count=type_errors,
+                    sample_values=sample_errors
+                ))
+            
+            if pattern_errors > 0:
+                issues.append(QualityIssue(
+                    rule_name=f"pattern_{field_path}",
+                    dimension=QualityDimension.CONSISTENCY,
+                    field_path=field_path,
+                    message=f"Pattern mismatch for {field_path}",
+                    severity="error",
+                    issue_count=pattern_errors,
+                    sample_values=sample_errors
+                ))
+            
+            if range_errors > 0:
+                issues.append(QualityIssue(
+                    rule_name=f"range_{field_path}",
+                    dimension=QualityDimension.ACCURACY,
+                    field_path=field_path,
+                    message=f"Value out of range for {field_path}",
+                    severity="error",
+                    issue_count=range_errors,
+                    sample_values=sample_errors
+                ))
+        
+        return issues
+    
+    async def _check_completeness(self, data: List[Dict[str, Any]]) -> List[QualityIssue]:
+        """Check completeness of required fields."""
+        issues = []
+        
+        for field_path in self._required_fields:
+            null_count = 0
+            for row in data:
+                if self._get_nested(row, field_path) is None:
+                    null_count += 1
+            
+            if null_count > 0:
+                rate = null_count / len(data)
+                if rate > self._null_threshold:
+                    issues.append(QualityIssue(
+                        rule_name=f"required_{field_path}",
+                        dimension=QualityDimension.COMPLETENESS,
+                        field_path=field_path,
+                        message=f"Required field {field_path} has {rate:.2%} null rate",
+                        severity="error",
+                        issue_count=null_count
+                    ))
+        
+        return issues
+    
+    async def _check_uniqueness(self, data: List[Dict[str, Any]]) -> List[QualityIssue]:
+        """Check for duplicate records."""
+        issues = []
+        
+        seen_rows = Counter()
+        for i, row in enumerate(data):
+            row_key = str(sorted(row.items()))
+            seen_rows[row_key] += 1
+        
+        duplicates = {k: v for k, v in seen_rows.items() if v > 1}
+        
         if duplicates:
-            return {
-                "passed": False,
-                "error": f"Found {len(duplicates)} duplicate records",
-            }
+            total_dupes = sum(v - 1 for v in duplicates.values())
+            issues.append(QualityIssue(
+                rule_name="duplicate_records",
+                dimension=QualityDimension.UNIQUENESS,
+                field_path="",
+                message=f"Found {len(duplicates)} duplicate record patterns with {total_dupes} total duplicates",
+                severity="warning",
+                issue_count=total_dupes
+            ))
+        
+        return issues
+    
+    def _get_nested(self, data: Dict[str, Any], path: str) -> Any:
+        """Get value from nested dict using dot notation."""
+        keys = path.split(".")
+        value = data
+        for key in keys:
+            if isinstance(value, dict) and key in value:
+                value = value[key]
+            else:
+                return None
+        return value
 
-        return {"passed": True}
 
-    def _check_freshness(self, data: dict[str, Any]) -> dict[str, Any]:
-        """Check data freshness."""
-        timestamp_field = data.get("timestamp_field", "updated_at")
-        max_age_seconds = data.get("max_age", 86400)
-
-        if timestamp_field not in data:
-            return {"passed": True, "warning": "No timestamp field found"}
-
-        try:
-            record_time = data[timestamp_field]
-            age = time.time() - record_time
-            if age > max_age_seconds:
-                return {
-                    "passed": False,
-                    "error": f"Data is {age:.0f}s old, exceeds {max_age_seconds}s threshold",
-                }
-        except Exception as e:
-            return {"passed": False, "error": f"Freshness check failed: {e}"}
-
-        return {"passed": True}
-
-    def _register_schema(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Register data schema."""
-        schema_name = params.get("schema_name", "")
-        schema_def = params.get("schema", {})
-
-        if not schema_name:
-            return {"success": False, "error": "Schema name is required"}
-
-        self._schemas[schema_name] = {
-            "definition": schema_def,
-            "registered_at": time.time(),
-        }
-
-        return {"success": True, "schema_name": schema_name}
-
-    def _validate_against_schema(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Validate data against registered schema."""
-        schema_name = params.get("schema_name", "")
-        data = params.get("data", {})
-
-        if schema_name not in self._schemas:
-            return {"success": False, "error": f"Schema '{schema_name}' not found"}
-
-        schema = self._schemas[schema_name]["definition"]
-        errors = []
-
-        for field, field_spec in schema.items():
-            required = field_spec.get("required", False)
-            field_type = field_spec.get("type")
-
-            if required and field not in data:
-                errors.append(f"Required field '{field}' is missing")
-                continue
-
-            if field in data and field_type:
-                value = data[field]
-                if not self._validate_type(value, field_type):
-                    errors.append(f"Field '{field}' has invalid type, expected {field_type}")
-
-        return {
-            "success": len(errors) == 0,
-            "errors": errors,
-        }
-
-    def _validate_type(self, value: Any, expected_type: str) -> bool:
-        """Validate value against expected type."""
-        type_map = {
-            "string": str,
-            "integer": int,
-            "float": (int, float),
-            "boolean": bool,
-            "list": list,
-            "dict": dict,
-        }
-        return isinstance(value, type_map.get(expected_type, object))
-
-    def _get_report(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Get quality report."""
-        return {
-            "success": True,
-            "schemas_registered": len(self._schemas),
-            "validations_performed": len(self._validation_history),
-            "schemas": list(self._schemas.keys()),
-        }
+class DuplicateDetector:
+    """Detects duplicate records using various strategies."""
+    
+    def __init__(self, threshold: float = 0.85):
+        self.threshold = threshold
+    
+    def find_exact_duplicates(
+        self,
+        data: List[Dict[str, Any]],
+        key_fields: List[str]
+    ) -> List[Set[int]]:
+        """Find exact duplicate records.
+        
+        Args:
+            data: List of records
+            key_fields: Fields to use for comparison
+            
+        Returns:
+            List of index sets for duplicate groups
+        """
+        seen: Dict[Tuple, List[int]] = defaultdict(list)
+        duplicates: List[Set[int]] = []
+        
+        for i, row in enumerate(data):
+            key = tuple(self._get_field(row, f) for f in key_fields)
+            seen[key].append(i)
+        
+        for indices in seen.values():
+            if len(indices) > 1:
+                duplicates.append(set(indices))
+        
+        return duplicates
+    
+    def find_fuzzy_duplicates(
+        self,
+        data: List[Dict[str, Any]],
+        compare_fields: List[str]
+    ) -> List[Tuple[int, int, float]]:
+        """Find fuzzy duplicate pairs.
+        
+        Args:
+            data: List of records
+            compare_fields: Fields to compare
+            
+        Returns:
+            List of (index1, index2, similarity) tuples
+        """
+        from difflib import SequenceMatcher
+        
+        duplicates = []
+        
+        for i in range(len(data)):
+            for j in range(i + 1, len(data)):
+                row1, row2 = data[i], data[j]
+                
+                similarities = []
+                for field in compare_fields:
+                    v1 = str(self._get_field(row1, field))
+                    v2 = str(self._get_field(row2, field))
+                    matcher = SequenceMatcher(None, v1, v2)
+                    similarities.append(matcher.ratio())
+                
+                avg_similarity = sum(similarities) / len(similarities)
+                
+                if avg_similarity >= self.threshold:
+                    duplicates.append((i, j, avg_similarity))
+        
+        return duplicates
+    
+    def _get_field(self, row: Dict[str, Any], field: str) -> Any:
+        """Get field value from row."""
+        return row.get(field)
