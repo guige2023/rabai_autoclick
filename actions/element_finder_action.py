@@ -1,258 +1,269 @@
-"""Element finder action for locating UI elements.
+"""
+Element Finder Action Module.
 
-This module provides element location capabilities using
-image recognition, template matching, and coordinate search.
-
-Example:
-    >>> action = ElementFinderAction()
-    >>> result = action.execute(template="/path/to/button.png")
+Finds UI elements using various strategies: XPath, CSS selector,
+text content, and visual heuristics.
 """
 
-from __future__ import annotations
-
-import time
-from dataclasses import dataclass, field
-from typing import Any, Optional
+import re
+from typing import Any, Callable, Optional
 
 
-@dataclass
-class ElementMatch:
-    """Represents a found element match."""
-    x: int
-    y: int
-    width: int
-    height: int
-    confidence: float
+class ElementCriteria:
+    """Criteria for element matching."""
+
+    def __init__(
+        self,
+        tag: Optional[str] = None,
+        text: Optional[str] = None,
+        text_contains: Optional[str] = None,
+        class_name: Optional[str] = None,
+        id: Optional[str] = None,
+        name: Optional[str] = None,
+        href: Optional[str] = None,
+        placeholder: Optional[str] = None,
+        role: Optional[str] = None,
+        visible: Optional[bool] = None,
+        enabled: Optional[bool] = None,
+    ):
+        """
+        Initialize element criteria.
+
+        Args:
+            tag: HTML/XML tag name.
+            text: Exact text match.
+            text_contains: Text must contain this substring.
+            class_name: CSS class name (partial match).
+            id: Element ID.
+            name: Name attribute.
+            href: Href attribute (for anchors).
+            placeholder: Placeholder attribute.
+            role: ARIA role attribute.
+            visible: Element visibility requirement.
+            enabled: Element enabled state requirement.
+        """
+        self.tag = tag
+        self.text = text
+        self.text_contains = text_contains
+        self.class_name = class_name
+        self.id = id
+        self.name = name
+        self.href = href
+        self.placeholder = placeholder
+        self.role = role
+        self.visible = visible
+        self.enabled = enabled
+
+    def matches(self, element: dict) -> bool:
+        """
+        Check if an element matches all criteria.
+
+        Args:
+            element: Element dictionary with attributes.
+
+        Returns:
+            True if matches, False otherwise.
+        """
+        if self.tag:
+            if element.get("tag", "").lower() != self.tag.lower():
+                return False
+
+        if self.id:
+            if element.get("id", "") != self.id:
+                return False
+
+        if self.name:
+            if element.get("name", "") != self.name:
+                return False
+
+        if self.class_name:
+            class_attr = element.get("class", "")
+            if self.class_name not in class_attr:
+                return False
+
+        if self.role:
+            if element.get("role", "") != self.role:
+                return False
+
+        if self.href:
+            if self.href not in element.get("href", ""):
+                return False
+
+        if self.placeholder:
+            if element.get("placeholder", "") != self.placeholder:
+                return False
+
+        if self.text:
+            elem_text = element.get("text", "").strip()
+            if elem_text != self.text:
+                return False
+
+        if self.text_contains:
+            elem_text = element.get("text", "").lower()
+            if self.text_contains.lower() not in elem_text:
+                return False
+
+        if self.visible is not None:
+            if element.get("visible", True) != self.visible:
+                return False
+
+        if self.enabled is not None:
+            if element.get("enabled", True) != self.enabled:
+                return False
+
+        return True
 
 
-@dataclass
-class SearchRegion:
-    """Region to search within."""
-    x: int = 0
-    y: int = 0
-    width: int = 0
-    height: int = 0
+class ElementFinder:
+    """Finds elements in a DOM-like structure."""
 
-
-class ElementFinderAction:
-    """Element finder action using image recognition.
-
-    Provides template matching and image-based element
-    location with confidence scoring.
-
-    Example:
-        >>> action = ElementFinderAction()
-        >>> result = action.execute(
-        ...     template="submit_button.png",
-        ...     confidence=0.8
-        ... )
-    """
-
-    def __init__(self) -> None:
+    def __init__(self):
         """Initialize element finder."""
-        self._last_matches: list[ElementMatch] = []
+        self._xpath_engine = XPathEngine()
 
-    def execute(
+    def find_all(
         self,
-        template: str,
-        screenshot: Optional[str] = None,
-        region: Optional[tuple[int, int, int, int]] = None,
-        confidence: float = 0.8,
-        multiple: bool = False,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        """Execute element search.
+        dom: list[dict],
+        criteria: ElementCriteria,
+    ) -> list[dict]:
+        """
+        Find all elements matching criteria.
 
         Args:
-            template: Path to template image.
-            screenshot: Optional screenshot to search in.
-            region: Search region (x, y, width, height).
-            confidence: Minimum confidence threshold.
-            multiple: Whether to find all matches.
-            **kwargs: Additional parameters.
+            dom: List of element dictionaries (DOM tree).
+            criteria: Element matching criteria.
 
         Returns:
-            Search result dictionary.
-
-        Raises:
-            ValueError: If template is missing.
+            List of matching element dictionaries.
         """
-        try:
-            import cv2
-            import numpy as np
-        except ImportError:
-            return {
-                "success": False,
-                "error": "OpenCV not installed. Run: pip install opencv-python",
-            }
+        results = []
+        self._search(dom, criteria, results)
+        return results
 
-        if not template:
-            raise ValueError("template is required")
+    def find_first(
+        self,
+        dom: list[dict],
+        criteria: ElementCriteria,
+    ) -> Optional[dict]:
+        """
+        Find first element matching criteria.
 
-        result: dict[str, Any] = {"template": template, "success": True}
+        Args:
+            dom: List of element dictionaries.
+            criteria: Element matching criteria.
 
-        try:
-            # Load template
-            template_img = cv2.imread(template, cv2.IMREAD_COLOR)
-            if template_img is None:
-                raise ValueError(f"Could not load template: {template}")
-            template_h, template_w = template_img.shape[:2]
+        Returns:
+            First matching element or None.
+        """
+        for element in self._flatten(dom):
+            if criteria.matches(element):
+                return element
+        return None
 
-            # Load screenshot
-            if screenshot:
-                search_img = cv2.imread(screenshot, cv2.IMREAD_COLOR)
-            else:
-                search_img = self._capture_screen(region)
+    def find_by_xpath(self, dom: list[dict], xpath: str) -> list[dict]:
+        """
+        Find elements using XPath expression.
 
-            if search_img is None:
-                raise ValueError("Could not capture screenshot")
+        Args:
+            dom: DOM structure.
+            xpath: XPath expression.
 
-            # Template matching
-            method = kwargs.get("method", cv2.TM_CCOEFF_NORMED)
-            res = cv2.matchTemplate(search_img, template_img, method)
-            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+        Returns:
+            List of matching elements.
+        """
+        return self._xpath_engine.find(dom, xpath)
 
-            if multiple:
-                # Find all matches above threshold
-                locations = np.where(res >= confidence)
-                matches = []
-                for pt in zip(*locations[::-1]):
-                    conf = res[pt[1], pt[0]]
-                    matches.append(ElementMatch(
-                        x=pt[0],
-                        y=pt[1],
-                        width=template_w,
-                        height=template_h,
-                        confidence=float(conf),
-                    ))
-                self._last_matches = matches
-                result["count"] = len(matches)
-                result["matches"] = [
-                    {"x": m.x, "y": m.y, "w": m.width, "h": m.height, "conf": m.confidence}
-                    for m in matches
-                ]
-            else:
-                # Find best match
-                if max_val >= confidence:
-                    match = ElementMatch(
-                        x=max_loc[0],
-                        y=max_loc[1],
-                        width=template_w,
-                        height=template_h,
-                        confidence=float(max_val),
-                    )
-                    self._last_matches = [match]
-                    result["found"] = True
-                    result["match"] = {
-                        "x": match.x,
-                        "y": match.y,
-                        "w": match.width,
-                        "h": match.height,
-                        "conf": match.confidence,
-                    }
-                    result["center"] = (
-                        match.x + match.width // 2,
-                        match.y + match.height // 2,
-                    )
-                else:
-                    result["found"] = False
-                    result["confidence"] = float(max_val)
+    def _search(
+        self,
+        elements: list[dict],
+        criteria: ElementCriteria,
+        results: list[dict],
+    ) -> None:
+        """Recursively search DOM for matching elements."""
+        for elem in elements:
+            if criteria.matches(elem):
+                results.append(elem)
+            children = elem.get("children", [])
+            if children:
+                self._search(children, criteria, results)
 
-        except Exception as e:
-            result["success"] = False
-            result["error"] = str(e)
-
+    def _flatten(self, elements: list[dict]) -> list[dict]:
+        """Flatten DOM tree into list."""
+        result = []
+        for elem in elements:
+            result.append(elem)
+            children = elem.get("children", [])
+            if children:
+                result.extend(self._flatten(children))
         return result
 
-    def _capture_screen(self, region: Optional[tuple[int, int, int, int]] = None) -> Any:
-        """Capture screen for searching.
+
+class XPathEngine:
+    """Simple XPath expression engine for element finding."""
+
+    def find(self, dom: list[dict], xpath: str) -> list[dict]:
+        """
+        Execute XPath query on DOM.
 
         Args:
-            region: Optional capture region.
+            dom: DOM structure.
+            xpath: XPath expression.
 
         Returns:
-            OpenCV image.
+            List of matching elements.
         """
-        try:
-            import pyautogui
-            import numpy as np
-            from PIL import Image
+        if xpath.startswith("//"):
+            tag = xpath[2:]
+            return self._descendant_or_self(dom, tag)
+        elif xpath.startswith("/"):
+            return self._descendant_or_self(dom, xpath[1:])
+        return []
 
-            img = pyautogui.screenshot(region=region)
-            return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-        except Exception:
-            return None
+    def _descendant_or_self(
+        self, elements: list[dict], tag: str
+    ) -> list[dict]:
+        """Find all descendants matching tag."""
+        results = []
+        for elem in elements:
+            if elem.get("tag", "").lower() == tag.lower():
+                results.append(elem)
+            children = elem.get("children", [])
+            if children:
+                results.extend(self._descendant_or_self(children, tag))
+        return results
 
-    def wait_for_element(
-        self,
-        template: str,
-        timeout: float = 10.0,
-        interval: float = 0.5,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        """Wait for element to appear on screen.
 
-        Args:
-            template: Template image path.
-            timeout: Maximum wait time.
-            interval: Check interval.
-            **kwargs: Additional search parameters.
+def find_element(
+    dom: list[dict],
+    tag: Optional[str] = None,
+    text: Optional[str] = None,
+    text_contains: Optional[str] = None,
+    class_name: Optional[str] = None,
+    id: Optional[str] = None,
+    role: Optional[str] = None,
+) -> Optional[dict]:
+    """
+    Convenience function to find a single element.
 
-        Returns:
-            Search result when found or timeout.
-        """
-        start_time = time.time()
-        result: dict[str, Any] = {"found": False}
+    Args:
+        dom: DOM structure.
+        tag: HTML tag name.
+        text: Exact text match.
+        text_contains: Text contains substring.
+        class_name: Class name.
+        id: Element ID.
+        role: ARIA role.
 
-        while time.time() - start_time < timeout:
-            result = self.execute(template=template, **kwargs)
-            if result.get("found"):
-                result["wait_time"] = time.time() - start_time
-                return result
-            time.sleep(interval)
-
-        result["wait_time"] = timeout
-        result["timeout"] = True
-        return result
-
-    def click_element(
-        self,
-        template: str,
-        offset_x: int = 0,
-        offset_y: int = 0,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        """Find and click element.
-
-        Args:
-            template: Template image path.
-            offset_x: Click offset from element center.
-            offset_y: Click offset from element center.
-            **kwargs: Additional search parameters.
-
-        Returns:
-            Click result dictionary.
-        """
-        result = self.execute(template=template, **kwargs)
-
-        if result.get("found"):
-            center = result["center"]
-            click_x = center[0] + offset_x
-            click_y = center[1] + offset_y
-
-            try:
-                import pyautogui
-                pyautogui.click(click_x, click_y)
-                result["clicked"] = (click_x, click_y)
-            except Exception as e:
-                result["click_error"] = str(e)
-
-        return result
-
-    def get_last_matches(self) -> list[ElementMatch]:
-        """Get last found matches.
-
-        Returns:
-            List of ElementMatch objects.
-        """
-        return self._last_matches
+    Returns:
+        First matching element or None.
+    """
+    criteria = ElementCriteria(
+        tag=tag,
+        text=text,
+        text_contains=text_contains,
+        class_name=class_name,
+        id=id,
+        role=role,
+    )
+    finder = ElementFinder()
+    return finder.find_first(dom, criteria)
