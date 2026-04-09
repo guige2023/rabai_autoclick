@@ -169,6 +169,45 @@ class DelayAction(BaseAction):
     display_name = "延时等待"
     description = "等待指定时间"
     
+    def _parse_duration(self, value: Union[int, float, str]) -> Optional[float]:
+        """Parse duration from various formats.
+        
+        Supports:
+        - int/float: treated as seconds
+        - str "Ns": N seconds
+        - str "Nm": N minutes
+        - str "Nh": N hours
+        
+        Args:
+            value: Duration value in any supported format.
+            
+        Returns:
+            Duration in seconds, or None if invalid.
+        """
+        if isinstance(value, (int, float)):
+            return float(value)
+        
+        if isinstance(value, str):
+            value = value.strip()
+            match = DELAY_PATTERN.match(value)
+            if match:
+                num = int(match.group(1))
+                unit = match.group(2)
+                if unit == 's':
+                    return float(num)
+                elif unit == 'm':
+                    return float(num * 60)
+                elif unit == 'h':
+                    return float(num * 3600)
+            
+            # Try parsing as plain number string
+            try:
+                return float(value)
+            except ValueError:
+                return None
+        
+        return None
+    
     def execute(
         self, 
         context: Any, 
@@ -183,13 +222,17 @@ class DelayAction(BaseAction):
         Returns:
             ActionResult indicating success or failure.
         """
-        seconds = params.get('seconds', 1)
+        seconds_input = params.get('seconds', 1)
         random_deviation = params.get('random_deviation', 0)
         
-        # Validate seconds
-        valid, msg = self.validate_type(seconds, (int, float), 'seconds')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        # Parse duration (supports "30s", "2m", "1h" format)
+        seconds = self._parse_duration(seconds_input)
+        if seconds is None:
+            return ActionResult(
+                success=False,
+                message=f"Invalid duration format: {seconds_input!r}. Use seconds (int/float) or human-readable format like '30s', '2m', '1h'."
+            )
+        
         if seconds < 0:
             return ActionResult(
                 success=False,
@@ -318,6 +361,10 @@ class LoopAction(BaseAction):
             
         Returns:
             ActionResult with next_step_id for loop control.
+            
+        Iteration tracking:
+            - First call: iteration=0, returns loop_start if count > 0
+            - Nth call where iteration >= count: returns None (end loop)
         """
         loop_id = params.get('loop_id', 'default')
         count = params.get('count', 1)
@@ -335,25 +382,29 @@ class LoopAction(BaseAction):
             )
         
         try:
+            # Get current iteration (starts at 0)
             current = context.get(f'_loop_{loop_id}', 0)
-            current += 1
-            context.set(f'_loop_{loop_id}', current)
             
-            if current <= count:
-                return ActionResult(
-                    success=True,
-                    message=f"循环 {current}/{count}",
-                    data={'current': current, 'total': count},
-                    next_step_id=loop_start
-                )
-            else:
+            # Check if loop should end (current iteration >= count)
+            if current >= count:
                 context.set(f'_loop_{loop_id}', 0)
                 return ActionResult(
                     success=True,
                     message=f"循环结束",
-                    data={'current': current - 1, 'total': count},
+                    data={'current': current, 'total': count},
                     next_step_id=loop_end
                 )
+            
+            # Increment iteration counter for next call
+            context.set(f'_loop_{loop_id}', current + 1)
+            
+            # Return loop_start to execute loop body
+            return ActionResult(
+                success=True,
+                message=f"循环 {current + 1}/{count}",
+                data={'current': current + 1, 'total': count},
+                next_step_id=loop_start
+            )
         except Exception as e:
             return ActionResult(
                 success=False,
@@ -375,6 +426,43 @@ class SetVariableAction(BaseAction):
     action_type = "set_variable"
     display_name = "设置变量"
     description = "设置上下文变量值"
+    
+    def _parse_json_value(self, value: str, value_type: str) -> Any:
+        """Parse JSON value for complex types.
+        
+        Args:
+            value: String value to parse.
+            value_type: Expected type (list, dict, tuple, none).
+            
+        Returns:
+            Parsed value of appropriate type.
+            
+        Raises:
+            ValueError: If JSON parsing fails or type doesn't match.
+        """
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON for {value_type}: {e}")
+        
+        if value_type == 'none':
+            if parsed is not None:
+                raise ValueError(f"Expected null JSON value, got {type(parsed).__name__}")
+            return None
+        elif value_type == 'list':
+            if not isinstance(parsed, list):
+                raise ValueError(f"Expected list JSON value, got {type(parsed).__name__}")
+            return parsed
+        elif value_type == 'dict':
+            if not isinstance(parsed, dict):
+                raise ValueError(f"Expected dict JSON value, got {type(parsed).__name__}")
+            return parsed
+        elif value_type == 'tuple':
+            if not isinstance(parsed, list):
+                raise ValueError(f"Expected list JSON value for tuple, got {type(parsed).__name__}")
+            return tuple(parsed)
+        
+        return parsed
     
     def execute(
         self, 
@@ -429,6 +517,8 @@ class SetVariableAction(BaseAction):
                     value = bool(value)
             elif value_type == 'expression':
                 value = context._evaluate_expression(value)
+            elif value_type in ('list', 'dict', 'tuple', 'none'):
+                value = self._parse_json_value(str(value), value_type)
             # else: keep as string
             
             context.set(name, value)
