@@ -1,520 +1,268 @@
-"""UI region utilities for UI automation.
+"""UI Region utilities for rectangular region operations.
 
-Provides utilities for managing UI regions, grid layouts,
-hotspot detection, and region-based operations.
+This module provides utilities for working with UI regions (rectangles),
+including intersection, containment, merging, and splitting operations.
 """
 
-from __future__ import annotations
-
-import math
-from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import List, Tuple, Optional, Union
+from dataclasses import dataclass
 
 
 @dataclass
 class Region:
-    """Represents a 2D region/rectangle."""
+    """Represents a rectangular region with x, y, width, height."""
     x: float
     y: float
     width: float
     height: float
-    
+
     @property
     def left(self) -> float:
         return self.x
-    
-    @property
-    def top(self) -> float:
-        return self.y
-    
+
     @property
     def right(self) -> float:
         return self.x + self.width
-    
+
+    @property
+    def top(self) -> float:
+        return self.y
+
     @property
     def bottom(self) -> float:
         return self.y + self.height
-    
+
     @property
     def center(self) -> Tuple[float, float]:
         return (self.x + self.width / 2, self.y + self.height / 2)
-    
-    @property
-    def center_x(self) -> float:
-        return self.x + self.width / 2
-    
-    @property
-    def center_y(self) -> float:
-        return self.y + self.height / 2
-    
+
     @property
     def area(self) -> float:
         return self.width * self.height
-    
-    @property
-    def is_empty(self) -> bool:
-        return self.width <= 0 or self.height <= 0
-    
-    def contains_point(self, x: float, y: float) -> bool:
-        """Check if point is inside region."""
-        return self.left <= x <= self.right and self.top <= y <= self.bottom
-    
-    def contains_region(self, other: "Region") -> bool:
-        """Check if this region fully contains another."""
-        return (
-            self.left <= other.left and
-            self.top <= other.top and
-            self.right >= other.right and
-            self.bottom >= other.bottom
-        )
-    
-    def intersects(self, other: "Region") -> bool:
-        """Check if regions intersect."""
-        return not (
-            self.right < other.left or
-            self.left > other.right or
-            self.bottom < other.top or
-            self.top > other.bottom
-        )
-    
-    def intersection(self, other: "Region") -> Optional["Region"]:
-        """Get intersection of two regions."""
+
+    def contains_point(self, px: float, py: float) -> bool:
+        """Check if a point is within this region."""
+        return self.left <= px < self.right and self.top <= py < self.bottom
+
+    def contains_region(self, other: 'Region') -> bool:
+        """Check if another region is fully contained within this one."""
+        return (self.contains_point(other.left, other.top) and
+                self.contains_point(other.right - 1, other.bottom - 1))
+
+    def intersects(self, other: 'Region') -> bool:
+        """Check if this region intersects with another region."""
+        return not (self.right <= other.left or
+                    self.left >= other.right or
+                    self.bottom <= other.top or
+                    self.top >= other.bottom)
+
+    def intersection(self, other: 'Region') -> Optional['Region']:
+        """Get the intersection region with another region."""
         if not self.intersects(other):
             return None
-        
+
         left = max(self.left, other.left)
         top = max(self.top, other.top)
         right = min(self.right, other.right)
         bottom = min(self.bottom, other.bottom)
-        
+
         return Region(left, top, right - left, bottom - top)
-    
-    def union(self, other: "Region") -> "Region":
-        """Get union of two regions."""
+
+    def union(self, other: 'Region') -> 'Region':
+        """Get the minimal bounding region containing both regions."""
         left = min(self.left, other.left)
         top = min(self.top, other.top)
         right = max(self.right, other.right)
         bottom = max(self.bottom, other.bottom)
-        
+
         return Region(left, top, right - left, bottom - top)
-    
-    def distance_to_point(self, x: float, y: float) -> float:
-        """Get distance from point to region."""
-        if self.contains_point(x, y):
-            return 0.0
-        
-        dx = max(self.left - x, 0, x - self.right)
-        dy = max(self.top - y, 0, y - self.bottom)
-        
-        return math.sqrt(dx * dx + dy * dy)
-    
-    def clip(self, bounds: "Region") -> "Region":
-        """Clip this region to bounds."""
-        result = self.intersection(bounds)
-        return result if result else Region(0, 0, 0, 0)
-    
-    def expand(self, dx: float, dy: float) -> "Region":
-        """Expand region by dx/dy on each side."""
+
+    def merge_if_adjacent(self, other: 'Region', tolerance: float = 1.0) -> Optional['Region']:
+        """Merge with another region if they are adjacent or overlapping."""
+        if self.intersects(other) or self._is_adjacent_to(other, tolerance):
+            return self.union(other)
+        return None
+
+    def _is_adjacent_to(self, other: 'Region', tolerance: float) -> bool:
+        """Check if regions are adjacent within tolerance."""
+        # Horizontal adjacency
+        if (abs(self.right - other.left) <= tolerance or
+            abs(self.left - other.right) <= tolerance):
+            vertical_overlap = (self.top < other.bottom and
+                              self.bottom > other.top)
+            if vertical_overlap:
+                return True
+
+        # Vertical adjacency
+        if (abs(self.bottom - other.top) <= tolerance or
+            abs(self.top - other.bottom) <= tolerance):
+            horizontal_overlap = (self.left < other.right and
+                                self.right > other.left)
+            if horizontal_overlap:
+                return True
+
+        return False
+
+    def split_horizontal(self, ratio: float) -> Tuple['Region', 'Region']:
+        """Split region horizontally at a ratio point."""
+        split_x = self.x + self.width * ratio
+        left_region = Region(self.x, self.y, split_x - self.x, self.height)
+        right_region = Region(split_x, self.y, self.right - split_x, self.height)
+        return left_region, right_region
+
+    def split_vertical(self, ratio: float) -> Tuple['Region', 'Region']:
+        """Split region vertically at a ratio point."""
+        split_y = self.y + self.height * ratio
+        top_region = Region(self.x, self.y, self.width, split_y - self.y)
+        bottom_region = Region(self.x, split_y, self.width, self.bottom - split_y)
+        return top_region, bottom_region
+
+    def expand(self, dx: float, dy: float) -> 'Region':
+        """Expand region by dx and dy on all sides."""
         return Region(
-            self.left - dx,
-            self.top - dy,
+            self.x - dx,
+            self.y - dy,
             self.width + 2 * dx,
             self.height + 2 * dy
         )
-    
-    def shrink(self, dx: float, dy: float) -> "Region":
-        """Shrink region by dx/dy on each side."""
+
+    def shrink(self, dx: float, dy: float) -> 'Region':
+        """Shrink region by dx and dy on all sides."""
         return self.expand(-dx, -dy)
-    
-    def subdivide(
-        self,
-        rows: int,
-        cols: int
-    ) -> List["Region"]:
-        """Subdivide region into grid.
-        
-        Args:
-            rows: Number of rows.
-            cols: Number of columns.
-            
-        Returns:
-            List of sub-regions.
-        """
-        if rows <= 0 or cols <= 0:
-            return []
-        
+
+    def grid(self, rows: int, cols: int) -> List['Region']:
+        """Divide region into a grid of smaller regions."""
         cell_width = self.width / cols
         cell_height = self.height / rows
-        
+
         regions = []
         for row in range(rows):
             for col in range(cols):
-                x = self.left + col * cell_width
-                y = self.top + row * cell_height
-                regions.append(Region(x, y, cell_width, cell_height))
-        
+                regions.append(Region(
+                    self.x + col * cell_width,
+                    self.y + row * cell_height,
+                    cell_width,
+                    cell_height
+                ))
         return regions
 
+    def distance_to_point(self, px: float, py: float) -> float:
+        """Calculate minimum distance from a point to this region."""
+        dx = max(self.left - px, 0, px - self.right)
+        dy = max(self.top - py, 0, py - self.bottom)
+        return (dx ** 2 + dy ** 2) ** 0.5
 
-@dataclass
-class Hotspot:
-    """A clickable region with metadata."""
-    region: Region
-    name: str
-    action: Optional[Callable[[], None]] = None
-    tags: Set[str] = field(default_factory=set)
-    priority: int = 0
-    enabled: bool = True
+    def normalize(self) -> 'Region':
+        """Ensure width and height are positive."""
+        x = self.x if self.width >= 0 else self.x + self.width
+        y = self.y if self.height >= 0 else self.y + self.height
+        width = abs(self.width)
+        height = abs(self.height)
+        return Region(x, y, width, height)
 
+    def aspect_ratio(self) -> float:
+        """Return width / height ratio."""
+        if self.height == 0:
+            return float('inf')
+        return self.width / self.height
 
-class RegionManager:
-    """Manages UI regions and hotspots.
-    
-    Provides utilities for creating, organizing, and
-    querying regions and hotspots.
-    """
-    
-    def __init__(self) -> None:
-        """Initialize the region manager."""
-        self._regions: Dict[str, Region] = {}
-        self._hotspots: Dict[str, Hotspot] = {}
-        self._region_groups: Dict[str, Set[str]] = {}
-    
-    def add_region(
-        self,
-        region_id: str,
-        x: float,
-        y: float,
-        width: float,
-        height: float
-    ) -> Region:
-        """Add a region.
-        
-        Args:
-            region_id: Unique identifier.
-            x: Left coordinate.
-            y: Top coordinate.
-            width: Region width.
-            height: Region height.
-            
-        Returns:
-            Created region.
-        """
-        region = Region(x, y, width, height)
-        self._regions[region_id] = region
-        return region
-    
-    def add_region_from_region(
-        self,
-        region_id: str,
-        region: Region
-    ) -> Region:
-        """Add a region from another region object.
-        
-        Args:
-            region_id: Unique identifier.
-            region: Region to add.
-            
-        Returns:
-            Added region.
-        """
-        self._regions[region_id] = region
-        return region
-    
-    def get_region(self, region_id: str) -> Optional[Region]:
-        """Get a region by ID.
-        
-        Args:
-            region_id: Region identifier.
-            
-        Returns:
-            Region or None.
-        """
-        return self._regions.get(region_id)
-    
-    def remove_region(self, region_id: str) -> bool:
-        """Remove a region.
-        
-        Args:
-            region_id: Region to remove.
-            
-        Returns:
-            True if removed.
-        """
-        if region_id in self._regions:
-            del self._regions[region_id]
-            return True
-        return False
-    
-    def get_regions_in_point(
-        self,
-        x: float,
-        y: float
-    ) -> List[Tuple[str, Region]]:
-        """Get all regions containing a point.
-        
-        Args:
-            x: X coordinate.
-            y: Y coordinate.
-            
-        Returns:
-            List of (region_id, region) tuples.
-        """
-        return [
-            (rid, r) for rid, r in self._regions.items()
-            if r.contains_point(x, y)
-        ]
-    
-    def get_region_at_point(
-        self,
-        x: float,
-        y: float
-    ) -> Optional[Tuple[str, Region]]:
-        """Get the topmost region at a point.
-        
-        Args:
-            x: X coordinate.
-            y: Y coordinate.
-            
-        Returns:
-            (region_id, region) tuple or None.
-        """
-        regions = self.get_regions_in_point(x, y)
-        if regions:
-            return regions[-1]
-        return None
-    
-    def add_hotspot(
-        self,
-        hotspot_id: str,
-        region: Region,
-        name: str,
-        action: Optional[Callable[[], None]] = None,
-        tags: Optional[Set[str]] = None
-    ) -> Hotspot:
-        """Add a hotspot.
-        
-        Args:
-            hotspot_id: Unique identifier.
-            region: Hotspot region.
-            name: Display name.
-            action: Action to perform on activation.
-            tags: Tags for categorization.
-            
-        Returns:
-            Created hotspot.
-        """
-        hotspot = Hotspot(
-            region=region,
-            name=name,
-            action=action,
-            tags=tags or set()
-        )
-        self._hotspots[hotspot_id] = hotspot
-        return hotspot
-    
-    def get_hotspot(self, hotspot_id: str) -> Optional[Hotspot]:
-        """Get a hotspot by ID.
-        
-        Args:
-            hotspot_id: Hotspot identifier.
-            
-        Returns:
-            Hotspot or None.
-        """
-        return self._hotspots.get(hotspot_id)
-    
-    def get_hotspots_in_point(
-        self,
-        x: float,
-        y: float
-    ) -> List[Hotspot]:
-        """Get all hotspots containing a point.
-        
-        Args:
-            x: X coordinate.
-            y: Y coordinate.
-            
-        Returns:
-            List of hotspots.
-        """
-        return [
-            h for h in self._hotspots.values()
-            if h.enabled and h.region.contains_point(x, y)
-        ]
-    
-    def get_hotspots_by_tag(self, tag: str) -> List[Hotspot]:
-        """Get hotspots with a specific tag.
-        
-        Args:
-            tag: Tag to search for.
-            
-        Returns:
-            List of matching hotspots.
-        """
-        return [
-            h for h in self._hotspots.values()
-            if tag in h.tags
-        ]
-    
-    def activate_hotspot(self, hotspot_id: str) -> bool:
-        """Activate a hotspot's action.
-        
-        Args:
-            hotspot_id: Hotspot to activate.
-            
-        Returns:
-            True if activated.
-        """
-        hotspot = self._hotspots.get(hotspot_id)
-        if not hotspot or not hotspot.action:
-            return False
-        
-        hotspot.action()
-        return True
-    
-    def group_regions(
-        self,
-        group_id: str,
-        region_ids: List[str]
-    ) -> None:
-        """Group multiple regions.
-        
-        Args:
-            group_id: Group identifier.
-            region_ids: Region IDs in the group.
-        """
-        self._region_groups[group_id] = set(region_ids)
-    
-    def get_group_regions(self, group_id: str) -> List[Region]:
-        """Get all regions in a group.
-        
-        Args:
-            group_id: Group identifier.
-            
-        Returns:
-            List of regions in the group.
-        """
-        region_ids = self._region_groups.get(group_id, set())
-        return [
-            self._regions[rid]
-            for rid in region_ids
-            if rid in self._regions
-        ]
+    def is_square(self, tolerance: float = 0.01) -> bool:
+        """Check if region is approximately square."""
+        return abs(self.aspect_ratio() - 1.0) < tolerance
+
+    def to_tuple(self) -> Tuple[float, float, float, float]:
+        """Convert to tuple format (x, y, width, height)."""
+        return (self.x, self.y, self.width, self.height)
+
+    def to_bbox(self) -> Tuple[float, float, float, float]:
+        """Convert to bounding box format (left, top, right, bottom)."""
+        return (self.left, self.top, self.right, self.bottom)
+
+    @classmethod
+    def from_bbox(cls, left: float, top: float, right: float, bottom: float) -> 'Region':
+        """Create region from bounding box coordinates."""
+        return cls(left, top, right - left, bottom - top)
+
+    @classmethod
+    def from_points(cls, p1: Tuple[float, float], p2: Tuple[float, float]) -> 'Region':
+        """Create region from two corner points."""
+        left = min(p1[0], p2[0])
+        top = min(p1[1], p2[1])
+        right = max(p1[0], p2[0])
+        bottom = max(p1[1], p2[1])
+        return cls.from_bbox(left, top, right, bottom)
 
 
-class GridLayout:
-    """Creates and manages grid-based layouts."""
-    
-    def __init__(
-        self,
-        x: float,
-        y: float,
-        width: float,
-        height: float,
-        rows: int,
-        cols: int
-    ) -> None:
-        """Initialize the grid layout.
-        
-        Args:
-            x: Left coordinate.
-            y: Top coordinate.
-            width: Total width.
-            height: Total height.
-            rows: Number of rows.
-            cols: Number of columns.
-        """
-        self.bounds = Region(x, y, width, height)
-        self.rows = rows
-        self.cols = cols
-        self._cells: Optional[List[Region]] = None
-    
-    @property
-    def cells(self) -> List[Region]:
-        """Get all cells in the grid.
-        
-        Returns:
-            List of cell regions.
-        """
-        if self._cells is None:
-            self._cells = self.bounds.subdivide(self.rows, self.cols)
-        return self._cells
-    
-    def get_cell(self, row: int, col: int) -> Optional[Region]:
-        """Get a specific cell.
-        
-        Args:
-            row: Row index.
-            col: Column index.
-            
-        Returns:
-            Cell region or None.
-        """
-        if row < 0 or row >= self.rows or col < 0 or col >= self.cols:
-            return None
-        
-        idx = row * self.cols + col
-        return self.cells[idx] if idx < len(self.cells) else None
-    
-    def get_cell_at_point(
-        self,
-        x: float,
-        y: float
-    ) -> Optional[Tuple[int, int, Region]]:
-        """Get cell at a point.
-        
-        Args:
-            x: X coordinate.
-            y: Y coordinate.
-            
-        Returns:
-            (row, col, cell) tuple or None.
-        """
-        if not self.bounds.contains_point(x, y):
-            return None
-        
-        rel_x = x - self.bounds.left
-        rel_y = y - self.bounds.top
-        
-        cell_width = self.bounds.width / self.cols
-        cell_height = self.bounds.height / self.rows
-        
-        col = int(rel_x / cell_width)
-        row = int(rel_y / cell_height)
-        
-        cell = self.get_cell(row, col)
-        if cell:
-            return (row, col, cell)
-        
-        return None
-    
-    def get_row(self, row: int) -> List[Region]:
-        """Get all cells in a row.
-        
-        Args:
-            row: Row index.
-            
-        Returns:
-            List of cells in the row.
-        """
-        if row < 0 or row >= self.rows:
-            return []
-        
-        start = row * self.cols
-        end = start + self.cols
-        return self.cells[start:end]
-    
-    def get_col(self, col: int) -> List[Region]:
-        """Get all cells in a column.
-        
-        Args:
-            col: Column index.
-            
-        Returns:
-            List of cells in the column.
-        """
-        if col < 0 or col >= self.cols:
-            return []
-        
-        return [self.cells[i] for i in range(col, len(self.cells), self.cols)]
+def merge_regions(regions: List[Region], tolerance: float = 1.0) -> List[Region]:
+    """Merge overlapping or adjacent regions into minimal bounding regions."""
+    if not regions:
+        return []
+
+    result = list(regions)
+    merged = True
+
+    while merged:
+        merged = False
+        new_result = []
+
+        while result:
+            current = result.pop(0)
+            found_merge = False
+
+            for i, other in enumerate(result):
+                merged_region = current.merge_if_adjacent(other, tolerance)
+                if merged_region:
+                    result[i] = merged_region
+                    found_merge = True
+                    merged = True
+                    break
+
+            if not found_merge:
+                new_result.append(current)
+
+            result = result[1:] + [current] if found_merge else new_result
+
+    return result
+
+
+def filter_regions_by_area(regions: List[Region],
+                            min_area: Optional[float] = None,
+                            max_area: Optional[float] = None) -> List[Region]:
+    """Filter regions by area constraints."""
+    filtered = []
+    for region in regions:
+        if min_area is not None and region.area < min_area:
+            continue
+        if max_area is not None and region.area > max_area:
+            continue
+        filtered.append(region)
+    return filtered
+
+
+def sort_regions_by_position(regions: List[Region],
+                             order: str = 'left_to_right') -> List[Region]:
+    """Sort regions by position in specified order."""
+    if order == 'left_to_right':
+        return sorted(regions, key=lambda r: (r.y, r.x))
+    elif order == 'top_to_bottom':
+        return sorted(regions, key=lambda r: (r.x, r.y))
+    elif order == 'area_descending':
+        return sorted(regions, key=lambda r: -r.area)
+    elif order == 'area_ascending':
+        return sorted(regions, key=lambda r: r.area)
+    else:
+        raise ValueError(f"Unknown sort order: {order}")
+
+
+def remove_contained_regions(regions: List[Region]) -> List[Region]:
+    """Remove regions that are fully contained within other regions."""
+    result = []
+    for i, region in enumerate(regions):
+        is_contained = False
+        for j, other in enumerate(regions):
+            if i != j and other.contains_region(region):
+                is_contained = True
+                break
+        if not is_contained:
+            result.append(region)
+    return result
