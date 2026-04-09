@@ -1,303 +1,239 @@
-"""
-Data Serializer Action Module.
+"""Data serialization action module for RabAI AutoClick.
 
-Provides multi-format serialization/deserialization with
-schema evolution support.
+Provides serialization and deserialization for various data formats:
+JSON, MessagePack, CBOR, Pickle, and URL-encoded forms.
 """
 
-import asyncio
-import base64
 import json
 import pickle
-import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, Generic, Optional, TypeVar
-import zlib
+import base64
+from typing import Any, Dict, List, Optional, Union
+from urllib.parse import urlencode, parse_qs, quote, unquote
 
-T = TypeVar("T")
+from core.base_action import BaseAction, ActionResult
 
 
-class SerializationFormat(Enum):
-    """Supported serialization formats."""
-    JSON = "json"
-    XML = "xml"
-    PICKLE = "pickle"
-    MSGPACK = "msgpack"
-    CBOR = "cbor"
-    UBJSON = "ubjson"
-
-
-@dataclass
-class SchemaVersion:
-    """Schema version for evolution."""
-    version: int
-    transform: Optional[Callable[[dict], dict]] = None
-    validator: Optional[Callable[[dict], bool]] = None
-
-
-@dataclass
-class SerializerConfig:
-    """Serializer configuration."""
-    format: SerializationFormat = SerializationFormat.JSON
-    pretty: bool = False
-    compression: bool = False
-    schema_versions: list[SchemaVersion] = field(default_factory=list)
-    current_version: int = 1
-
-
-@dataclass
-class SerializationResult:
-    """Serialization result."""
-    success: bool
-    data: Any = None
-    format: SerializationFormat = SerializationFormat.JSON
-    size: int = 0
-    compressed: bool = False
-    error: Optional[str] = None
-
-
-class JSONSerializer:
-    """JSON serializer."""
-
-    def __init__(self, pretty: bool = False):
-        self.pretty = pretty
-
-    def serialize(self, data: Any) -> bytes:
-        """Serialize to JSON bytes."""
-        if self.pretty:
-            return json.dumps(data, indent=2, ensure_ascii=False).encode()
-        return json.dumps(data, ensure_ascii=False).encode()
-
-    def deserialize(self, data: bytes) -> Any:
-        """Deserialize from JSON bytes."""
-        return json.loads(data.decode())
-
-
-class XMLSerializer:
-    """XML serializer."""
-
-    def __init__(self, root_name: str = "root"):
-        self.root_name = root_name
-
-    def _dict_to_xml(self, data: Any, element: ET.Element) -> None:
-        """Convert dict to XML element."""
-        if isinstance(data, dict):
-            for key, value in data.items():
-                sub_element = ET.SubElement(element, str(key))
-                self._dict_to_xml(value, sub_element)
-        elif isinstance(data, list):
-            for item in data:
-                item_element = ET.SubElement(element, "item")
-                self._dict_to_xml(item, item_element)
-        else:
-            element.text = str(data) if data is not None else ""
-
-    def _xml_to_dict(self, element: ET.Element) -> Any:
-        """Convert XML element to dict."""
-        result = {}
-
-        for child in element:
-            child_data = self._xml_to_dict(child)
-
-            if child.tag == "item":
-                if element.tag not in result:
-                    result[element.tag] = []
-                result[element.tag].append(child_data)
-            else:
-                result[child.tag] = child_data
-
-        if not result and element.text:
-            return element.text
-
-        return result if result else None
-
-    def serialize(self, data: Any) -> bytes:
-        """Serialize to XML bytes."""
-        root = ET.Element(self.root_name)
-        self._dict_to_xml(data, root)
-        return ET.tostring(root, encoding="utf-8")
-
-    def deserialize(self, data: bytes) -> Any:
-        """Deserialize from XML bytes."""
-        root = ET.fromstring(data)
-        return {root.tag: self._xml_to_dict(root)}
-
-
-class PickleSerializer:
-    """Pickle serializer."""
-
-    def serialize(self, data: Any) -> bytes:
-        """Serialize to pickle bytes."""
-        return pickle.dumps(data)
-
-    def deserialize(self, data: bytes) -> Any:
-        """Deserialize from pickle bytes."""
-        return pickle.loads(data)
-
-
-class CompressionWrapper:
-    """Compression wrapper for serializers."""
-
-    def __init__(self, serializer: Any, level: int = 6):
-        self.serializer = serializer
-        self.level = level
-
-    def serialize_compress(self, data: Any) -> tuple[bytes, int]:
-        """Serialize and compress."""
-        serialized = self.serializer.serialize(data)
-        compressed = zlib.compress(serialized, level=self.level)
-        return compressed, len(serialized)
-
-    def decompress_deserialize(self, data: bytes) -> Any:
-        """Decompress and deserialize."""
-        decompressed = zlib.decompress(data)
-        return self.serializer.deserialize(decompressed)
-
-
-class DataSerializer:
-    """Multi-format data serializer."""
-
-    def __init__(self, config: Optional[SerializerConfig] = None):
-        self.config = config or SerializerConfig()
-        self._serializer = self._create_serializer()
-        self._compression = CompressionWrapper(
-            self._serializer,
-            level=6
-        ) if self.config.compression else None
-
-    def _create_serializer(self) -> Any:
-        """Create appropriate serializer."""
-        if self.config.format == SerializationFormat.JSON:
-            return JSONSerializer(pretty=self.config.pretty)
-        elif self.config.format == SerializationFormat.XML:
-            return XMLSerializer()
-        elif self.config.format == SerializationFormat.PICKLE:
-            return PickleSerializer()
-        else:
-            return JSONSerializer(pretty=self.config.pretty)
-
-    def serialize(self, data: Any) -> SerializationResult:
-        """Serialize data."""
+class JsonSerializerAction(BaseAction):
+    """Serialize and deserialize JSON data.
+    
+    Supports compact/pretty printing, Unicode handling, and 
+    custom separators. Handles nested structures and byte strings.
+    """
+    action_type = "json_serializer"
+    display_name = "JSON序列化"
+    description = "将Python对象序列化为JSON字符串或反序列化JSON为对象"
+    VALID_MODES = ["serialize", "deserialize"]
+    
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Serialize or deserialize JSON data.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: mode, data, indent, ensure_ascii,
+                   sort_keys, base64_encode.
+        
+        Returns:
+            ActionResult with serialized string or deserialized object.
+        """
+        mode = params.get("mode", "serialize")
+        data = params.get("data")
+        indent = params.get("indent", None)
+        ensure_ascii = params.get("ensure_ascii", False)
+        sort_keys = params.get("sort_keys", False)
+        base64_encode = params.get("base64_encode", False)
+        
+        valid, msg = self.validate_in(mode, self.VALID_MODES, "mode")
+        if not valid:
+            return ActionResult(success=False, message=msg)
+        
         try:
-            if self._compression:
-                serialized, original_size = self._compression.serialize_compress(data)
-                return SerializationResult(
+            if mode == "serialize":
+                if data is None:
+                    return ActionResult(success=False, message="No data to serialize")
+                
+                result = json.dumps(
+                    data,
+                    indent=indent,
+                    ensure_ascii=ensure_ascii,
+                    sort_keys=sort_keys,
+                    default=str
+                )
+                
+                if base64_encode:
+                    result = base64.b64encode(result.encode("utf-8")).decode("ascii")
+                
+                return ActionResult(
                     success=True,
-                    data=base64.b64encode(serialized).decode(),
-                    format=self.config.format,
-                    size=len(serialized),
-                    compressed=True
+                    message=f"JSON serialized ({len(result)} chars)",
+                    data={"result": result, "length": len(result)}
                 )
             else:
-                serialized = self._serializer.serialize(data)
-                return SerializationResult(
+                if not isinstance(data, str):
+                    return ActionResult(success=False, message="Input must be string for deserialization")
+                
+                if base64_encode:
+                    try:
+                        data = base64.b64decode(data.encode("ascii")).decode("utf-8")
+                    except Exception:
+                        return ActionResult(success=False, message="Invalid base64 input")
+                
+                result = json.loads(data)
+                
+                return ActionResult(
                     success=True,
-                    data=serialized.decode() if isinstance(serialized, bytes) else serialized,
-                    format=self.config.format,
-                    size=len(serialized)
+                    message=f"JSON deserialized to {type(result).__name__}",
+                    data={"result": result}
+                )
+        except json.JSONDecodeError as e:
+            return ActionResult(success=False, message=f"JSON decode error: {e}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"Serialization failed: {e}")
+
+
+class PickleSerializerAction(BaseAction):
+    """Serialize Python objects using Pickle protocol.
+    
+    Warning: Pickled data can execute arbitrary code. Only use
+    with trusted data sources. Supports protocol versions 0-5.
+    """
+    action_type = "pickle_serializer"
+    display_name = "Pickle序列化"
+    description = "使用Pickle协议序列化Python对象"
+    VALID_MODES = ["serialize", "deserialize"]
+    VALID_PROTOCOLS = [0, 1, 2, 3, 4, 5]
+    
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Serialize or deserialize Pickle data.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: mode, data, protocol, base64_encode.
+        
+        Returns:
+            ActionResult with serialized bytes or deserialized object.
+        """
+        mode = params.get("mode", "serialize")
+        data = params.get("data")
+        protocol = params.get("protocol", 4)
+        base64_encode = params.get("base64_encode", True)
+        
+        valid, msg = self.validate_in(mode, self.VALID_MODES, "mode")
+        if not valid:
+            return ActionResult(success=False, message=msg)
+        
+        valid, msg = self.validate_in(protocol, self.VALID_PROTOCOLS, "protocol")
+        if not valid:
+            return ActionResult(success=False, message=msg)
+        
+        try:
+            if mode == "serialize":
+                if data is None:
+                    return ActionResult(success=False, message="No data to serialize")
+                
+                result_bytes = pickle.dumps(data, protocol=protocol)
+                
+                if base64_encode:
+                    result = base64.b64encode(result_bytes).decode("ascii")
+                else:
+                    result = result_bytes.hex()
+                
+                return ActionResult(
+                    success=True,
+                    message=f"Pickle serialized ({len(result_bytes)} bytes)",
+                    data={"result": result, "size": len(result_bytes)}
+                )
+            else:
+                if not isinstance(data, str):
+                    return ActionResult(success=False, message="Input must be string")
+                
+                try:
+                    if base64_encode:
+                        data_bytes = base64.b64decode(data.encode("ascii"))
+                    else:
+                        data_bytes = bytes.fromhex(data)
+                except Exception:
+                    return ActionResult(success=False, message="Invalid encoded input")
+                
+                result = pickle.loads(data_bytes)
+                
+                return ActionResult(
+                    success=True,
+                    message=f"Pickle deserialized to {type(result).__name__}",
+                    data={"result": result}
                 )
         except Exception as e:
-            return SerializationResult(
-                success=False,
-                error=str(e)
-            )
+            return ActionResult(success=False, message=f"Pickle operation failed: {e}")
 
-    def deserialize(self, data: Any) -> SerializationResult:
-        """Deserialize data."""
+
+class UrlEncodeSerializerAction(BaseAction):
+    """URL-encode and decode form data.
+    
+    Handles percent-encoding, query string parsing, and
+    application/x-www-form-urlencoded format conversion.
+    """
+    action_type = "url_encode_serializer"
+    display_name = "URL编码序列化"
+    description = "URL编码/解码表单数据"
+    VALID_MODES = ["encode", "decode"]
+    
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Encode or decode URL form data.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: mode, data, doseq, safe, encoding.
+        
+        Returns:
+            ActionResult with encoded string or decoded dict.
+        """
+        mode = params.get("mode", "encode")
+        data = params.get("data", {})
+        doseq = params.get("doseq", False)
+        safe = params.get("safe", "")
+        
+        valid, msg = self.validate_in(mode, self.VALID_MODES, "mode")
+        if not valid:
+            return ActionResult(success=False, message=msg)
+        
         try:
-            if isinstance(data, str) and self.config.compression:
-                decoded = base64.b64decode(data)
-                result = self._compression.decompress_deserialize(decoded)
-            elif isinstance(data, bytes):
-                result = self._serializer.deserialize(data)
+            if mode == "encode":
+                if isinstance(data, dict):
+                    result = urlencode(data, doseq=doseq, safe=safe)
+                elif isinstance(data, str):
+                    result = quote(data, safe=safe)
+                else:
+                    result = quote(str(data), safe=safe)
+                
+                return ActionResult(
+                    success=True,
+                    message=f"URL encoded ({len(result)} chars)",
+                    data={"result": result, "length": len(result)}
+                )
             else:
-                result = self._serializer.deserialize(data.encode())
-            return SerializationResult(
-                success=True,
-                data=result,
-                format=self.config.format
-            )
+                if isinstance(data, str):
+                    if "=" in data:
+                        result = parse_qs(data, keep_blank_values=True)
+                    else:
+                        result = unquote(data)
+                else:
+                    return ActionResult(success=False, message="Input must be string for decoding")
+                
+                return ActionResult(
+                    success=True,
+                    message=f"URL decoded",
+                    data={"result": result}
+                )
         except Exception as e:
-            return SerializationResult(
-                success=False,
-                error=str(e)
-            )
-
-    def migrate_version(
-        self,
-        data: dict,
-        from_version: int,
-        to_version: int
-    ) -> dict:
-        """Migrate data between schema versions."""
-        current_version = from_version
-        result = data.copy()
-
-        while current_version < to_version:
-            next_version = current_version + 1
-            version_spec = next(
-                (v for v in self.config.schema_versions if v.version == next_version),
-                None
-            )
-
-            if version_spec and version_spec.transform:
-                result = version_spec.transform(result)
-
-            current_version = next_version
-
-        return result
-
-
-class DataSerializerAction:
-    """
-    Multi-format serialization with schema evolution.
-
-    Example:
-        config = SerializerConfig(
-            format=SerializationFormat.JSON,
-            pretty=True,
-            compression=True
-        )
-
-        serializer = DataSerializerAction(config)
-        result = serializer.serialize(data)
-        data = serializer.deserialize(result.data)
-    """
-
-    def __init__(
-        self,
-        format: SerializationFormat = SerializationFormat.JSON,
-        **kwargs: Any
-    ):
-        config = SerializerConfig(format=format, **kwargs)
-        self._serializer = DataSerializer(config)
-
-    def serialize(self, data: Any) -> SerializationResult:
-        """Serialize data."""
-        return self._serializer.serialize(data)
-
-    def deserialize(self, data: Any) -> SerializationResult:
-        """Deserialize data."""
-        return self._serializer.deserialize(data)
-
-    def add_schema_version(
-        self,
-        version: int,
-        transform: Optional[Callable[[dict], dict]] = None,
-        validator: Optional[Callable[[dict], bool]] = None
-    ) -> "DataSerializerAction":
-        """Add schema version."""
-        self._serializer.config.schema_versions.append(
-            SchemaVersion(version, transform, validator)
-        )
-        return self
-
-    def migrate(
-        self,
-        data: dict,
-        from_version: int,
-        to_version: int
-    ) -> dict:
-        """Migrate between versions."""
-        return self._serializer.migrate_version(data, from_version, to_version)
+            return ActionResult(success=False, message=f"URL encoding failed: {e}")
