@@ -1,164 +1,309 @@
-"""Element matching utilities.
+"""Element matching utilities for finding UI elements by properties.
 
-This module provides utilities for matching UI elements
-by various criteria including role, name, attributes, and position.
+This module provides utilities for matching UI elements by various
+properties including text content, attributes, bounds, and visual
+characteristics, useful for element identification in automation.
+
+Author: AI Assistant
+License: MIT
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass
+from enum import Enum, auto
+from typing import Optional, List, Tuple, Callable, Dict, Any
+
+
+class MatchCriteria(Enum):
+    """Criteria for element matching."""
+    TEXT = auto()
+    PARTIAL_TEXT = auto()
+    REGEX = auto()
+    ATTRIBUTE = auto()
+    BOUNDS = auto()
+    VISIBILITY = auto()
+    ELEMENT_TYPE = auto()
+    ALL = auto()
 
 
 @dataclass
-class ElementCriteria:
-    """Criteria for matching an element."""
-    role: Optional[str] = None
-    name: Optional[str] = None
-    name_pattern: Optional[str] = None
-    value: Optional[str] = None
-    label: Optional[str] = None
-    xpath: Optional[str] = None
-    attributes: Optional[Dict[str, Any]] = None
-    index: Optional[int] = None
-    visible_only: bool = True
-    enabled_only: bool = False
-
-
 class ElementMatcher:
-    """Matches UI elements against criteria."""
-
-    def __init__(self) -> None:
-        self._element_store: List[Dict[str, Any]] = []
-
-    def add_element(self, element: Dict[str, Any]) -> None:
-        """Add an element to the store."""
-        self._element_store.append(element)
-
-    def add_elements(self, elements: List[Dict[str, Any]]) -> None:
-        """Add multiple elements to the store."""
-        self._element_store.extend(elements)
-
-    def clear(self) -> None:
-        """Clear all elements."""
-        self._element_store.clear()
-
-    def find_all(self, criteria: ElementCriteria) -> List[Dict[str, Any]]:
-        """Find all elements matching criteria.
-
-        Args:
-            criteria: ElementCriteria to match against.
-
-        Returns:
-            List of matching elements.
-        """
-        results = []
-        for elem in self._element_store:
-            if self._matches(elem, criteria):
-                results.append(elem)
-        return results
-
-    def find_first(self, criteria: ElementCriteria) -> Optional[Dict[str, Any]]:
-        """Find first element matching criteria.
-
-        Args:
-            criteria: ElementCriteria to match against.
-
-        Returns:
-            First matching element or None.
-        """
-        for elem in self._element_store:
-            if self._matches(elem, criteria):
-                return elem
-        return None
-
-    def _matches(self, elem: Dict[str, Any], criteria: ElementCriteria) -> bool:
-        if criteria.role:
-            if elem.get("role") != criteria.role:
-                return False
-
-        if criteria.name is not None:
-            if elem.get("name") != criteria.name:
-                return False
-
-        if criteria.name_pattern is not None:
-            name = elem.get("name", "")
-            import re
-            if not re.search(criteria.name_pattern, name):
-                return False
-
-        if criteria.value is not None:
-            if elem.get("value") != criteria.value:
-                return False
-
-        if criteria.label is not None:
-            if elem.get("label") != criteria.label:
-                return False
-
-        if criteria.attributes:
-            for k, v in criteria.attributes.items():
-                if elem.get(k) != v:
-                    return False
-
-        if criteria.visible_only:
-            if not elem.get("visible", True):
-                return False
-
-        if criteria.enabled_only:
-            if not elem.get("enabled", False):
-                return False
-
-        return True
+    """Matcher configuration for finding elements."""
+    criteria: MatchCriteria
+    value: Any
+    case_sensitive: bool = True
+    tolerance: int = 5  # For bounds matching
 
 
-def fuzzy_match(text: str, pattern: str, threshold: float = 0.6) -> bool:
-    """Fuzzy match text against a pattern.
+@dataclass
+class MatchResult:
+    """Result of element matching."""
+    found: bool
+    elements: List[Dict[str, Any]]
+    match_count: int
+    
+    @property
+    def first_match(self) -> Optional[Dict[str, Any]]:
+        return self.elements[0] if self.elements else None
 
+
+def match_by_text(
+    text: str,
+    elements: List[Dict[str, Any]],
+    case_sensitive: bool = True,
+) -> MatchResult:
+    """Match elements by exact text.
+    
     Args:
         text: Text to match.
-        pattern: Pattern to match against.
-        threshold: Minimum similarity score.
-
+        elements: List of element dictionaries.
+        case_sensitive: Whether match is case-sensitive.
+    
     Returns:
-        True if match score exceeds threshold.
+        MatchResult with matched elements.
     """
-    import difflib
-    score = difflib.SequenceMatcher(None, text.lower(), pattern.lower()).ratio()
-    return score >= threshold
+    search_text = text if case_sensitive else text.lower()
+    
+    matched = []
+    for elem in elements:
+        elem_text = elem.get("text", "") or elem.get("name", "")
+        compare_text = elem_text if case_sensitive else elem_text.lower()
+        
+        if compare_text == search_text:
+            matched.append(elem)
+    
+    return MatchResult(
+        found=len(matched) > 0,
+        elements=matched,
+        match_count=len(matched),
+    )
 
 
-def levenshtein_distance(s1: str, s2: str) -> int:
-    """Compute Levenshtein distance between two strings.
-
+def match_by_partial_text(
+    partial_text: str,
+    elements: List[Dict[str, Any]],
+    case_sensitive: bool = True,
+) -> MatchResult:
+    """Match elements containing partial text.
+    
     Args:
-        s1: First string.
-        s2: Second string.
-
+        partial_text: Text substring to match.
+        elements: List of element dictionaries.
+        case_sensitive: Whether match is case-sensitive.
+    
     Returns:
-        Edit distance.
+        MatchResult with matched elements.
     """
-    if len(s1) < len(s2):
-        return levenshtein_distance(s2, s1)
-
-    if len(s2) == 0:
-        return len(s1)
-
-    previous_row = range(len(s2) + 1)
-    for i, c1 in enumerate(s1):
-        current_row = [i + 1]
-        for j, c2 in enumerate(s2):
-            insertions = previous_row[j + 1] + 1
-            deletions = current_row[j] + 1
-            substitutions = previous_row[j] + (c1 != c2)
-            current_row.append(min(insertions, deletions, substitutions))
-        previous_row = current_row
-
-    return previous_row[-1]
+    search_text = partial_text if case_sensitive else partial_text.lower()
+    
+    matched = []
+    for elem in elements:
+        elem_text = elem.get("text", "") or elem.get("name", "")
+        compare_text = elem_text if case_sensitive else elem_text.lower()
+        
+        if search_text in compare_text:
+            matched.append(elem)
+    
+    return MatchResult(
+        found=len(matched) > 0,
+        elements=matched,
+        match_count=len(matched),
+    )
 
 
-__all__ = [
-    "ElementCriteria",
-    "ElementMatcher",
-    "fuzzy_match",
-    "levenshtein_distance",
-]
+def match_by_bounds(
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    elements: List[Dict[str, Any]],
+    tolerance: int = 5,
+) -> MatchResult:
+    """Match elements by bounding box.
+    
+    Args:
+        x: Expected X coordinate.
+        y: Expected Y coordinate.
+        width: Expected width.
+        height: Expected height.
+        elements: List of element dictionaries.
+        tolerance: Pixel tolerance for matching.
+    
+    Returns:
+        MatchResult with matched elements.
+    """
+    matched = []
+    for elem in elements:
+        bounds = elem.get("bounds", {})
+        if not bounds:
+            bounds = elem.get("rect", {})
+        
+        if not bounds:
+            continue
+        
+        bx = bounds.get("x", 0) or bounds.get("left", 0)
+        by = bounds.get("y", 0) or bounds.get("top", 0)
+        bw = bounds.get("width", bounds.get("w", 0))
+        bh = bounds.get("height", bounds.get("h", 0))
+        
+        if (abs(bx - x) <= tolerance and
+            abs(by - y) <= tolerance and
+            abs(bw - width) <= tolerance and
+            abs(bh - height) <= tolerance):
+            matched.append(elem)
+    
+    return MatchResult(
+        found=len(matched) > 0,
+        elements=matched,
+        match_count=len(matched),
+    )
+
+
+def match_by_attribute(
+    attribute: str,
+    value: Any,
+    elements: List[Dict[str, Any]],
+) -> MatchResult:
+    """Match elements by attribute value.
+    
+    Args:
+        attribute: Attribute name to match.
+        value: Expected attribute value.
+        elements: List of element dictionaries.
+    
+    Returns:
+        MatchResult with matched elements.
+    """
+    matched = []
+    for elem in elements:
+        elem_value = elem.get(attribute)
+        if elem_value == value:
+            matched.append(elem)
+    
+    return MatchResult(
+        found=len(matched) > 0,
+        elements=matched,
+        match_count=len(matched),
+    )
+
+
+def match_by_type(
+    element_type: str,
+    elements: List[Dict[str, Any]],
+    case_sensitive: bool = False,
+) -> MatchResult:
+    """Match elements by type/class.
+    
+    Args:
+        element_type: Element type to match.
+        elements: List of element dictionaries.
+        case_sensitive: Whether match is case-sensitive.
+    
+    Returns:
+        MatchResult with matched elements.
+    """
+    search_type = element_type if case_sensitive else element_type.lower()
+    
+    matched = []
+    for elem in elements:
+        elem_type = elem.get("type", "") or elem.get("role", "") or elem.get("className", "")
+        compare_type = elem_type if case_sensitive else elem_type.lower()
+        
+        if search_type == compare_type:
+            matched.append(elem)
+    
+    return MatchResult(
+        found=len(matched) > 0,
+        elements=matched,
+        match_count=len(matched),
+    )
+
+
+def match_visible_elements(
+    elements: List[Dict[str, Any]],
+) -> MatchResult:
+    """Filter to only visible elements.
+    
+    Args:
+        elements: List of element dictionaries.
+    
+    Returns:
+        MatchResult with visible elements.
+    """
+    visible = []
+    for elem in elements:
+        if elem.get("visible", True) and elem.get("enabled", True):
+            visible.append(elem)
+    
+    return MatchResult(
+        found=len(visible) > 0,
+        elements=visible,
+        match_count=len(visible),
+    )
+
+
+def match_interactive_elements(
+    elements: List[Dict[str, Any]],
+) -> MatchResult:
+    """Filter to only interactive elements.
+    
+    Args:
+        elements: List of element dictionaries.
+    
+    Returns:
+        MatchResult with interactive elements.
+    """
+    interactive = []
+    for elem in elements:
+        is_visible = elem.get("visible", True)
+        is_enabled = elem.get("enabled", True)
+        is_clickable = elem.get("clickable", True)
+        
+        if is_visible and (is_enabled or is_clickable):
+            interactive.append(elem)
+    
+    return MatchResult(
+        found=len(interactive) > 0,
+        elements=interactive,
+        match_count=len(interactive),
+    )
+
+
+def find_element_at_point(
+    x: int,
+    y: int,
+    elements: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Find the topmost element at a specific point.
+    
+    Args:
+        x: X coordinate.
+        y: Y coordinate.
+        elements: List of element dictionaries.
+    
+    Returns:
+        Element dictionary or None.
+    """
+    found_elements = []
+    
+    for elem in elements:
+        bounds = elem.get("bounds", {}) or elem.get("rect", {})
+        
+        if not bounds:
+            continue
+        
+        bx = bounds.get("x", 0) or bounds.get("left", 0)
+        by = bounds.get("y", 0) or bounds.get("top", 0)
+        bw = bounds.get("width", bounds.get("w", 0))
+        bh = bounds.get("height", bounds.get("h", 0))
+        
+        if bx <= x < bx + bw and by <= y < by + bh:
+            found_elements.append((bx, by, elem))
+    
+    if not found_elements:
+        return None
+    
+    found_elements.sort(key=lambda e: (e[0], e[1]))
+    
+    return found_elements[-1][2]

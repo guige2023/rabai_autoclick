@@ -1,322 +1,261 @@
-"""Image filtering utilities for RabAI AutoClick.
+"""Image filter utilities for applying visual filters to images.
 
-Provides:
-- 2D convolution with custom kernels
-- Image filters (blur, sharpen, edge detect, etc.)
-- Morphological operations
-- Color space conversions
+This module provides utilities for applying various image filters including
+sharpening, smoothing, edge enhancement, and artistic effects, useful for
+image preprocessing and visual effects in automation workflows.
+
+Author: AI Assistant
+License: MIT
 """
 
-from typing import List, Tuple, Callable, Optional
-import math
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum, auto
+from typing import Optional
+import io
 
 
-def convolve2d(
-    image: List[List[float]],
-    kernel: List[List[float]],
-) -> List[List[float]]:
-    """Apply 2D convolution to image.
+class FilterType(Enum):
+    """Type of image filter."""
+    SHARPEN = auto()
+    BLUR = auto()
+    SMOOTH = auto()
+    EDGE_ENHANCE = auto()
+    EDGE_DETECT = auto()
+    EMBOSS = auto()
+    POSTERIZE = auto()
+    SOLARIZE = auto()
+    VINTAGE = auto()
+    COOL = auto()
+    WARM = auto()
 
+
+@dataclass
+class FilterConfig:
+    """Configuration for image filter."""
+    filter_type: FilterType = FilterType.SHARPEN
+    strength: float = 1.0
+    radius: int = 5
+
+
+def apply_filter(
+    image_data: bytes,
+    config: Optional[FilterConfig] = None,
+) -> bytes:
+    """Apply filter to image.
+    
     Args:
-        image: 2D grayscale image (list of rows).
-        kernel: 2D convolution kernel.
-
+        image_data: Image bytes.
+        config: Filter configuration.
+    
     Returns:
-        Convolved image.
+        Filtered image bytes.
     """
-    if not image or not image[0] or not kernel:
-        return image[:]
+    try:
+        from PIL import Image, ImageFilter, ImageEnhance
+        import io
+        
+        config = config or FilterConfig()
+        
+        img = Image.open(io.BytesIO(image_data)).convert("RGB")
+        
+        if config.filter_type == FilterType.SHARPEN:
+            result = img.filter(ImageFilter.UnsharpMask(
+                radius=config.radius,
+                percent=int(150 * config.strength),
+            ))
+        elif config.filter_type == FilterType.BLUR:
+            result = img.filter(ImageFilter.GaussianBlur(radius=config.radius))
+        elif config.filter_type == FilterType.SMOOTH:
+            result = img.filter(ImageFilter.SMOOTH_MORE)
+        elif config.filter_type == FilterType.EDGE_ENHANCE:
+            result = img.filter(ImageFilter.EDGE_ENHANCE)
+        elif config.filter_type == FilterType.EDGE_DETECT:
+            result = img.filter(ImageFilter.FIND_EDGES)
+        elif config.filter_type == FilterType.EMBOSS:
+            result = img.filter(ImageFilter.EMBOSS)
+        elif config.filter_type == FilterType.POSTERIZE:
+            result = _posterize(img, int(4 + (1 - config.strength) * 4))
+        elif config.filter_type == FilterType.SOLARIZE:
+            result = _solarize(img, threshold=int(128 + 64 * config.strength))
+        elif config.filter_type == FilterType.VINTAGE:
+            result = _apply_vintage(img)
+        elif config.filter_type == FilterType.COOL:
+            result = _apply_cool(img, config.strength)
+        elif config.filter_type == FilterType.WARM:
+            result = _apply_warm(img, config.strength)
+        else:
+            result = img
+        
+        output = io.BytesIO()
+        result.save(output, format="PNG")
+        return output.getvalue()
+    except ImportError:
+        raise ImportError("PIL is required for image filtering")
 
-    kh, kw = len(kernel), len(kernel[0])
-    ih, iw = len(image), len(image[0])
-    pad_h, pad_w = kh // 2, kw // 2
 
-    result: List[List[float]] = [[0.0] * iw for _ in range(ih)]
-
-    for y in range(ih):
-        for x in range(iw):
-            sum_val = 0.0
-            for ky in range(kh):
-                for kx in range(kw):
-                    iy = y + ky - pad_h
-                    ix = x + kx - pad_w
-                    if 0 <= iy < ih and 0 <= ix < iw:
-                        sum_val += image[iy][ix] * kernel[ky][kx]
-            result[y][x] = sum_val
-
-    return result
+def _posterize(img, bits: int) -> "Image.Image":
+    """Apply posterize filter."""
+    from PIL import ImageOps
+    return ImageOps.posterize(img, bits)
 
 
-def create_gaussian_kernel(size: int, sigma: float) -> List[List[float]]:
-    """Create Gaussian blur kernel.
+def _solarize(img, threshold: int) -> "Image.Image":
+    """Apply solarize filter."""
+    from PIL import ImageOps
+    return ImageOps.solarize(img, threshold)
 
+
+def _apply_vintage(img) -> "Image.Image":
+    """Apply vintage/sepia effect."""
+    from PIL import ImageEnhance
+    
+    enhancer = ImageEnhance.Color(img)
+    img = enhancer.enhance(0.8)
+    
+    enhancer = ImageEnhance.Contrast(img)
+    img = enhancer.enhance(0.9)
+    
+    enhancer = ImageEnhance.Brightness(img)
+    img = enhancer.enhance(1.1)
+    
+    return img
+
+
+def _apply_cool(img, strength: float) -> "Image.Image":
+    """Apply cool (blue) color shift."""
+    import numpy as np
+    from PIL import Image
+    
+    img_array = np.array(img).astype(float)
+    
+    img_array[:, :, 0] = img_array[:, :, 0] * (1 - strength * 0.3)
+    img_array[:, :, 2] = img_array[:, :, 2] * (1 + strength * 0.3)
+    
+    img_array = np.clip(img_array, 0, 255).astype(np.uint8)
+    
+    return Image.fromarray(img_array)
+
+
+def _apply_warm(img, strength: float) -> "Image.Image":
+    """Apply warm (orange) color shift."""
+    import numpy as np
+    from PIL import Image
+    
+    img_array = np.array(img).astype(float)
+    
+    img_array[:, :, 0] = img_array[:, :, 0] * (1 + strength * 0.3)
+    img_array[:, :, 2] = img_array[:, :, 2] * (1 - strength * 0.3)
+    
+    img_array = np.clip(img_array, 0, 255).astype(np.uint8)
+    
+    return Image.fromarray(img_array)
+
+
+def sharpen_image(
+    image_data: bytes,
+    strength: float = 1.0,
+) -> bytes:
+    """Sharpen an image.
+    
     Args:
-        size: Kernel size (odd).
-        sigma: Standard deviation.
-
+        image_data: Image bytes.
+        strength: Sharpening strength (0.0 to 1.0).
+    
     Returns:
-        2D Gaussian kernel.
+        Sharpened image bytes.
     """
-    k = size // 2
-    kernel: List[List[float]] = []
-    for y in range(size):
-        row: List[float] = []
-        for x in range(size):
-            g = math.exp(-((x - k) ** 2 + (y - k) ** 2) / (2 * sigma * sigma))
-            row.append(g)
-        kernel.append(row)
-
-    # Normalize
-    total = sum(sum(row) for row in kernel)
-    return [[v / total for v in row] for row in kernel]
+    config = FilterConfig(
+        filter_type=FilterType.SHARPEN,
+        strength=strength,
+        radius=3,
+    )
+    return apply_filter(image_data, config)
 
 
-def create_box_kernel(size: int) -> List[List[float]]:
-    """Create box blur kernel."""
-    val = 1.0 / (size * size)
-    return [[val] * size for _ in range(size)]
-
-
-def create_sharpen_kernel() -> List[List[float]]:
-    """Create unsharp mask / sharpen kernel."""
-    return [
-        [0, -1, 0],
-        [-1, 5, -1],
-        [0, -1, 0],
-    ]
-
-
-def create_edge_kernel(type: str = "sobel") -> List[List[List[float]]]:
-    """Create edge detection kernels.
-
+def smooth_image(
+    image_data: bytes,
+    strength: float = 1.0,
+) -> bytes:
+    """Smooth an image.
+    
     Args:
-        type: 'sobel', 'prewitt', or 'laplacian'.
-
+        image_data: Image bytes.
+        strength: Smoothing strength.
+    
     Returns:
-        List of [kx, ky] kernels.
+        Smoothed image bytes.
     """
-    if type == "sobel":
-        return [
-            [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],  # x
-            [[-1, -2, -1], [0, 0, 0], [1, 2, 1]],  # y
-        ]
-    elif type == "prewitt":
-        return [
-            [[-1, 0, 1], [-1, 0, 1], [-1, 0, 1]],
-            [[-1, -1, -1], [0, 0, 0], [1, 1, 1]],
-        ]
-    else:  # laplacian
-        return [
-            [[0, 1, 0], [1, -4, 1], [0, 1, 0]],
-            [[1, 1, 1], [1, -8, 1], [1, 1, 1]],
-        ]
+    config = FilterConfig(
+        filter_type=FilterType.SMOOTH,
+        strength=strength,
+    )
+    return apply_filter(image_data, config)
 
 
-def apply_edge_detection(
-    image: List[List[float]],
-    kernel_type: str = "sobel",
-) -> List[List[float]]:
-    """Apply edge detection to grayscale image.
-
+def enhance_edges(
+    image_data: bytes,
+    strength: float = 1.0,
+) -> bytes:
+    """Enhance edges in an image.
+    
     Args:
-        image: Grayscale image.
-        kernel_type: 'sobel', 'prewitt', or 'laplacian'.
-
+        image_data: Image bytes.
+        strength: Enhancement strength.
+    
     Returns:
-        Edge magnitude image.
+        Edge-enhanced image bytes.
     """
-    kernels = create_edge_kernel(kernel_type)
-    kx, ky = kernels[0], kernels[1]
-    ix = convolve2d(image, kx)
-    iy = convolve2d(image, ky)
-
-    ih, iw = len(image), len(image[0])
-    result: List[List[float]] = [[0.0] * iw for _ in range(ih)]
-    for y in range(ih):
-        for x in range(iw):
-            result[y][x] = math.sqrt(ix[y][x] ** 2 + iy[y][x] ** 2)
-
-    return result
+    config = FilterConfig(
+        filter_type=FilterType.EDGE_ENHANCE,
+        strength=strength,
+    )
+    return apply_filter(image_data, config)
 
 
-def gaussian_blur(
-    image: List[List[float]],
-    kernel_size: int = 5,
-    sigma: float = 1.4,
-) -> List[List[float]]:
-    """Apply Gaussian blur to image.
-
+def apply_vintage_filter(image_data: bytes) -> bytes:
+    """Apply vintage color effect.
+    
     Args:
-        image: Grayscale image.
-        kernel_size: Kernel size (odd).
-        sigma: Gaussian sigma.
-
+        image_data: Image bytes.
+    
     Returns:
-        Blurred image.
+        Vintage-filtered image bytes.
     """
-    kernel = create_gaussian_kernel(kernel_size, sigma)
-    return convolve2d(image, kernel)
+    config = FilterConfig(filter_type=FilterType.VINTAGE)
+    return apply_filter(image_data, config)
 
 
-def box_blur(image: List[List[float]], size: int = 3) -> List[List[float]]:
-    """Apply box blur."""
-    return convolve2d(image, create_box_kernel(size))
-
-
-def median_filter(
-    image: List[List[float]],
-    size: int = 3,
-) -> List[List[float]]:
-    """Apply median filter.
-
+def apply_cool_filter(
+    image_data: bytes,
+    strength: float = 1.0,
+) -> bytes:
+    """Apply cool (blue) color filter.
+    
     Args:
-        image: Grayscale image.
-        size: Filter size (odd).
-
+        image_data: Image bytes.
+        strength: Effect strength.
+    
     Returns:
-        Filtered image.
+        Cool-filtered image bytes.
     """
-    ih, iw = len(image), len(image[0])
-    pad = size // 2
-    result: List[List[float]] = [[0.0] * iw for _ in range(ih)]
-
-    for y in range(ih):
-        for x in range(iw):
-            values: List[float] = []
-            for ky in range(-pad, pad + 1):
-                for kx in range(-pad, pad + 1):
-                    ny, nx = y + ky, x + kx
-                    if 0 <= ny < ih and 0 <= nx < iw:
-                        values.append(image[ny][nx])
-            values.sort()
-            result[y][x] = values[len(values) // 2]
-
-    return result
+    config = FilterConfig(filter_type=FilterType.COOL, strength=strength)
+    return apply_filter(image_data, config)
 
 
-def morphological_dilate(
-    image: List[List[int]],
-    kernel_size: int = 3,
-) -> List[List[int]]:
-    """Morphological dilation (binary)."""
-    ih, iw = len(image), len(image[0])
-    pad = kernel_size // 2
-    result: List[List[int]] = [[0] * iw for _ in range(ih)]
-
-    for y in range(ih):
-        for x in range(iw):
-            max_val = 0
-            for ky in range(-pad, pad + 1):
-                for kx in range(-pad, pad + 1):
-                    ny, nx = y + ky, x + kx
-                    if 0 <= ny < ih and 0 <= nx < iw:
-                        max_val = max(max_val, image[ny][nx])
-            result[y][x] = max_val
-
-    return result
-
-
-def morphological_erode(
-    image: List[List[int]],
-    kernel_size: int = 3,
-) -> List[List[int]]:
-    """Morphological erosion (binary)."""
-    ih, iw = len(image), len(image[0])
-    pad = kernel_size // 2
-    result: List[List[int]] = [[0] * iw for _ in range(ih)]
-
-    for y in range(ih):
-        for x in range(iw):
-            min_val = 255
-            for ky in range(-pad, pad + 1):
-                for kx in range(-pad, pad + 1):
-                    ny, nx = y + ky, x + kx
-                    if 0 <= ny < ih and 0 <= nx < iw:
-                        min_val = min(min_val, image[ny][nx])
-            result[y][x] = min_val
-
-    return result
-
-
-def adjust_brightness(
-    image: List[List[float]],
-    factor: float,
-) -> List[List[float]]:
-    """Adjust image brightness.
-
+def apply_warm_filter(
+    image_data: bytes,
+    strength: float = 1.0,
+) -> bytes:
+    """Apply warm (orange) color filter.
+    
     Args:
-        image: Grayscale image.
-        factor: Brightness multiplier (>1 = brighter).
-
+        image_data: Image bytes.
+        strength: Effect strength.
+    
     Returns:
-        Adjusted image.
+        Warm-filtered image bytes.
     """
-    return [[min(1.0, max(0.0, v * factor)) for v in row] for row in image]
-
-
-def adjust_contrast(
-    image: List[List[float]],
-    factor: float,
-) -> List[List[float]]:
-    """Adjust image contrast.
-
-    Args:
-        image: Grayscale image.
-        factor: Contrast multiplier.
-
-    Returns:
-        Adjusted image.
-    """
-    avg = sum(sum(row) for row in image) / (len(image) * len(image[0]))
-    return [[min(1.0, max(0.0, avg + (v - avg) * factor)) for v in row] for row in image]
-
-
-def apply_threshold(
-    image: List[List[float]],
-    threshold: float,
-    high: float = 1.0,
-    low: float = 0.0,
-) -> List[List[float]]:
-    """Apply hard threshold to image."""
-    return [[high if v >= threshold else low for v in row] for row in image]
-
-
-def image_resize_bilinear(
-    image: List[List[float]],
-    new_w: int,
-    new_h: int,
-) -> List[List[float]]:
-    """Resize image using bilinear interpolation.
-
-    Args:
-        image: Input image.
-        new_w, new_h: New dimensions.
-
-    Returns:
-        Resized image.
-    """
-    ih, iw = len(image), len(image[0])
-    result: List[List[float]] = [[0.0] * new_w for _ in range(new_h)]
-
-    scale_x = iw / new_w
-    scale_y = ih / new_h
-
-    for y in range(new_h):
-        for x in range(new_w):
-            src_x = x * scale_x
-            src_y = y * scale_y
-            x0, y0 = int(src_x), int(src_y)
-            x1 = min(x0 + 1, iw - 1)
-            y1 = min(y0 + 1, ih - 1)
-            fx, fy = src_x - x0, src_y - y0
-
-            v00 = image[y0][x0]
-            v10 = image[y0][x1]
-            v01 = image[y1][x0]
-            v11 = image[y1][x1]
-
-            v0 = v00 * (1 - fx) + v10 * fx
-            v1 = v01 * (1 - fx) + v11 * fx
-            result[y][x] = v0 * (1 - fy) + v1 * fy
-
-    return result
+    config = FilterConfig(filter_type=FilterType.WARM, strength=strength)
+    return apply_filter(image_data, config)
