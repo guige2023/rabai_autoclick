@@ -1,271 +1,396 @@
-"""Clipboard history management utilities.
+"""Clipboard History Utilities.
 
-This module provides utilities for managing clipboard history,
-allowing tracking and retrieval of previously copied content.
+This module provides clipboard history management, including persistent
+clipboard storage, text/image clipboard handling, and clipboard filtering
+for macOS desktop applications.
+
+Example:
+    >>> from clipboard_history_utils import ClipboardManager, ClipboardEntry
+    >>> manager = ClipboardManager()
+    >>> entries = manager.get_history()
 """
 
 from __future__ import annotations
 
-import platform
 import subprocess
 import time
 from dataclasses import dataclass, field
-from typing import Optional
-from collections import deque
+from enum import Enum, auto
+from typing import Any, Dict, List, Optional, Set, Union
 
 
-IS_MACOS = platform.system() == "Darwin"
-IS_LINUX = platform.system() == "Linux"
-IS_WINDOWS = platform.system() == "Windows"
-
-
-MAX_HISTORY_SIZE = 100
+class ClipboardContentType(Enum):
+    """Types of clipboard content."""
+    UNKNOWN = auto()
+    TEXT = auto()
+    IMAGE = auto()
+    HTML = auto()
+    RTF = auto()
+    FILE = auto()
+    URL = auto()
 
 
 @dataclass
 class ClipboardEntry:
-    """A single clipboard history entry."""
-    content: str
-    timestamp: float
-    content_type: str = "text"  # 'text', 'image', 'file'
+    """Represents a clipboard history entry.
     
-    def __repr__(self) -> str:
-        preview = self.content[:50] + "..." if len(self.content) > 50 else self.content
-        return f"ClipboardEntry({self.content_type!r}, {preview!r})"
-
-
-class ClipboardHistory:
-    """Manages a history of clipboard entries."""
-    
-    def __init__(self, max_size: int = MAX_HISTORY_SIZE):
-        self.max_size = max_size
-        self._history: deque[ClipboardEntry] = deque(maxlen=max_size)
-        self._last_content: Optional[str] = None
-    
-    def add(self, content: str, content_type: str = "text") -> None:
-        """Add an entry to the clipboard history.
-        
-        Args:
-            content: The clipboard content.
-            content_type: Type of content ('text', 'image', 'file').
-        """
-        # Don't add duplicates
-        if content == self._last_content:
-            return
-        
-        entry = ClipboardEntry(
-            content=content,
-            timestamp=time.time(),
-            content_type=content_type,
-        )
-        self._history.append(entry)
-        self._last_content = content
-    
-    def get_all(self) -> list[ClipboardEntry]:
-        """Get all clipboard history entries, newest first."""
-        return list(reversed(list(self._history)))
-    
-    def search(self, query: str) -> list[ClipboardEntry]:
-        """Search clipboard history for entries containing query."""
-        query_lower = query.lower()
-        return [
-            entry for entry in reversed(self._history)
-            if query_lower in entry.content.lower()
-        ]
-    
-    def get_recent(self, count: int = 10) -> list[ClipboardEntry]:
-        """Get the N most recent entries."""
-        return list(self._history)[-count:]
-    
-    def clear(self) -> None:
-        """Clear all clipboard history."""
-        self._history.clear()
-        self._last_content = None
-    
-    def __len__(self) -> int:
-        return len(self._history)
-
-
-# Global clipboard history instance
-_global_history = ClipboardHistory()
-
-
-def get_current_text() -> Optional[str]:
-    """Get the current text from the clipboard.
-    
-    Returns:
-        Clipboard text content, or None if unavailable.
+    Attributes:
+        id: Unique entry identifier
+        content_type: Type of clipboard content
+        text_content: Text content if applicable
+        timestamp: When entry was copied
+        source_app: Application that provided the content
+        is_favorite: Whether entry is pinned
+        preview: Short preview of content
     """
-    if IS_MACOS:
-        return _get_clipboard_text_macos()
-    elif IS_LINUX:
-        return _get_clipboard_text_linux()
-    elif IS_WINDOWS:
-        return _get_clipboard_text_windows()
-    return None
+    id: str
+    content_type: ClipboardContentType = ClipboardContentType.UNKNOWN
+    text_content: Optional[str] = None
+    data: Optional[bytes] = None
+    timestamp: float = field(default_factory=time.time)
+    source_app: Optional[str] = None
+    is_favorite: bool = False
+    use_count: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    @property
+    def preview(self) -> str:
+        """Get short text preview."""
+        if self.text_content:
+            return self.text_content[:100] + ('...' if len(self.text_content) > 100 else '')
+        return f"[{self.content_type.name}]"
+    
+    @property
+    def age(self) -> float:
+        """Get age in seconds since entry was created."""
+        return time.time() - self.timestamp
+    
+    def matches_filter(self, query: str) -> bool:
+        """Check if entry matches a text filter query."""
+        if not query:
+            return True
+        
+        query_lower = query.lower()
+        
+        if self.text_content and query_lower in self.text_content.lower():
+            return True
+        
+        if self.source_app and query_lower in self.source_app.lower():
+            return True
+        
+        return False
 
 
-def _get_clipboard_text_macos() -> Optional[str]:
-    """Get clipboard text on macOS using pbpaste."""
-    try:
-        result = subprocess.run(
-            ["pbpaste"],
-            capture_output=True,
-            timeout=3
-        )
-        if result.returncode == 0:
-            return result.stdout
-    except Exception:
-        pass
-    return None
-
-
-def _get_clipboard_text_linux() -> Optional[str]:
-    """Get clipboard text on Linux using xclip or xsel."""
-    try:
-        result = subprocess.run(
-            ["xclip", "-selection", "clipboard", "-o"],
-            capture_output=True,
-            timeout=3
-        )
-        if result.returncode == 0:
-            return result.stdout
-    except FileNotFoundError:
+class ClipboardManager:
+    """Manages clipboard history and operations.
+    
+    Provides access to clipboard contents, history tracking,
+    and clipboard filtering.
+    
+    Attributes:
+        max_history: Maximum entries to keep in history
+        auto_save: Whether to auto-save clipboard changes
+    """
+    
+    def __init__(
+        self,
+        max_history: int = 100,
+        auto_save: bool = True,
+        storage_path: Optional[str] = None,
+    ):
+        self.max_history = max_history
+        self.auto_save = auto_save
+        self.storage_path = storage_path
+        
+        self._history: List[ClipboardEntry] = []
+        self._last_content_hash: Optional[str] = None
+        self._filter_keywords: Set[str] = set()
+        self._blocked_apps: Set[str] = set()
+        self._favorite_ids: Set[str] = set()
+    
+    def get_current_content(self) -> Optional[ClipboardEntry]:
+        """Get current clipboard content.
+        
+        Returns:
+            ClipboardEntry or None
+        """
         try:
             result = subprocess.run(
-                ["xsel", "--clipboard", "--output"],
+                ['pbpaste'],
                 capture_output=True,
-                timeout=3
+                timeout=2,
             )
-            if result.returncode == 0:
-                return result.stdout
+            
+            if result.returncode == 0 and result.stdout:
+                text = result.stdout.decode('utf-8', errors='replace')
+                
+                content_hash = str(hash(text))
+                if content_hash == self._last_content_hash:
+                    return None
+                
+                self._last_content_hash = content_hash
+                
+                entry = ClipboardEntry(
+                    id=self._generate_id(),
+                    content_type=self._detect_content_type(text),
+                    text_content=text,
+                    data=result.stdout,
+                )
+                
+                return entry
+                
         except Exception:
             pass
-    return None
-
-
-def _get_clipboard_text_windows() -> Optional[str]:
-    """Get clipboard text on Windows."""
-    try:
-        import ctypes
-        from ctypes import c_void_p, POINTER
         
-        CF_TEXT = 1
-        
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-        
-        user32.OpenClipboard(None)
-        
-        h_data = user32.GetClipboardData(CF_TEXT)
-        if h_data:
-            data = kernel32.GlobalLock(h_data)
-            text = ctypes.c_char_p(data).value.decode("cp1252")
-            kernel32.GlobalUnlock(h_data)
-            user32.CloseClipboard()
-            return text
-        
-        user32.CloseClipboard()
-    except Exception:
-        pass
-    return None
-
-
-def set_clipboard_text(text: str) -> bool:
-    """Set the clipboard text content.
+        return None
     
-    Args:
-        text: Text to put on clipboard.
+    def _detect_content_type(self, text: str) -> ClipboardContentType:
+        """Detect content type from text."""
+        text_lower = text.lower().strip()
+        
+        if text_lower.startswith('http://') or text_lower.startswith('https://'):
+            return ClipboardContentType.URL
+        
+        if text_lower.startswith('<!doctype html') or '<html' in text_lower[:200]:
+            return ClipboardContentType.HTML
+        
+        if text_lower.startswith('{\\rtf'):
+            return ClipboardContentType.RTF
+        
+        if '\n' in text or len(text) > 50:
+            return ClipboardContentType.TEXT
+        
+        return ClipboardContentType.TEXT
     
-    Returns:
-        True if successful.
-    """
-    if IS_MACOS:
-        return _set_clipboard_text_macos(text)
-    elif IS_LINUX:
-        return _set_clipboard_text_linux(text)
-    elif IS_WINDOWS:
-        return _set_clipboard_text_windows(text)
-    return False
-
-
-def _set_clipboard_text_macos(text: str) -> bool:
-    """Set clipboard text on macOS using pbcopy."""
-    try:
-        result = subprocess.run(
-            ["pbcopy"],
-            input=text.encode(),
-            capture_output=True,
-            timeout=3
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
-def _set_clipboard_text_linux(text: str) -> bool:
-    """Set clipboard text on Linux using xclip or xsel."""
-    try:
-        result = subprocess.run(
-            ["xclip", "-selection", "clipboard", "-i"],
-            input=text.encode(),
-            capture_output=True,
-            timeout=3
-        )
-        if result.returncode == 0:
-            return True
-    except FileNotFoundError:
-        pass
+    def _generate_id(self) -> str:
+        """Generate unique entry ID."""
+        import uuid
+        return str(uuid.uuid4())[:8]
     
-    try:
-        result = subprocess.run(
-            ["xsel", "--clipboard", "--input"],
-            input=text.encode(),
-            capture_output=True,
-            timeout=3
-        )
-        return result.returncode == 0
-    except Exception:
-        pass
-    return False
-
-
-def _set_clipboard_text_windows(text: str) -> bool:
-    """Set clipboard text on Windows."""
-    try:
-        import ctypes
+    def add_to_history(self, entry: ClipboardEntry) -> bool:
+        """Add entry to clipboard history.
         
-        CF_TEXT = 1
+        Args:
+            entry: Entry to add
+            
+        Returns:
+            True if added successfully
+        """
+        if entry.source_app in self._blocked_apps:
+            return False
         
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
+        if entry.text_content:
+            for keyword in self._filter_keywords:
+                if keyword.lower() in entry.text_content.lower():
+                    return False
         
-        user32.OpenClipboard(None)
-        user32.EmptyClipboard()
+        self._history.insert(0, entry)
         
-        data = text.encode("cp1252")
-        h_data = kernel32.GlobalAlloc(0x0002, len(data) + 1)  # GMEM_MOVEABLE
-        p_data = kernel32.GlobalLock(h_data)
-        ctypes.memmove(p_data, data, len(data))
-        kernel32.GlobalUnlock(h_data)
+        if len(self._history) > self.max_history:
+            excess = self._history[self.max_history:]
+            self._history = self._history[:self.max_history]
         
-        user32.SetClipboardData(CF_TEXT, h_data)
-        user32.CloseClipboard()
         return True
-    except Exception:
-        return False
-
-
-def copy_with_history(text: str) -> None:
-    """Copy text to clipboard and add to global history.
     
-    Args:
-        text: Text to copy.
-    """
-    if set_clipboard_text(text):
-        _global_history.add(text)
+    def get_history(
+        self,
+        limit: Optional[int] = None,
+        content_type: Optional[ClipboardContentType] = None,
+        filter_query: Optional[str] = None,
+        favorites_only: bool = False,
+    ) -> List[ClipboardEntry]:
+        """Get clipboard history with filtering.
+        
+        Args:
+            limit: Maximum entries to return
+            content_type: Filter by content type
+            filter_query: Text filter query
+            favorites_only: Only return favorites
+            
+        Returns:
+            Filtered list of entries
+        """
+        entries = self._history
+        
+        if content_type:
+            entries = [e for e in entries if e.content_type == content_type]
+        
+        if filter_query:
+            entries = [e for e in entries if e.matches_filter(filter_query)]
+        
+        if favorites_only:
+            entries = [e for e in entries if e.is_favorite or e.id in self._favorite_ids]
+        
+        if limit:
+            entries = entries[:limit]
+        
+        return entries
+    
+    def search(self, query: str, limit: int = 10) -> List[ClipboardEntry]:
+        """Search clipboard history.
+        
+        Args:
+            query: Search query
+            limit: Maximum results
+            
+        Returns:
+            Matching entries
+        """
+        return self.get_history(filter_query=query, limit=limit)
+    
+    def copy_entry(self, entry_id: str) -> bool:
+        """Copy a history entry back to clipboard.
+        
+        Args:
+            entry_id: ID of entry to copy
+            
+        Returns:
+            True if successful
+        """
+        for entry in self._history:
+            if entry.id == entry_id:
+                try:
+                    content = entry.text_content or ''
+                    process = subprocess.Popen(
+                        ['pbcopy'],
+                        stdin=subprocess.PIPE,
+                    )
+                    process.communicate(input=content.encode('utf-8'))
+                    
+                    entry.use_count += 1
+                    self._last_content_hash = str(hash(content))
+                    
+                    return True
+                except Exception:
+                    pass
+        
+        return False
+    
+    def delete_entry(self, entry_id: str) -> bool:
+        """Delete a history entry.
+        
+        Args:
+            entry_id: ID of entry to delete
+            
+        Returns:
+            True if deleted
+        """
+        for i, entry in enumerate(self._history):
+            if entry.id == entry_id:
+                self._history.pop(i)
+                return True
+        
+        return False
+    
+    def toggle_favorite(self, entry_id: str) -> bool:
+        """Toggle favorite status for an entry.
+        
+        Args:
+            entry_id: ID of entry
+            
+        Returns:
+            New favorite status
+        """
+        for entry in self._history:
+            if entry.id == entry_id:
+                entry.is_favorite = not entry.is_favorite
+                if entry.is_favorite:
+                    self._favorite_ids.add(entry_id)
+                else:
+                    self._favorite_ids.discard(entry_id)
+                return entry.is_favorite
+        
+        return False
+    
+    def clear_history(self, keep_favorites: bool = True) -> None:
+        """Clear clipboard history.
+        
+        Args:
+            keep_favorites: Whether to keep favorite entries
+        """
+        if keep_favorites:
+            self._history = [
+                e for e in self._history
+                if e.is_favorite or e.id in self._favorite_ids
+            ]
+        else:
+            self._history.clear()
+            self._favorite_ids.clear()
+    
+    def add_filter_keyword(self, keyword: str) -> None:
+        """Add a filter keyword (entries containing it won't be saved)."""
+        self._filter_keywords.add(keyword)
+    
+    def remove_filter_keyword(self, keyword: str) -> None:
+        """Remove a filter keyword."""
+        self._filter_keywords.discard(keyword)
+    
+    def block_app(self, app_name: str) -> None:
+        """Block clipboard entries from an app."""
+        self._blocked_apps.add(app_name)
+    
+    def unblock_app(self, app_name: str) -> None:
+        """Unblock clipboard entries from an app."""
+        self._blocked_apps.discard(app_name)
+    
+    def get_statistics(self) -> Dict[str, Any]:
+        """Get clipboard usage statistics."""
+        total = len(self._history)
+        
+        type_counts: Dict[str, int] = {}
+        for entry in self._history:
+            type_name = entry.content_type.name
+            type_counts[type_name] = type_counts.get(type_name, 0) + 1
+        
+        return {
+            'total_entries': total,
+            'favorites': len(self._favorite_ids),
+            'by_type': type_counts,
+            'filter_keywords': list(self._filter_keywords),
+            'blocked_apps': list(self._blocked_apps),
+        }
 
 
-def get_history() -> ClipboardHistory:
-    """Get the global clipboard history instance."""
-    return _global_history
+class ClipboardMonitor:
+    """Monitors clipboard for changes."""
+    
+    def __init__(self, manager: ClipboardManager, poll_interval: float = 0.5):
+        self.manager = manager
+        self.poll_interval = poll_interval
+        self._is_running = False
+        self._callbacks: List[callable] = []
+    
+    def start(self) -> None:
+        """Start monitoring clipboard."""
+        self._is_running = True
+    
+    def stop(self) -> None:
+        """Stop monitoring clipboard."""
+        self._is_running = False
+    
+    def poll(self) -> Optional[ClipboardEntry]:
+        """Poll for new clipboard content."""
+        if not self._is_running:
+            return None
+        
+        entry = self.manager.get_current_content()
+        
+        if entry:
+            self.manager.add_to_history(entry)
+            
+            for callback in self._callbacks:
+                try:
+                    callback(entry)
+                except Exception:
+                    pass
+        
+        return entry
+    
+    def add_callback(self, callback: callable) -> None:
+        """Add callback for new clipboard entries."""
+        self._callbacks.append(callback)
+    
+    def remove_callback(self, callback: callable) -> None:
+        """Remove a callback."""
+        if callback in self._callbacks:
+            self._callbacks.remove(callback)
