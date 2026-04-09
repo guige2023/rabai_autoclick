@@ -1,284 +1,349 @@
-"""API gateway action for routing and managing API requests.
+"""
+API Gateway Action Module
 
-Provides request routing, authentication, rate limiting,
-and response transformation for API gateways.
+Unified API gateway with routing, authentication, rate limiting,
+request transformation, and response aggregation.
+
+MIT License - Copyright (c) 2025 RabAi Research
 """
 
-import hashlib
-import hmac
-import json
+from __future__ import annotations
+
+import asyncio
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
-class AuthType(Enum):
-    NONE = "none"
-    API_KEY = "api_key"
-    BEARER = "bearer"
-    HMAC = "hmac"
+class BackendType(Enum):
+    """Backend service types."""
+    
+    HTTP = "http"
+    GRPC = "grpc"
+    FUNCTION = "function"
+    STATIC = "static"
 
 
 @dataclass
 class Route:
+    """API route definition."""
+    
     path: str
     method: str
-    handler: Callable
-    auth_type: AuthType = AuthType.NONE
+    backend_url: Optional[str] = None
+    backend_type: BackendType = BackendType.HTTP
+    handler: Optional[Callable] = None
+    auth_required: bool = False
     rate_limit: Optional[float] = None
+    timeout_seconds: float = 30
+    transforms: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class RequestContext:
+class GatewayConfig:
+    """Gateway configuration."""
+    
+    name: str = "api-gateway"
+    port: int = 8080
+    host: str = "0.0.0.0"
+    timeout_seconds: float = 60
+    max_concurrent: int = 1000
+    enable_metrics: bool = True
+
+
+@dataclass
+class GatewayRequest:
+    """Gateway request context."""
+    
+    request_id: str
     method: str
     path: str
-    headers: dict[str, str]
-    query_params: dict[str, str]
-    body: Optional[dict[str, Any]] = None
-    auth_token: Optional[str] = None
-    client_ip: Optional[str] = None
+    headers: Dict[str, str]
+    body: Any = None
+    query_params: Dict[str, str] = field(default_factory=dict)
+    path_params: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
-class ResponseData:
+class GatewayResponse:
+    """Gateway response context."""
+    
     status_code: int
-    headers: dict[str, str]
-    body: Any
+    headers: Dict[str, str] = field(default_factory=dict)
+    body: Any = None
+    request_id: str = ""
+
+
+class RequestTransformer:
+    """Transforms requests before forwarding."""
+    
+    def __init__(self, transforms: Dict[str, Any]):
+        self.transforms = transforms
+    
+    def transform_request(self, request: GatewayRequest) -> GatewayRequest:
+        """Transform request based on configuration."""
+        if "headers" in self.transforms:
+            for key, value in self.transforms["headers"].items():
+                request.headers[key] = value
+        
+        if "path_rewrite" in self.transforms:
+            old_path = request.path
+            template = self.transforms["path_rewrite"]
+            for param, value in request.path_params.items():
+                template = template.replace(f"{{{param}}}", value)
+            request.path = template
+        
+        return request
+
+
+class ResponseTransformer:
+    """Transforms responses before returning."""
+    
+    def __init__(self, transforms: Dict[str, Any]):
+        self.transforms = transforms
+    
+    def transform_response(
+        self,
+        response: GatewayResponse,
+        request: GatewayRequest
+    ) -> GatewayResponse:
+        """Transform response based on configuration."""
+        if "headers" in self.transforms:
+            for key, value in self.transforms["headers"].items():
+                response.headers[key] = value
+        
+        if "body_template" in self.transforms:
+            response.body = self.transforms["body_template"]
+        
+        return response
 
 
 class APIGatewayAction:
-    """API gateway with routing, auth, and rate limiting.
-
-    Args:
-        base_path: Base path for all routes.
-        enable_cors: Enable CORS support.
-        default_timeout: Default request timeout.
     """
-
-    def __init__(
-        self,
-        base_path: str = "/api",
-        enable_cors: bool = True,
-        default_timeout: float = 30.0,
-    ) -> None:
-        self._routes: list[Route] = []
-        self._base_path = base_path
-        self._enable_cors = enable_cors
-        self._default_timeout = default_timeout
-        self._api_keys: dict[str, dict[str, Any]] = {}
-        self._middleware: list[Callable] = []
-
-    def register_route(
+    Main API gateway action handler.
+    
+    Provides unified gateway with routing, authentication,
+    rate limiting, and transformation support.
+    """
+    
+    def __init__(self, config: Optional[GatewayConfig] = None):
+        self.config = config or GatewayConfig()
+        self._routes: Dict[Tuple[str, str], Route] = {}
+        self._middleware: List[Callable] = []
+        self._auth_handlers: Dict[str, Callable] = {}
+        self._metrics = {
+            "total_requests": 0,
+            "successful_requests": 0,
+            "failed_requests": 0,
+            "total_latency_ms": 0
+        }
+    
+    def add_route(
         self,
         path: str,
         method: str,
-        handler: Callable,
-        auth_type: AuthType = AuthType.NONE,
-        rate_limit: Optional[float] = None,
-    ) -> bool:
-        """Register an API route.
-
-        Args:
-            path: Route path.
-            method: HTTP method.
-            handler: Handler function.
-            auth_type: Authentication type.
-            rate_limit: Optional rate limit (requests/second).
-
-        Returns:
-            True if registered successfully.
-        """
-        full_path = f"{self._base_path.rstrip('/')}/{path.lstrip('/')}"
-        route = Route(
-            path=full_path,
-            method=method.upper(),
-            handler=handler,
-            auth_type=auth_type,
-            rate_limit=rate_limit,
-        )
-        self._routes.append(route)
-        logger.debug(f"Registered route: {method} {full_path}")
-        return True
-
-    def register_api_key(
-        self,
-        key: str,
-        client_name: str,
-        permissions: Optional[list[str]] = None,
-        rate_limit: Optional[float] = None,
+        backend_url: Optional[str] = None,
+        backend_type: BackendType = BackendType.HTTP,
+        handler: Optional[Callable] = None,
+        **kwargs
     ) -> None:
-        """Register an API key.
-
-        Args:
-            key: API key string.
-            client_name: Client name.
-            permissions: List of permissions.
-            rate_limit: Rate limit for this key.
-        """
-        self._api_keys[key] = {
-            "client_name": client_name,
-            "permissions": permissions or [],
-            "rate_limit": rate_limit,
-            "created_at": time.time(),
-        }
-
-    def authenticate_request(
-        self,
-        context: RequestContext,
-        auth_type: AuthType,
-    ) -> Optional[str]:
-        """Authenticate an API request.
-
-        Args:
-            context: Request context.
-            auth_type: Authentication type.
-
-        Returns:
-            Client ID if authenticated, None otherwise.
-        """
-        if auth_type == AuthType.NONE:
-            return "anonymous"
-
-        if auth_type == AuthType.API_KEY:
-            api_key = context.headers.get("X-API-Key") or context.query_params.get("api_key")
-            if api_key and api_key in self._api_keys:
-                return api_key
-            return None
-
-        if auth_type == AuthType.BEARER:
-            auth_header = context.headers.get("Authorization", "")
-            if auth_header.startswith("Bearer "):
-                token = auth_header[7:]
-                for key, data in self._api_keys.items():
-                    if self._validate_bearer_token(token, key):
-                        return key
-            return None
-
-        if auth_type == AuthType.HMAC:
-            auth_header = context.headers.get("Authorization", "")
-            if auth_header.startswith("HMAC "):
-                parts = auth_header[5:].split(":")
-                if len(parts) == 2:
-                    key, signature = parts
-                    if key in self._api_keys and self._validate_hmac_signature(context, key, signature):
-                        return key
-            return None
-
-        return None
-
-    def _validate_bearer_token(self, token: str, key: str) -> bool:
-        """Validate a bearer token.
-
-        Args:
-            token: Bearer token.
-            key: API key.
-
-        Returns:
-            True if valid.
-        """
-        expected = hashlib.sha256(f"{key}:{time.time() // 3600}".encode()).hexdigest()
-        return token == expected
-
-    def _validate_hmac_signature(
-        self,
-        context: RequestContext,
-        key: str,
-        signature: str,
-    ) -> bool:
-        """Validate HMAC signature.
-
-        Args:
-            context: Request context.
-            key: API key.
-            signature: Provided signature.
-
-        Returns:
-            True if valid.
-        """
-        message = f"{context.method}:{context.path}:{json.dumps(context.body or {}, sort_keys=True)}"
-        expected = hmac.new(key.encode(), message.encode(), hashlib.sha256).hexdigest()
-        return hmac.compare_digest(signature, expected)
-
-    def route_request(self, context: RequestContext) -> ResponseData:
-        """Route and handle an API request.
-
-        Args:
-            context: Request context.
-
-        Returns:
-            Response data.
-        """
-        for route in self._routes:
-            if route.path == context.path and route.method == context.method:
-                for mw in self._middleware:
-                    result = mw(context)
-                    if result is not None:
-                        return result
-
-                client_id = self.authenticate_request(context, route.auth_type)
-                if client_id is None:
-                    return ResponseData(
-                        status_code=401,
-                        headers=self._get_cors_headers(),
-                        body={"error": "Unauthorized"},
-                    )
-
-                try:
-                    result = route.handler(context)
-                    return ResponseData(
-                        status_code=200,
-                        headers=self._get_cors_headers(),
-                        body=result,
-                    )
-                except Exception as e:
-                    logger.error(f"Route handler error: {e}")
-                    return ResponseData(
-                        status_code=500,
-                        headers=self._get_cors_headers(),
-                        body={"error": "Internal server error"},
-                    )
-
-        return ResponseData(
-            status_code=404,
-            headers=self._get_cors_headers(),
-            body={"error": "Not found"},
+        """Add a route to the gateway."""
+        route = Route(
+            path=path,
+            method=method.upper(),
+            backend_url=backend_url,
+            backend_type=backend_type,
+            handler=handler,
+            **kwargs
         )
-
-    def _get_cors_headers(self) -> dict[str, str]:
-        """Get CORS headers.
-
-        Returns:
-            CORS headers dictionary.
-        """
-        if not self._enable_cors:
-            return {}
+        self._routes[(route.path, route.method)] = route
+    
+    def get_route(self, path: str, method: str) -> Optional[Route]:
+        """Get route by path and method."""
+        return self._routes.get((path, method.upper()))
+    
+    def match_route(self, path: str, method: str) -> Optional[Tuple[Route, Dict[str, str]]]:
+        """Match a route with path parameter extraction."""
+        method = method.upper()
+        
+        if (path, method) in self._routes:
+            return self._routes[(path, method)], {}
+        
+        for (route_path, route_method), route in self._routes.items():
+            if route_method != method:
+                continue
+            
+            params = self._extract_params(route_path, path)
+            if params is not None:
+                return route, params
+        
+        return None
+    
+    def _extract_params(self, route_path: str, request_path: str) -> Optional[Dict[str, str]]:
+        """Extract path parameters from request path."""
+        route_parts = route_path.strip("/").split("/")
+        path_parts = request_path.strip("/").split("/")
+        
+        if len(route_parts) != len(path_parts):
+            return None
+        
+        params = {}
+        for route_part, path_part in zip(route_parts, path_parts):
+            if route_part.startswith("{") and route_part.endswith("}"):
+                param_name = route_part[1:-1]
+                params[param_name] = path_part
+            elif route_part != path_part:
+                return None
+        
+        return params
+    
+    def register_auth(self, auth_type: str, handler: Callable) -> None:
+        """Register an authentication handler."""
+        self._auth_handlers[auth_type] = handler
+    
+    async def handle_request(
+        self,
+        method: str,
+        path: str,
+        headers: Optional[Dict] = None,
+        body: Any = None,
+        query_params: Optional[Dict] = None
+    ) -> GatewayResponse:
+        """Handle an incoming request."""
+        request_id = str(uuid.uuid4())
+        self._metrics["total_requests"] += 1
+        
+        request = GatewayRequest(
+            request_id=request_id,
+            method=method.upper(),
+            path=path,
+            headers=headers or {},
+            body=body,
+            query_params=query_params or {}
+        )
+        
+        start_time = time.time()
+        
+        try:
+            result = await self._process_request(request)
+            
+            duration_ms = (time.time() - start_time) * 1000
+            self._metrics["total_latency_ms"] += duration_ms
+            self._metrics["successful_requests"] += 1
+            
+            return result
+        
+        except Exception as e:
+            duration_ms = (time.time() - start_time) * 1000
+            self._metrics["total_latency_ms"] += duration_ms
+            self._metrics["failed_requests"] += 1
+            
+            return GatewayResponse(
+                status_code=500,
+                body={"error": str(e)},
+                request_id=request_id
+            )
+    
+    async def _process_request(self, request: GatewayRequest) -> GatewayResponse:
+        """Process request through middleware and routing."""
+        for mw in self._middleware:
+            result = await mw(request)
+            if result is not None:
+                return result
+        
+        match = self.match_route(request.path, request.method)
+        if not match:
+            return GatewayResponse(
+                status_code=404,
+                body={"error": "Route not found"},
+                request_id=request.request_id
+            )
+        
+        route, path_params = match
+        request.path_params = path_params
+        
+        if route.auth_required:
+            auth_result = await self._check_auth(request, route)
+            if auth_result:
+                return auth_result
+        
+        if route.transforms:
+            transformer = RequestTransformer(route.transforms)
+            request = transformer.transform_request(request)
+        
+        response = await self._forward_request(request, route)
+        
+        if route.transforms:
+            transformer = ResponseTransformer(route.transforms)
+            response = transformer.transform_response(response, request)
+        
+        response.request_id = request.request_id
+        return response
+    
+    async def _check_auth(
+        self,
+        request: GatewayRequest,
+        route: Route
+    ) -> Optional[GatewayResponse]:
+        """Check authentication for request."""
+        auth_header = request.headers.get("Authorization", "")
+        
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            handler = self._auth_handlers.get("bearer")
+            if handler:
+                valid = await handler(token)
+                if not valid:
+                    return GatewayResponse(
+                        status_code=401,
+                        body={"error": "Unauthorized"},
+                        request_id=request.request_id
+                    )
+        
+        return None
+    
+    async def _forward_request(
+        self,
+        request: GatewayRequest,
+        route: Route
+    ) -> GatewayResponse:
+        """Forward request to backend."""
+        if route.handler:
+            if asyncio.iscoroutinefunction(route.handler):
+                result = await route.handler(request)
+            else:
+                result = route.handler(request)
+            return result
+        
+        return GatewayResponse(
+            status_code=200,
+            body={"message": "Not implemented"},
+            request_id=request.request_id
+        )
+    
+    def add_middleware(self, func: Callable) -> None:
+        """Add gateway middleware."""
+        self._middleware.append(func)
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get gateway statistics."""
+        total = self._metrics["total_requests"]
+        avg_latency = (
+            self._metrics["total_latency_ms"] / total
+            if total > 0 else 0
+        )
+        
         return {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization, X-API-Key",
-        }
-
-    def use_middleware(self, middleware: Callable) -> None:
-        """Register middleware.
-
-        Args:
-            middleware: Middleware function.
-        """
-        self._middleware.append(middleware)
-
-    def get_stats(self) -> dict[str, Any]:
-        """Get API gateway statistics.
-
-        Returns:
-            Dictionary with stats.
-        """
-        return {
-            "total_routes": len(self._routes),
-            "registered_api_keys": len(self._api_keys),
-            "middleware_count": len(self._middleware),
-            "cors_enabled": self._enable_cors,
+            "name": self.config.name,
+            "total_requests": total,
+            "successful_requests": self._metrics["successful_requests"],
+            "failed_requests": self._metrics["failed_requests"],
+            "avg_latency_ms": avg_latency,
+            "routes_count": len(self._routes)
         }
