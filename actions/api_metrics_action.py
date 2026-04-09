@@ -1,443 +1,299 @@
 """
-API metrics collection and monitoring module.
+API Metrics Action Module.
 
-Collects, aggregates, and reports API performance metrics including
-latency, throughput, error rates, and status code distributions.
-
-Author: Aito Auto Agent
+API metrics collection with counters, gauges, histograms,
+and automatic Prometheus/StatsD export.
 """
 
-from __future__ import annotations
-
 import time
-from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from enum import Enum, auto
-from typing import Optional, Callable
-import threading
+from typing import Any, Callable, Optional
+from enum import Enum
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class MetricType(Enum):
-    """Types of metrics."""
-    COUNTER = auto()
-    GAUGE = auto()
-    HISTOGRAM = auto()
-    TIMER = auto()
-    SUMMARY = auto()
+    """Metric types."""
+    COUNTER = "counter"
+    GAUGE = "gauge"
+    HISTOGRAM = "histogram"
+    SUMMARY = "summary"
 
 
 @dataclass
-class ApiMetricPoint:
-    """Single metric data point."""
-    timestamp: float
+class MetricValue:
+    """Metric value with metadata."""
+    name: str
+    metric_type: MetricType
     value: float
-    labels: dict[str, str] = field(default_factory=dict)
+    labels: dict
+    timestamp: float
 
 
 @dataclass
-class LatencyPercentiles:
-    """Latency percentile values."""
-    p50: float = 0.0
-    p75: float = 0.0
-    p90: float = 0.0
-    p95: float = 0.0
-    p99: float = 0.0
-    p999: float = 0.0
+class APIMetrics:
+    """API metrics summary."""
+    total_requests: int
+    success_count: int
+    error_count: int
+    avg_latency_ms: float
+    p95_latency_ms: float
+    p99_latency_ms: float
 
 
-@dataclass
-class ApiMetricsSummary:
-    """Summary of API metrics."""
-    total_requests: int = 0
-    successful_requests: int = 0
-    failed_requests: int = 0
-    error_rate: float = 0.0
-    avg_latency_ms: float = 0.0
-    min_latency_ms: float = 0.0
-    max_latency_ms: float = 0.0
-    throughput_rps: float = 0.0
-    percentiles: LatencyPercentiles = field(default_factory=LatencyPercentiles)
-    status_code_counts: dict[int, int] = field(default_factory=dict)
-    method_counts: dict[str, int] = field(default_factory=dict)
-
-
-class PercentileCalculator:
-    """Calculate percentiles from a list of values."""
-
-    @staticmethod
-    def calculate(values: list[float], percentiles: list[float]) -> dict[float, float]:
-        """
-        Calculate percentile values.
-
-        Args:
-            values: List of numeric values
-            percentiles: List of percentile values (0-100)
-
-        Returns:
-            Dict mapping percentile to value
-        """
-        if not values:
-            return {p: 0.0 for p in percentiles}
-
-        sorted_values = sorted(values)
-        result = {}
-
-        for p in percentiles:
-            if p <= 0:
-                result[p] = sorted_values[0] if sorted_values else 0.0
-            elif p >= 100:
-                result[p] = sorted_values[-1] if sorted_values else 0.0
-            else:
-                index = (p / 100) * (len(sorted_values) - 1)
-                lower = int(index)
-                upper = min(lower + 1, len(sorted_values) - 1)
-                weight = index - lower
-                result[p] = sorted_values[lower] * (1 - weight) + sorted_values[upper] * weight
-
-        return result
-
-
-class ApiMetricsCollector:
+class APIMetricsAction:
     """
-    API metrics collection and aggregation.
-
-    Collects request metrics, calculates percentiles, and generates
-    summaries for API monitoring and alerting.
+    API metrics collection and reporting.
 
     Example:
-        collector = ApiMetricsCollector()
-        collector.record_request("/api/users", "GET", 200, latency_ms=45.2)
-        collector.record_request("/api/users", "POST", 201, latency_ms=120.5)
-        summary = collector.get_summary()
+        metrics = APIMetricsAction()
+        metrics.increment_counter("http_requests_total", labels={"method": "GET"})
+        metrics.record_histogram("http_request_duration_ms", 123.45)
+        summary = metrics.get_summary()
     """
 
-    def __init__(self, window_size_seconds: int = 60):
-        self._window_size = window_size_seconds
-        self._lock = threading.RLock()
+    def __init__(self, service_name: str = "api"):
+        """
+        Initialize API metrics.
 
-        self._request_times: dict[str, list[float]] = defaultdict(list)
-        self._latencies: dict[str, list[float]] = defaultdict(list)
-        self._status_codes: dict[str, dict[int, int]] = defaultdict(lambda: defaultdict(int))
-        self._methods: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-        self._errors: dict[str, int] = defaultdict(int)
-        self._total_requests: dict[str, int] = defaultdict(int)
-        self._timestamps: dict[str, list[float]] = defaultdict(list)
+        Args:
+            service_name: Service identifier.
+        """
+        self.service_name = service_name
+        self._counters: dict[str, float] = {}
+        self._gauges: dict[str, float] = {}
+        self._histograms: dict[str, list[float]] = {}
+        self._metrics_index: dict[str, MetricType] = {}
+        self._labels_index: dict[str, dict] = {}
 
-        self._start_time = time.time()
-        self._endpoint_labels: dict[str, str] = {}
+    def increment_counter(
+        self,
+        name: str,
+        value: float = 1.0,
+        labels: Optional[dict] = None
+    ) -> None:
+        """
+        Increment a counter metric.
+
+        Args:
+            name: Metric name.
+            value: Increment value.
+            labels: Metric labels.
+        """
+        key = self._make_key(name, labels)
+        self._counters[key] = self._counters.get(key, 0.0) + value
+        self._metrics_index[key] = MetricType.COUNTER
+        self._labels_index[key] = labels or {}
+
+    def set_gauge(
+        self,
+        name: str,
+        value: float,
+        labels: Optional[dict] = None
+    ) -> None:
+        """
+        Set a gauge metric.
+
+        Args:
+            name: Metric name.
+            value: Gauge value.
+            labels: Metric labels.
+        """
+        key = self._make_key(name, labels)
+        self._gauges[key] = value
+        self._metrics_index[key] = MetricType.GAUGE
+        self._labels_index[key] = labels or {}
+
+    def record_histogram(
+        self,
+        name: str,
+        value: float,
+        labels: Optional[dict] = None
+    ) -> None:
+        """
+        Record a histogram value.
+
+        Args:
+            name: Metric name.
+            value: Observed value.
+            labels: Metric labels.
+        """
+        key = self._make_key(name, labels)
+        if key not in self._histograms:
+            self._histograms[key] = []
+        self._histograms[key].append(value)
+        self._metrics_index[key] = MetricType.HISTOGRAM
+        self._labels_index[key] = labels or {}
 
     def record_request(
         self,
-        endpoint: str,
         method: str,
+        path: str,
         status_code: int,
-        latency_ms: float,
-        labels: Optional[dict[str, str]] = None
+        duration_ms: float
     ) -> None:
         """
-        Record an API request metric.
+        Record API request metrics.
 
         Args:
-            endpoint: API endpoint path
-            method: HTTP method
-            status_code: Response status code
-            latency_ms: Request latency in milliseconds
-            labels: Optional metric labels
+            method: HTTP method.
+            path: Request path.
+            status_code: Response status code.
+            duration_ms: Request duration in milliseconds.
         """
-        with self._lock:
-            timestamp = time.time()
-            key = self._normalize_endpoint(endpoint)
+        labels = {"method": method, "path": path, "status": str(status_code)}
 
-            self._request_times[key].append(timestamp)
-            self._latencies[key].append(latency_ms)
-            self._status_codes[key][status_code] += 1
-            self._methods[key][method] += 1
-            self._timestamps[key].append(timestamp)
-            self._total_requests[key] += 1
+        self.increment_counter("http_requests_total", labels=labels)
 
-            if status_code >= 400:
-                self._errors[key] += 1
+        if status_code >= 200 and status_code < 400:
+            self.increment_counter("http_requests_success", labels=labels)
+        else:
+            self.increment_counter("http_requests_errors", labels=labels)
 
-            self._cleanup_old_data(key)
+        self.record_histogram("http_request_duration_ms", duration_ms, labels=labels)
 
-    def _normalize_endpoint(self, endpoint: str) -> str:
-        """Normalize endpoint for consistent grouping."""
-        parts = endpoint.split("/")
-        normalized = []
+    def get_counter(self, name: str, labels: Optional[dict] = None) -> float:
+        """Get counter value."""
+        key = self._make_key(name, labels)
+        return self._counters.get(key, 0.0)
 
-        for part in parts:
-            if part.isdigit():
-                normalized.append("{id}")
-            elif self._looks_like_uuid(part):
-                normalized.append("{uuid}")
-            else:
-                normalized.append(part)
+    def get_gauge(self, name: str, labels: Optional[dict] = None) -> Optional[float]:
+        """Get gauge value."""
+        key = self._make_key(name, labels)
+        return self._gauges.get(key)
 
-        return "/".join(normalized)
-
-    def _looks_like_uuid(self, value: str) -> bool:
-        """Check if string looks like a UUID."""
-        if len(value) != 36:
-            return False
-        return value.count("-") == 4
-
-    def _cleanup_old_data(self, key: str) -> None:
-        """Remove data points outside the time window."""
-        cutoff = time.time() - self._window_size
-
-        valid_indices = [
-            i for i, ts in enumerate(self._timestamps[key])
-            if ts >= cutoff
-        ]
-
-        if len(valid_indices) < len(self._timestamps[key]):
-            self._timestamps[key] = [self._timestamps[key][i] for i in valid_indices]
-            self._latencies[key] = [self._latencies[key][i] for i in valid_indices]
-
-    def get_summary(self, endpoint: Optional[str] = None) -> ApiMetricsSummary:
-        """
-        Get metrics summary.
-
-        Args:
-            endpoint: Optional specific endpoint, None for all
-
-        Returns:
-            ApiMetricsSummary with aggregated metrics
-        """
-        with self._lock:
-            if endpoint:
-                keys = [self._normalize_endpoint(endpoint)]
-            else:
-                keys = list(self._total_requests.keys())
-
-            total_requests = sum(self._total_requests[k] for k in keys)
-            total_errors = sum(self._errors[k] for k in keys)
-            all_latencies = [l for k in keys for l in self._latencies[k]]
-
-            summary = ApiMetricsSummary()
-            summary.total_requests = total_requests
-            summary.failed_requests = total_errors
-            summary.successful_requests = total_requests - total_errors
-            summary.error_rate = total_errors / total_requests if total_requests > 0 else 0.0
-
-            if all_latencies:
-                summary.avg_latency_ms = sum(all_latencies) / len(all_latencies)
-                summary.min_latency_ms = min(all_latencies)
-                summary.max_latency_ms = max(all_latencies)
-
-                percentiles = PercentileCalculator.calculate(all_latencies, [50, 75, 90, 95, 99, 99.9])
-                summary.percentiles = LatencyPercentiles(
-                    p50=percentiles[50],
-                    p75=percentiles[75],
-                    p90=percentiles[90],
-                    p95=percentiles[95],
-                    p99=percentiles[99],
-                    p999=percentiles[99.9]
-                )
-
-            window_duration = min(
-                self._window_size,
-                time.time() - self._start_time
-            )
-            if window_duration > 0:
-                summary.throughput_rps = total_requests / window_duration
-
-            for k in keys:
-                for code, count in self._status_codes[k].items():
-                    summary.status_code_counts[code] = summary.status_code_counts.get(code, 0) + count
-                for method, count in self._methods[k].items():
-                    summary.method_counts[method] = summary.method_counts.get(method, 0) + count
-
-            return summary
-
-    def get_endpoint_metrics(self) -> dict[str, ApiMetricsSummary]:
-        """Get metrics for each endpoint."""
-        with self._lock:
-            endpoints = list(self._total_requests.keys())
-            return {ep: self.get_summary(ep) for ep in endpoints}
-
-    def get_status_code_distribution(self) -> dict[int, int]:
-        """Get distribution of status codes across all endpoints."""
-        distribution: dict[int, int] = defaultdict(int)
-        with self._lock:
-            for endpoint_codes in self._status_codes.values():
-                for code, count in endpoint_codes.items():
-                    distribution[code] += count
-        return dict(distribution)
-
-    def get_method_distribution(self) -> dict[str, int]:
-        """Get distribution of HTTP methods."""
-        distribution: dict[str, int] = defaultdict(int)
-        with self._lock:
-            for endpoint_methods in self._methods.values():
-                for method, count in endpoint_methods.items():
-                    distribution[method] += count
-        return dict(distribution)
-
-    def get_latency_histogram(
+    def get_histogram_stats(
         self,
-        endpoint: Optional[str] = None,
-        buckets: Optional[list[float]] = None
-    ) -> dict[float, int]:
-        """
-        Get latency histogram buckets.
+        name: str,
+        labels: Optional[dict] = None
+    ) -> Optional[dict]:
+        """Get histogram statistics."""
+        key = self._make_key(name, labels)
+        values = self._histograms.get(key)
 
-        Args:
-            endpoint: Optional endpoint filter
-            buckets: Bucket boundaries in ms
+        if not values:
+            return None
+
+        sorted_values = sorted(values)
+        count = len(sorted_values)
+
+        return {
+            "count": count,
+            "sum": sum(sorted_values),
+            "min": sorted_values[0],
+            "max": sorted_values[-1],
+            "mean": sum(sorted_values) / count,
+            "p50": sorted_values[int(count * 0.50)],
+            "p90": sorted_values[int(count * 0.90)] if count > 1 else sorted_values[0],
+            "p95": sorted_values[int(count * 0.95)] if count > 1 else sorted_values[0],
+            "p99": sorted_values[int(count * 0.99)] if count > 1 else sorted_values[0],
+        }
+
+    def get_summary(self) -> APIMetrics:
+        """Get API metrics summary."""
+        request_labels = self._get_matching_keys("http_requests_total", MetricType.COUNTER)
+
+        total = sum(self._counters.get(k, 0.0) for k in request_labels)
+        success = sum(self._counters.get(k, 0.0) for k in self._get_matching_keys("http_requests_success", MetricType.COUNTER))
+        errors = sum(self._counters.get(k, 0.0) for k in self._get_matching_keys("http_requests_errors", MetricType.COUNTER))
+
+        all_durations = []
+        for k, vals in self._histograms.items():
+            if "http_request_duration" in k:
+                all_durations.extend(vals)
+
+        if all_durations:
+            sorted_durations = sorted(all_durations)
+            count = len(sorted_durations)
+            avg = sum(sorted_durations) / count
+            p95 = sorted_durations[int(count * 0.95)] if count > 1 else sorted_durations[0]
+            p99 = sorted_durations[int(count * 0.99)] if count > 1 else sorted_durations[0]
+        else:
+            avg = p95 = p99 = 0.0
+
+        return APIMetrics(
+            total_requests=int(total),
+            success_count=int(success),
+            error_count=int(errors),
+            avg_latency_ms=avg,
+            p95_latency_ms=p95,
+            p99_latency_ms=p99
+        )
+
+    def _get_matching_keys(self, prefix: str, metric_type: MetricType) -> list[str]:
+        """Get keys matching prefix and metric type."""
+        return [k for k, t in self._metrics_index.items() if k.startswith(prefix) and t == metric_type]
+
+    def _make_key(self, name: str, labels: Optional[dict]) -> str:
+        """Create metric key from name and labels."""
+        if not labels:
+            return name
+        label_str = ",".join(f"{k}={v}" for k, v in sorted(labels.items()))
+        return f"{name}{{{label_str}}}"
+
+    def export_prometheus(self) -> str:
+        """
+        Export metrics in Prometheus format.
 
         Returns:
-            Dict mapping bucket boundary to count
+            Prometheus-formatted metrics string.
         """
-        if buckets is None:
-            buckets = [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000]
+        lines = [f"# HELP {self.service_name}_metrics API metrics"]
+        lines.append(f"# TYPE {self.service_name}_metrics counter")
 
-        with self._lock:
-            if endpoint:
-                latencies = self._latencies.get(self._normalize_endpoint(endpoint), [])
-            else:
-                latencies = [l for ep_latencies in self._latencies.values() for l in ep_latencies]
+        for key, value in self._counters.items():
+            name = key.split("{")[0]
+            lines.append(f'{self.service_name}_{name} {value}')
 
-        histogram: dict[float, int] = {b: 0 for b in buckets}
-        histogram[float('inf')] = 0
-
-        for latency in latencies:
-            for bucket in buckets:
-                if latency <= bucket:
-                    histogram[bucket] += 1
-                    break
-            else:
-                histogram[float('inf')] += 1
-
-        return histogram
-
-    def reset(self) -> None:
-        """Reset all collected metrics."""
-        with self._lock:
-            self._request_times.clear()
-            self._latencies.clear()
-            self._status_codes.clear()
-            self._methods.clear()
-            self._errors.clear()
-            self._total_requests.clear()
-            self._timestamps.clear()
-            self._start_time = time.time()
-
-
-class ApiMetricsExporter:
-    """
-    Export API metrics in various formats.
-
-    Supports Prometheus, JSON, and custom formats.
-    """
-
-    def __init__(self, collector: ApiMetricsCollector):
-        self._collector = collector
-
-    def to_prometheus_format(self) -> str:
-        """Export metrics in Prometheus text format."""
-        summary = self._collector.get_summary()
-        endpoint_metrics = self._collector.get_endpoint_metrics()
-
-        lines = [
-            "# HELP api_requests_total Total number of API requests",
-            "# TYPE api_requests_total counter",
-            f"api_requests_total {summary.total_requests}",
-            "",
-            "# HELP api_request_duration_seconds API request latency in seconds",
-            "# TYPE api_request_duration_seconds histogram",
-        ]
-
-        histogram = self._collector.get_latency_histogram()
-        for bucket_ms, count in histogram.items():
-            bucket_sec = bucket_ms / 1000
-            if bucket_sec != float('inf'):
-                lines.append(f'api_request_duration_seconds_bucket{{le="{bucket_sec}"}} {count}')
-            else:
-                lines.append(f'api_request_duration_seconds_bucket{{le="+Inf"}} {count}')
-
-        lines.extend([
-            f"api_request_duration_seconds_sum {summary.avg_latency_ms / 1000}",
-            f"api_request_duration_seconds_count {summary.total_requests}",
-            "",
-            "# HELP api_errors_total Total number of API errors",
-            "# TYPE api_errors_total counter",
-            f"api_errors_total {summary.failed_requests}",
-        ])
+        for key, value in self._gauges.items():
+            name = key.split("{")[0]
+            lines.append(f'{self.service_name}_{name} {value}')
 
         return "\n".join(lines)
 
-    def to_json(self) -> dict:
-        """Export metrics as JSON-serializable dict."""
-        summary = self._collector.get_summary()
-        return {
-            "summary": {
-                "total_requests": summary.total_requests,
-                "successful_requests": summary.successful_requests,
-                "failed_requests": summary.failed_requests,
-                "error_rate": summary.error_rate,
-                "avg_latency_ms": summary.avg_latency_ms,
-                "min_latency_ms": summary.min_latency_ms,
-                "max_latency_ms": summary.max_latency_ms,
-                "throughput_rps": summary.throughput_rps,
-                "percentiles": {
-                    "p50": summary.percentiles.p50,
-                    "p75": summary.percentiles.p75,
-                    "p90": summary.percentiles.p90,
-                    "p95": summary.percentiles.p95,
-                    "p99": summary.percentiles.p99,
-                    "p999": summary.percentiles.p999,
-                },
-                "status_codes": summary.status_code_counts,
-                "methods": summary.method_counts,
-            },
-            "endpoints": {
-                ep: {
-                    "total_requests": m.total_requests,
-                    "error_rate": m.error_rate,
-                    "avg_latency_ms": m.avg_latency_ms,
-                }
-                for ep, m in self._collector.get_endpoint_metrics().items()
-            },
-            "timestamp": datetime.now().isoformat(),
-        }
+    def reset(self) -> None:
+        """Reset all metrics."""
+        self._counters.clear()
+        self._gauges.clear()
+        self._histograms.clear()
+        self._metrics_index.clear()
+        self._labels_index.clear()
 
-    def to_prometheus_remote_write(
-        self,
-        remote_url: str,
-        headers: Optional[dict[str, str]] = None
-    ) -> bool:
-        """Export metrics to Prometheus remote write endpoint."""
-        import requests
+    def get_all_metrics(self) -> list[MetricValue]:
+        """Get all metric values."""
+        metrics = []
 
-        payload = {
-            "timeseries": []
-        }
+        for key, value in self._counters.items():
+            name = key.split("{")[0]
+            metrics.append(MetricValue(
+                name=name,
+                metric_type=MetricType.COUNTER,
+                value=value,
+                labels=self._labels_index.get(key, {}),
+                timestamp=time.time()
+            ))
 
-        summary = self._collector.get_summary()
+        for key, value in self._gauges.items():
+            name = key.split("{")[0]
+            metrics.append(MetricValue(
+                name=name,
+                metric_type=MetricType.GAUGE,
+                value=value,
+                labels=self._labels_index.get(key, {}),
+                timestamp=time.time()
+            ))
 
-        for code, count in summary.status_code_counts.items():
-            payload["timeseries"].append({
-                "labels": [
-                    {"name": "__name__", "value": "api_requests_total"},
-                    {"name": "status_code", "value": str(code)},
-                ],
-                "samples": [{"value": count, "timestamp": int(time.time() * 1000)}]
-            })
+        for key, values in self._histograms.items():
+            name = key.split("{")[0]
+            if values:
+                metrics.append(MetricValue(
+                    name=name,
+                    metric_type=MetricType.HISTOGRAM,
+                    value=values[-1],
+                    labels=self._labels_index.get(key, {}),
+                    timestamp=time.time()
+                ))
 
-        try:
-            response = requests.post(
-                remote_url,
-                json=payload,
-                headers=headers or {"Content-Type": "application/json"},
-                timeout=10
-            )
-            return response.status_code == 200
-        except Exception:
-            return False
-
-
-def create_metrics_collector(window_size_seconds: int = 60) -> ApiMetricsCollector:
-    """Factory function to create an ApiMetricsCollector."""
-    return ApiMetricsCollector(window_size_seconds=window_size_seconds)
+        return metrics
