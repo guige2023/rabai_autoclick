@@ -1,243 +1,386 @@
-"""Data Join Action Module.
+"""Data join action for combining datasets.
 
-Provides data joining operations with support for multiple join types,
-key extraction, conflict resolution, and null handling.
+Performs SQL-style joins between datasets with support
+for inner, outer, left, and right join operations.
 """
 
-from __future__ import annotations
-
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 
 class JoinType(Enum):
+    """Types of join operations."""
     INNER = "inner"
     LEFT = "left"
     RIGHT = "right"
-    OUTER = "outer"
+    FULL = "full"
     CROSS = "cross"
-    ANTI = "anti"
-    SEMI = "semi"
 
 
 @dataclass
 class JoinConfig:
+    """Configuration for join operations."""
     join_type: JoinType = JoinType.INNER
     left_key: str = "id"
     right_key: str = "id"
-    key_extractor: Optional[Callable[[Dict[str, Any]], Any]] = None
-    null_handling: str = "skip"
-    conflict_resolver: Optional[Callable[[Any, Any], Any]] = None
-    suffix_left: str = "_x"
-    suffix_right: str = "_y"
+    left_prefix: Optional[str] = None
+    right_prefix: Optional[str] = None
+    null_value: Any = None
 
 
 @dataclass
-class JoinStats:
-    total_left: int
-    total_right: int
-    matched: int
-    unmatched_left: int
-    unmatched_right: int
-    duration_ms: float
+class JoinResult:
+    """Result of a join operation."""
+    data: list[dict]
+    left_count: int
+    right_count: int
+    joined_count: int
+    processing_time_ms: float
 
 
-class DataJoiner:
-    def __init__(self, config: Optional[JoinConfig] = None):
-        self.config = config or JoinConfig()
-        self._stats: Optional[JoinStats] = None
+class DataJoinAction:
+    """Join multiple datasets together.
+
+    Example:
+        >>> joiner = DataJoinAction()
+        >>> result = joiner.join(left_data, right_data, left_key="id", right_key="user_id")
+    """
+
+    def __init__(self) -> None:
+        self._default_config = JoinConfig()
 
     def join(
         self,
-        left: List[Dict[str, Any]],
-        right: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
+        left_data: list[dict],
+        right_data: list[dict],
+        left_key: str = "id",
+        right_key: str = "id",
+        join_type: JoinType = JoinType.INNER,
+        left_prefix: Optional[str] = None,
+        right_prefix: Optional[str] = None,
+    ) -> JoinResult:
+        """Join two datasets.
+
+        Args:
+            left_data: Left dataset.
+            right_data: Right dataset.
+            left_key: Key field in left dataset.
+            right_key: Key field in right dataset.
+            join_type: Type of join.
+            left_prefix: Prefix for left dataset fields.
+            right_prefix: Prefix for right dataset fields.
+
+        Returns:
+            Join result with merged data.
+        """
         import time
-        start = time.time()
+        start_time = time.time()
 
-        if self.config.key_extractor:
-            left_indexed = {self.config.key_extractor(r): r for r in left}
-            right_indexed = {self.config.key_extractor(r): r for r in right}
+        if not left_data or not right_data:
+            if join_type == JoinType.LEFT:
+                result = left_data.copy()
+            elif join_type == JoinType.RIGHT:
+                result = right_data.copy()
+            else:
+                result = []
         else:
-            left_indexed = {r.get(self.config.left_key): r for r in left}
-            right_indexed = {r.get(self.config.right_key): r for r in right}
+            if join_type == JoinType.INNER:
+                result = self._inner_join(
+                    left_data, right_data, left_key, right_key,
+                    left_prefix, right_prefix
+                )
+            elif join_type == JoinType.LEFT:
+                result = self._left_join(
+                    left_data, right_data, left_key, right_key,
+                    left_prefix, right_prefix
+                )
+            elif join_type == JoinType.RIGHT:
+                result = self._right_join(
+                    left_data, right_data, left_key, right_key,
+                    left_prefix, right_prefix
+                )
+            elif join_type == JoinType.FULL:
+                result = self._full_join(
+                    left_data, right_data, left_key, right_key,
+                    left_prefix, right_prefix
+                )
+            elif join_type == JoinType.CROSS:
+                result = self._cross_join(
+                    left_data, right_data, left_prefix, right_prefix
+                )
+            else:
+                result = []
 
-        results = []
-        matched_left: Set[Any] = set()
-        matched_right: Set[Any] = set()
-
-        if self.config.join_type == JoinType.CROSS:
-            for l in left:
-                for r in right:
-                    merged = dict(l)
-                    merged.update(r)
-                    results.append(merged)
-        elif self.config.join_type == JoinType.INNER:
-            for key, l_record in left_indexed.items():
-                if key is None and self.config.null_handling == "skip":
-                    continue
-                r_record = right_indexed.get(key)
-                if r_record is not None:
-                    matched_left.add(key)
-                    matched_right.add(key)
-                    results.append(self._merge_records(l_record, r_record))
-        elif self.config.join_type == JoinType.LEFT:
-            for key, l_record in left_indexed.items():
-                if key is None and self.config.null_handling == "skip":
-                    continue
-                r_record = right_indexed.get(key)
-                matched_left.add(key)
-                if r_record is not None:
-                    matched_right.add(key)
-                    results.append(self._merge_records(l_record, r_record))
-                else:
-                    results.append(self._add_suffix(l_record, self.config.suffix_right, right))
-        elif self.config.join_type == JoinType.RIGHT:
-            for key, r_record in right_indexed.items():
-                if key is None and self.config.null_handling == "skip":
-                    continue
-                l_record = left_indexed.get(key)
-                matched_right.add(key)
-                if l_record is not None:
-                    matched_left.add(key)
-                    results.append(self._merge_records(l_record, r_record))
-                else:
-                    results.append(self._add_suffix(r_record, self.config.suffix_left, left))
-        elif self.config.join_type == JoinType.OUTER:
-            all_keys = set(left_indexed.keys()) | set(right_indexed.keys())
-            for key in all_keys:
-                if key is None and self.config.null_handling == "skip":
-                    continue
-                l_record = left_indexed.get(key)
-                r_record = right_indexed.get(key)
-                if l_record is not None:
-                    matched_left.add(key)
-                if r_record is not None:
-                    matched_right.add(key)
-                if l_record and r_record:
-                    results.append(self._merge_records(l_record, r_record))
-                elif l_record:
-                    results.append(self._add_suffix(l_record, self.config.suffix_right, right))
-                elif r_record:
-                    results.append(self._add_suffix(r_record, self.config.suffix_left, left))
-        elif self.config.join_type == JoinType.ANTI:
-            for key, l_record in left_indexed.items():
-                if key not in right_indexed:
-                    results.append(l_record)
-        elif self.config.join_type == JoinType.SEMI:
-            for key, l_record in left_indexed.items():
-                if key in right_indexed:
-                    results.append(l_record)
-
-        duration_ms = (time.time() - start) * 1000
-        self._stats = JoinStats(
-            total_left=len(left),
-            total_right=len(right),
-            matched=len(matched_left),
-            unmatched_left=len(left) - len(matched_left),
-            unmatched_right=len(right) - len(matched_right),
-            duration_ms=duration_ms,
+        return JoinResult(
+            data=result,
+            left_count=len(left_data),
+            right_count=len(right_data),
+            joined_count=len(result),
+            processing_time_ms=(time.time() - start_time) * 1000,
         )
 
-        return results
-
-    def _merge_records(
+    def _inner_join(
         self,
-        left: Dict[str, Any],
-        right: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        merged = {}
-        all_keys = set(left.keys()) | set(right.keys())
+        left_data: list[dict],
+        right_data: list[dict],
+        left_key: str,
+        right_key: str,
+        left_prefix: Optional[str],
+        right_prefix: Optional[str],
+    ) -> list[dict]:
+        """Perform inner join.
 
-        for key in all_keys:
-            l_val = left.get(key)
-            r_val = right.get(key)
+        Args:
+            left_data: Left dataset.
+            right_data: Right dataset.
+            left_key: Left key field.
+            right_key: Right key field.
+            left_prefix: Left prefix.
+            right_prefix: Right prefix.
 
-            if key in left and key in right:
-                if l_val == r_val:
-                    merged[key] = l_val
-                elif self.config.conflict_resolver:
-                    merged[key] = self.config.conflict_resolver(l_val, r_val)
-                else:
-                    merged[f"{key}{self.config.suffix_left}"] = l_val
-                    merged[f"{key}{self.config.suffix_right}"] = r_val
-            elif key in left:
-                merged[key] = l_val
-            else:
-                merged[key] = r_val
+        Returns:
+            Joined records.
+        """
+        right_index = {row[right_key]: row for row in right_data}
+        result = []
 
-        return merged
-
-    def _add_suffix(
-        self,
-        record: Dict[str, Any],
-        suffix: str,
-        other: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        result = {}
-        other_keys = set()
-        if other:
-            other_keys = set(other[0].keys()) if other else set()
-
-        for key, val in record.items():
-            if key in other_keys:
-                result[f"{key}{suffix}"] = val
-            else:
-                result[key] = val
+        for left_row in left_data:
+            key = left_row.get(left_key)
+            if key in right_index:
+                merged = self._merge_rows(
+                    left_row, right_index[key],
+                    left_prefix, right_prefix, left_key, right_key
+                )
+                result.append(merged)
 
         return result
 
-    def get_stats(self) -> Optional[JoinStats]:
-        return self._stats
+    def _left_join(
+        self,
+        left_data: list[dict],
+        right_data: list[dict],
+        left_key: str,
+        right_key: str,
+        left_prefix: Optional[str],
+        right_prefix: Optional[str],
+    ) -> list[dict]:
+        """Perform left join.
 
+        Args:
+            left_data: Left dataset.
+            right_data: Right dataset.
+            left_key: Left key field.
+            right_key: Right key field.
+            left_prefix: Left prefix.
+            right_prefix: Right prefix.
 
-def join_lists(
-    left: List[Dict[str, Any]],
-    right: List[Dict[str, Any]],
-    join_type: JoinType = JoinType.INNER,
-    key: str = "id",
-) -> List[Dict[str, Any]]:
-    config = JoinConfig(join_type=join_type, left_key=key, right_key=key)
-    joiner = DataJoiner(config)
-    return joiner.join(left, right)
+        Returns:
+            Joined records.
+        """
+        right_index = {row[right_key]: row for row in right_data}
+        result = []
 
+        for left_row in left_data:
+            key = left_row.get(left_key)
+            right_row = right_index.get(key, {})
+            merged = self._merge_rows(
+                left_row, right_row,
+                left_prefix, right_prefix, left_key, right_key
+            )
+            result.append(merged)
 
-def union_data(
-    datasets: List[List[Dict[str, Any]]],
-    dedup: bool = True,
-) -> List[Dict[str, Any]]:
-    result = []
-    seen = set() if dedup else None
+        return result
 
-    for dataset in datasets:
-        for record in dataset:
-            record_tuple = tuple(sorted(record.items()))
-            if dedup:
-                if record_tuple in seen:
-                    continue
-                seen.add(record_tuple)
-            result.append(record)
+    def _right_join(
+        self,
+        left_data: list[dict],
+        right_data: list[dict],
+        left_key: str,
+        right_key: str,
+        left_prefix: Optional[str],
+        right_prefix: Optional[str],
+    ) -> list[dict]:
+        """Perform right join.
 
-    return result
+        Args:
+            left_data: Left dataset.
+            right_data: Right dataset.
+            left_key: Left key field.
+            right_key: Right key field.
+            left_prefix: Left prefix.
+            right_prefix: Right prefix.
 
+        Returns:
+            Joined records.
+        """
+        left_index = {row.get(left_key): row for row in left_data}
+        result = []
 
-def intersect_data(
-    datasets: List[List[Dict[str, Any]]],
-) -> List[Dict[str, Any]]:
-    if not datasets:
-        return []
+        for right_row in right_data:
+            key = right_row.get(right_key)
+            left_row = left_index.get(key, {})
+            merged = self._merge_rows(
+                left_row, right_row,
+                left_prefix, right_prefix, left_key, right_key
+            )
+            result.append(merged)
 
-    result = None
-    for dataset in datasets:
-        record_set = set(tuple(sorted(r.items())) for r in dataset)
-        if result is None:
-            result = record_set
-        else:
-            result &= record_set
+        return result
 
-    return [dict(r) for r in (result or set())]
+    def _full_join(
+        self,
+        left_data: list[dict],
+        right_data: list[dict],
+        left_key: str,
+        right_key: str,
+        left_prefix: Optional[str],
+        right_prefix: Optional[str],
+    ) -> list[dict]:
+        """Perform full outer join.
+
+        Args:
+            left_data: Left dataset.
+            right_data: Right dataset.
+            left_key: Left key field.
+            right_key: Right key field.
+            left_prefix: Left prefix.
+            right_prefix: Right prefix.
+
+        Returns:
+            Joined records.
+        """
+        right_index = {row[right_key]: row for row in right_data}
+        left_matched: set = set()
+        result = []
+
+        for left_row in left_data:
+            key = left_row.get(left_key)
+            right_row = right_index.get(key, {})
+            merged = self._merge_rows(
+                left_row, right_row,
+                left_prefix, right_prefix, left_key, right_key
+            )
+            result.append(merged)
+            if key in right_index:
+                left_matched.add(key)
+
+        for right_row in right_data:
+            key = right_row.get(right_key)
+            if key not in left_matched:
+                merged = self._merge_rows(
+                    {}, right_row,
+                    left_prefix, right_prefix, left_key, right_key
+                )
+                result.append(merged)
+
+        return result
+
+    def _cross_join(
+        self,
+        left_data: list[dict],
+        right_data: list[dict],
+        left_prefix: Optional[str],
+        right_prefix: Optional[str],
+    ) -> list[dict]:
+        """Perform cross join.
+
+        Args:
+            left_data: Left dataset.
+            right_data: Right dataset.
+            left_prefix: Left prefix.
+            right_prefix: Right prefix.
+
+        Returns:
+            Joined records.
+        """
+        result = []
+        for left_row in left_data:
+            for right_row in right_data:
+                merged = self._merge_rows(
+                    left_row, right_row,
+                    left_prefix, right_prefix, None, None
+                )
+                result.append(merged)
+        return result
+
+    def _merge_rows(
+        self,
+        left_row: dict,
+        right_row: dict,
+        left_prefix: Optional[str],
+        right_prefix: Optional[str],
+        left_key: Optional[str],
+        right_key: Optional[str],
+    ) -> dict:
+        """Merge two rows with optional prefixes.
+
+        Args:
+            left_row: Left row.
+            right_row: Right row.
+            left_prefix: Prefix for left fields.
+            right_prefix: Prefix for right fields.
+            left_key: Left key field to exclude from prefix.
+            right_key: Right key field to exclude from prefix.
+
+        Returns:
+            Merged row.
+        """
+        result = {}
+
+        for key, value in left_row.items():
+            if left_key and key == left_key:
+                result[key] = value
+            elif left_prefix:
+                result[f"{left_prefix}_{key}"] = value
+            else:
+                result[key] = value
+
+        for key, value in right_row.items():
+            if right_key and key == right_key:
+                if key not in result:
+                    result[key] = value
+            elif right_prefix:
+                result[f"{right_prefix}_{key}"] = value
+            elif key not in result:
+                result[key] = value
+
+        return result
+
+    def multi_join(
+        self,
+        datasets: list[list[dict]],
+        keys: list[str],
+        join_type: JoinType = JoinType.INNER,
+    ) -> list[dict]:
+        """Join multiple datasets sequentially.
+
+        Args:
+            datasets: List of datasets to join.
+            keys: List of key pairs for each join.
+            join_type: Type of join to use.
+
+        Returns:
+            Final joined dataset.
+        """
+        if not datasets:
+            return []
+
+        if len(datasets) == 1:
+            return datasets[0]
+
+        result = datasets[0]
+
+        for i in range(1, len(datasets)):
+            left_key = keys[i - 1][0]
+            right_key = keys[i - 1][1]
+            join_result = self.join(
+                result, datasets[i],
+                left_key, right_key, join_type
+            )
+            result = join_result.data
+
+        return result
