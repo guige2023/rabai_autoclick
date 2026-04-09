@@ -105,23 +105,33 @@ class ContextManager:
             return [self.resolve_value(item) for item in value]
         return value
     
-    def _resolve_string(self, text: str) -> str:
+    def _resolve_string(self, text: str) -> Any:
         """Resolve {{variable}} references in a string.
         
         Args:
             text: String with optional {{variable}} references.
             
         Returns:
-            String with variables resolved.
+            If text is a pure expression {{...}}, returns the expression result
+            preserving its type (int, list, dict, bool). Otherwise returns a
+            string with all variables resolved.
         """
-        pattern = r'\{\{([^}]+)\}\}'
+        # Check if the entire text is a single {{...}} expression
+        single_expr_pattern = r'^\s*\{\{([^}]+)\}\}\s*$'
+        match = re.match(single_expr_pattern, text)
         
+        if match:
+            # Pure expression: return result with original type preserved
+            expr = match.group(1).strip()
+            return self._evaluate_expression(expr)
+        
+        # Mixed text with variables: resolve and return string
         def replace_var(match) -> str:
             expr = match.group(1).strip()
             result = self._evaluate_expression(expr)
             return str(result) if not isinstance(result, str) else result
         
-        return re.sub(pattern, replace_var, text)
+        return re.sub(r'\{\{([^}]+)\}\}', replace_var, text)
     
     def _evaluate_expression(self, expr: str) -> Any:
         """Evaluate a simple expression using context variables.

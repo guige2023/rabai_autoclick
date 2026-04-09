@@ -4,13 +4,19 @@ Dynamically loads action classes from Python files in the actions directory.
 """
 
 import os
+import sys
+import ast
+import re
+import time
+import random
 import importlib.util
+import importlib
 import inspect
 import logging
 from pathlib import Path
 from typing import Any, Dict, Optional, Type
 
-from .base_action import BaseAction
+from .base_action import BaseAction, ActionResult
 
 
 logger = logging.getLogger(__name__)
@@ -68,28 +74,109 @@ class ActionLoader:
             The first loaded action class, or None if none found.
         """
         try:
-            spec = importlib.util.spec_from_file_location(
-                f"actions.{file_path.stem}", 
-                str(file_path)
+            # Check if we're loading from the default actions directory
+            # (within the rabai_autoclick package)
+            default_actions_dir = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)), 
+                "actions"
             )
-            if spec is None or spec.loader is None:
-                return None
+            is_default_actions = self._actions_dir == default_actions_dir
+            
+            if is_default_actions:
+                # For default actions directory, we need to handle the fact that
+                # 'actions' is a package within 'rabai_autoclick' but we may be 
+                # running from the source directory without the package being installed.
+                # 
+                # Strategy: Pre-process the code to remove relative import statements
+                # since we will provide the imported names directly in the exec namespace.
+                import sys
                 
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            
-            first_action: Optional[Type[BaseAction]] = None
-            
-            for name, obj in inspect.getmembers(module, inspect.isclass):
-                if (issubclass(obj, BaseAction) and 
-                    obj is not BaseAction and 
-                    hasattr(obj, 'action_type')):
-                    self._actions[obj.action_type] = obj
-                    if first_action is None:
-                        first_action = obj
-                    logger.debug(f"Loaded action: {obj.action_type} from {file_path.name}")
-            
-            return first_action
+                project_root = os.path.dirname(os.path.dirname(__file__))
+                if project_root not in sys.path:
+                    sys.path.insert(0, project_root)
+                
+                # Import base classes needed
+                from core.base_action import BaseAction, ActionResult
+                
+                # Read the action file
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    source = f.read()
+                
+                # Parse and transform the AST to replace relative imports
+                tree = ast.parse(source)
+                
+                # Transformer to replace relative imports with pass statements
+                class RelativeImportReplacer(ast.NodeTransformer):
+                    def visit_ImportFrom(self, node):
+                        if node.module and node.module.startswith('..'):
+                            # Replace relative import with assignment of None for each alias
+                            # This allows the code to execute without the actual import
+                            return ast.Pass()
+                        return node
+                
+                transformer = RelativeImportReplacer()
+                new_tree = transformer.visit(tree)
+                ast.fix_missing_locations(new_tree)
+                
+                # Compile the modified AST
+                code = compile(new_tree, str(file_path), 'exec')
+                
+                # Create a module-like namespace with all needed imports
+                module_globals = {
+                    '__name__': f'actions.{file_path.stem}',
+                    '__file__': str(file_path),
+                    '__package__': 'actions',
+                    '__builtins__': __builtins__,
+                    'BaseAction': BaseAction,
+                    'ActionResult': ActionResult,
+                    'ast': ast,
+                    're': re,
+                    'time': time,
+                    'random': random,
+                    'sys': sys,
+                    'os': os,
+                }
+                # Add typing module
+                import typing
+                module_globals['typing'] = typing
+                
+                exec(code, module_globals)
+                
+                # Get all classes from the module_globals that inherit from BaseAction
+                first_action: Optional[Type[BaseAction]] = None
+                for name, obj in module_globals.items():
+                    if (isinstance(obj, type) and 
+                        issubclass(obj, BaseAction) and 
+                        obj is not BaseAction and 
+                        hasattr(obj, 'action_type')):
+                        self._actions[obj.action_type] = obj
+                        if first_action is None:
+                            first_action = obj
+                        logger.debug(f"Loaded action: {obj.action_type} from {file_path.name}")
+                
+                return first_action
+            else:
+                # For custom action directories, use spec_from_file_location
+                spec = importlib.util.spec_from_file_location(
+                    f"{file_path.stem}", 
+                    str(file_path)
+                )
+                if spec is None or spec.loader is None:
+                    return None
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                
+                first_action: Optional[Type[BaseAction]] = None
+                for name, obj in inspect.getmembers(module, inspect.isclass):
+                    if (issubclass(obj, BaseAction) and 
+                        obj is not BaseAction and 
+                        hasattr(obj, 'action_type')):
+                        self._actions[obj.action_type] = obj
+                        if first_action is None:
+                            first_action = obj
+                        logger.debug(f"Loaded action: {obj.action_type} from {file_path.name}")
+                
+                return first_action
         except Exception as e:
             logger.error(f"加载动作文件失败 {file_path}: {e}")
             return None
