@@ -514,5 +514,136 @@ class TestLoopWhileActions(unittest.TestCase):
         self.assertIn("loop_while_continue", loader._actions)
 
 
+class TestNotifyActions(unittest.TestCase):
+    """Tests for notify actions."""
+
+    def test_notify_class(self):
+        loader = make_loader()
+        self.assertIn("notify", loader._actions)
+        action = loader.get_action("notify")()
+        self.assertTrue(hasattr(action, 'execute'))
+
+    def test_email_notify_class(self):
+        loader = make_loader()
+        self.assertIn("email_notify", loader._actions)
+        action = loader.get_action("email_notify")()
+        self.assertTrue(hasattr(action, 'execute'))
+
+    def test_webhook_notify_class(self):
+        loader = make_loader()
+        self.assertIn("webhook_notify", loader._actions)
+        action = loader.get_action("webhook_notify")()
+        self.assertTrue(hasattr(action, 'execute'))
+
+    def test_slack_notify_class(self):
+        loader = make_loader()
+        self.assertIn("slack_notify", loader._actions)
+        action = loader.get_action("slack_notify")()
+        self.assertTrue(hasattr(action, 'execute'))
+
+
+class TestFilesystemActions(unittest.TestCase):
+    """Tests for filesystem actions."""
+
+    def test_file_read_class(self):
+        loader = make_loader()
+        self.assertIn("file_read", loader._actions)
+        action = loader.get_action("file_read")()
+        self.assertTrue(hasattr(action, 'execute'))
+
+    def test_file_write_class(self):
+        loader = make_loader()
+        self.assertIn("file_write", loader._actions)
+        action = loader.get_action("file_write")()
+        self.assertTrue(hasattr(action, 'execute'))
+
+    def test_file_exists_class(self):
+        loader = make_loader()
+        self.assertIn("file_exists", loader._actions)
+        action = loader.get_action("file_exists")()
+        self.assertTrue(hasattr(action, 'execute'))
+
+    def test_file_delete_class(self):
+        loader = make_loader()
+        self.assertIn("file_delete", loader._actions)
+        action = loader.get_action("file_delete")()
+        self.assertTrue(hasattr(action, 'execute'))
+
+    def test_file_copy_class(self):
+        loader = make_loader()
+        self.assertIn("file_copy", loader._actions)
+        action = loader.get_action("file_copy")()
+        self.assertTrue(hasattr(action, 'execute'))
+
+    def test_dir_create_class(self):
+        loader = make_loader()
+        self.assertIn("dir_create", loader._actions)
+        action = loader.get_action("dir_create")()
+        self.assertTrue(hasattr(action, 'execute'))
+
+    def test_file_list_class(self):
+        loader = make_loader()
+        self.assertIn("file_list", loader._actions)
+        action = loader.get_action("file_list")()
+        self.assertTrue(hasattr(action, 'execute'))
+
+    def test_file_move_class(self):
+        loader = make_loader()
+        self.assertIn("file_move", loader._actions)
+        action = loader.get_action("file_move")()
+        self.assertTrue(hasattr(action, 'execute'))
+
+
+class TestNetworkActions(unittest.TestCase):
+    """Tests for network actions."""
+
+    def test_http_get_class(self):
+        loader = make_loader()
+        self.assertIn("http_get", loader._actions)
+        action = loader.get_action("http_get")()
+        self.assertTrue(hasattr(action, 'execute'))
+
+    def test_http_post_class(self):
+        loader = make_loader()
+        self.assertIn("http_post", loader._actions)
+        action = loader.get_action("http_post")()
+        self.assertTrue(hasattr(action, 'execute'))
+
+    def test_download_file_class(self):
+        loader = make_loader()
+        self.assertIn("download_file", loader._actions)
+        action = loader.get_action("download_file")()
+        self.assertTrue(hasattr(action, 'execute'))
+
+
+class TestNewActionLoader(unittest.TestCase):
+    """Tests for ActionLoader with new actions."""
+
+    def test_load_all_includes_new_actions(self):
+        loader = make_loader()
+        actions = loader.load_all()
+        
+        # Notify actions
+        self.assertIn("notify", actions)
+        self.assertIn("email_notify", actions)
+        self.assertIn("webhook_notify", actions)
+        self.assertIn("slack_notify", actions)
+        
+        # Filesystem actions
+        self.assertIn("file_read", actions)
+        self.assertIn("file_write", actions)
+        self.assertIn("file_exists", actions)
+        self.assertIn("file_delete", actions)
+        self.assertIn("file_copy", actions)
+        self.assertIn("dir_create", actions)
+        self.assertIn("file_list", actions)
+        self.assertIn("file_move", actions)
+        
+        # Network actions
+        self.assertIn("http_get", actions)
+        self.assertIn("http_post", actions)
+        self.assertIn("download_file", actions)
+
+
 if __name__ == '__main__':
     unittest.main()

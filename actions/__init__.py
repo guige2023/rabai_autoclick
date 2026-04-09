@@ -9,6 +9,12 @@ from .wait_for import WaitForImageAction, WaitForTextAction, WaitForElementActio
 from .loop_while import LoopWhileAction, LoopWhileBreakAction, LoopWhileContinueAction, ForEachAction
 from .try_catch import TryCatchAction, ThrowAction, RethrowAction, AssertAction
 from .comment import CommentAction, LabelAction, GotoAction, LogAction
+from .notify import NotifyAction, EmailNotifyAction, WebhookNotifyAction, SlackNotifyAction
+from .filesystem import (
+    FileReadAction, FileWriteAction, FileExistsAction, FileDeleteAction,
+    FileCopyAction, DirCreateAction, FileListAction, FileMoveAction
+)
+from .network import HttpGetAction, HttpPostAction, DownloadFileAction
 
 __all__ = [
     'ClickAction',
@@ -43,4 +49,22 @@ __all__ = [
     'LabelAction',
     'GotoAction',
     'LogAction',
+    # Notify actions
+    'NotifyAction',
+    'EmailNotifyAction',
+    'WebhookNotifyAction',
+    'SlackNotifyAction',
+    # Filesystem actions
+    'FileReadAction',
+    'FileWriteAction',
+    'FileExistsAction',
+    'FileDeleteAction',
+    'FileCopyAction',
+    'DirCreateAction',
+    'FileListAction',
+    'FileMoveAction',
+    # Network actions
+    'HttpGetAction',
+    'HttpPostAction',
+    'DownloadFileAction',
 ]
