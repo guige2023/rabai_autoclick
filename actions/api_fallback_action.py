@@ -1,112 +1,240 @@
-"""API Fallback Action Module.
+"""API fallback and degradation handling.
 
-Provides cascading fallback chains, circuit breaker,
-and graceful degradation for API clients.
+This module provides fallback strategies:
+- Multiple fallback levels
+- Degradation levels
+- Cached fallback responses
+- Circuit breaker integration
+
+Example:
+    >>> from actions.api_fallback_action import FallbackManager
+    >>> manager = FallbackManager()
+    >>> result = manager.execute_with_fallback(primary_func, [fallback1, fallback2])
 """
+
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, TypeVar, Union
+import time
 import logging
+import threading
+from typing import Any, Callable, Optional
+from dataclasses import dataclass, field
+from enum import Enum
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar("T")
+
+class DegradationLevel(Enum):
+    """Service degradation levels."""
+    HEALTHY = 0
+    DEGRADED = 1
+    PARTIAL = 2
+    FULL = 3
 
 
 @dataclass
-class FallbackConfig:
-    """Fallback chain configuration."""
+class FallbackStrategy:
+    """A fallback strategy definition."""
     name: str
-    func: Callable[[], T]
+    func: Callable[..., Any]
     timeout: float = 5.0
-    retry_count: int = 0
-    retry_delay: float = 0.5
+    condition: Optional[Callable[[Exception], bool]] = None
+    cache_ttl: Optional[float] = None
 
 
-class APIFallbackAction:
-    """Cascading fallback handler.
+@dataclass
+class CachedFallback:
+    """Cached fallback response."""
+    data: Any
+    cached_at: float
+    ttl: float
+
+
+class FallbackManager:
+    """Manage fallback strategies for API calls.
 
     Example:
-        fallback = APIFallbackAction()
-
-        fallback.add_fallback(FallbackConfig(
-            name="primary",
-            func=lambda: api.get_primary_data()
-        ))
-
-        fallback.add_fallback(FallbackConfig(
-            name="cache",
-            func=lambda: cache.get("data")
-        ))
-
-        fallback.add_fallback(FallbackConfig(
-            name="default",
-            func=lambda: {"data": []}
-        ))
-
-        result = await fallback.execute()
+        >>> manager = FallbackManager()
+        >>> manager.add_fallback("cache", self._get_cached)
+        >>> result = manager.execute(primary_call, fallback_levels=["cache", "default"])
     """
 
-    def __init__(self) -> None:
-        self._fallbacks: List[FallbackConfig] = []
-        self._default_result: Optional[Any] = None
+    def __init__(self, default_timeout: float = 5.0) -> None:
+        self.default_timeout = default_timeout
+        self._fallbacks: dict[str, FallbackStrategy] = {}
+        self._cache: dict[str, CachedFallback] = {}
+        self._cache_lock = threading.RLock()
+        self._degradation_level = DegradationLevel.HEALTHY
+        logger.info("FallbackManager initialized")
 
-    def add_fallback(self, config: FallbackConfig) -> "APIFallbackAction":
-        """Add fallback to chain. Returns self for chaining."""
-        self._fallbacks.append(config)
-        return self
+    def register_fallback(
+        self,
+        name: str,
+        func: Callable[..., Any],
+        timeout: Optional[float] = None,
+        condition: Optional[Callable[[Exception], bool]] = None,
+        cache_ttl: Optional[float] = None,
+    ) -> None:
+        """Register a fallback strategy.
 
-    def set_default_result(self, result: Any) -> "APIFallbackAction":
-        """Set default result when all fallbacks fail."""
-        self._default_result = result
-        return self
+        Args:
+            name: Strategy name.
+            func: Fallback function.
+            timeout: Timeout for this fallback.
+            condition: Optional condition to trigger this fallback.
+            cache_ttl: Optional TTL for caching fallback responses.
+        """
+        self._fallbacks[name] = FallbackStrategy(
+            name=name,
+            func=func,
+            timeout=timeout or self.default_timeout,
+            condition=condition,
+            cache_ttl=cache_ttl,
+        )
+        logger.debug(f"Registered fallback: {name}")
 
-    async def execute(self) -> Any:
-        """Execute fallback chain.
+    def execute_with_fallback(
+        self,
+        primary_func: Callable[..., Any],
+        fallbacks: Optional[list[str]] = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute primary function with fallback support.
+
+        Args:
+            primary_func: Primary function to call.
+            fallbacks: List of fallback names to try in order.
+            *args: Arguments for the functions.
+            **kwargs: Keyword arguments for the functions.
 
         Returns:
-            Result from first successful fallback or default
+            Result from primary or fallback function.
+
+        Raises:
+            Exception: If all functions fail.
         """
+        fallback_names = fallbacks or list(self._fallbacks.keys())
         last_error: Optional[Exception] = None
-
-        for fallback in self._fallbacks:
-            try:
-                result = await asyncio.wait_for(
-                    self._call_func(fallback.func),
-                    timeout=fallback.timeout
-                )
-
-                if result is not None:
-                    logger.info(f"Fallback '{fallback.name}' succeeded")
+        for name in fallback_names:
+            fallback = self._fallbacks.get(name)
+            if not fallback:
+                continue
+            if fallback.condition:
+                try:
+                    result = primary_func(*args, **kwargs)
                     return result
-
-                last_error = ValueError(f"Fallback '{fallback.name}' returned None")
-
-            except asyncio.TimeoutError:
-                logger.warning(f"Fallback '{fallback.name}' timed out")
-                last_error = asyncio.TimeoutError(f"Fallback '{fallback.name}' timeout")
-
+                except Exception as e:
+                    if not fallback.condition(e):
+                        raise
+                    last_error = e
+            try:
+                result = self._call_with_timeout(fallback, *args, **kwargs)
+                if fallback.cache_ttl:
+                    self._cache_fallback(name, result, fallback.cache_ttl)
+                return result
             except Exception as e:
-                logger.warning(f"Fallback '{fallback.name}' failed: {e}")
                 last_error = e
+                logger.warning(f"Fallback '{name}' failed: {e}")
+        if last_error:
+            raise last_error
+        raise RuntimeError("No fallback available")
 
-            await asyncio.sleep(fallback.retry_delay * (fallback.retry_count + 1))
+    def _call_with_timeout(
+        self,
+        fallback: FallbackStrategy,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Call fallback with timeout (simplified)."""
+        return fallback.func(*args, **kwargs)
 
-        if self._default_result is not None:
-            logger.info("All fallbacks failed, returning default")
-            return self._default_result
+    def _cache_fallback(
+        self,
+        name: str,
+        data: Any,
+        ttl: float,
+    ) -> None:
+        """Cache a fallback response."""
+        with self._cache_lock:
+            self._cache[name] = CachedFallback(
+                data=data,
+                cached_at=time.time(),
+                ttl=ttl,
+            )
 
-        raise last_error or ValueError("All fallbacks failed")
+    def get_cached_fallback(self, name: str) -> Optional[Any]:
+        """Get cached fallback if available and not expired."""
+        with self._cache_lock:
+            cached = self._cache.get(name)
+            if not cached:
+                return None
+            if time.time() - cached.cached_at > cached.ttl:
+                del self._cache[name]
+                return None
+            return cached.data
 
-    async def _call_func(self, func: Callable) -> Any:
-        """Call function (async or sync)."""
-        if asyncio.iscoroutinefunction(func):
-            return await func()
-        return func()
+    def set_degradation_level(self, level: DegradationLevel) -> None:
+        """Set the current degradation level."""
+        self._degradation_level = level
+        logger.info(f"Degradation level set to: {level.name}")
 
-    def clear(self) -> None:
-        """Clear all fallbacks."""
-        self._fallbacks.clear()
-        self._default_result = None
+    def get_degradation_level(self) -> DegradationLevel:
+        """Get current degradation level."""
+        return self._degradation_level
+
+    def clear_cache(self) -> None:
+        """Clear all cached fallbacks."""
+        with self._cache_lock:
+            self._cache.clear()
+
+
+class GracefulDegradation:
+    """Context manager for graceful degradation based on degradation level."""
+
+    def __init__(
+        self,
+        fallback_manager: FallbackManager,
+        required_level: DegradationLevel = DegradationLevel.HEALTHY,
+    ) -> None:
+        self.fallback_manager = fallback_manager
+        self.required_level = required_level
+
+    def __enter__(self) -> bool:
+        current_level = self.fallback_manager.get_degradation_level()
+        if current_level.value > self.required_level.value:
+            return False
+        return True
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        pass
+
+
+def create_circuit_breaker_fallback(
+    func: Callable[..., Any],
+    fallback: Callable[..., Any],
+    failure_threshold: int = 5,
+    timeout: float = 60.0,
+) -> Callable[..., Any]:
+    """Create a function with circuit breaker and fallback.
+
+    Args:
+        func: Primary function.
+        fallback: Fallback function.
+        failure_threshold: Number of failures before opening circuit.
+        timeout: Timeout in seconds.
+
+    Returns:
+        Wrapped function with circuit breaker.
+    """
+    from actions.circuit_breaker_action import CircuitBreaker
+    cb = CircuitBreaker(
+        name=func.__name__,
+        failure_threshold=failure_threshold,
+        timeout=timeout,
+    )
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        return cb.call(func, *args, fallback=fallback, **kwargs)
+
+    return wrapper
