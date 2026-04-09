@@ -1,0 +1,11 @@
+{
+    "name": "example",
+    "version": "1.0.0",
+    "description": "Example plugin demonstrating the RabAI AutoClick plugin system",
+    "author": "RabAI Team",
+    "license": "MIT",
+    "tags": ["example", "demo", "tutorial"],
+    "entry_point": "example_action",
+    "min_rabai_version": "22.0.0",
+    "dependencies": []
+}
