@@ -1,297 +1,310 @@
+"""Format and serialization utilities.
+
+Provides data formatting, conversion, and
+serialization for various output formats.
 """
-Formatting and serialization utilities.
 
-Provides pretty printing, table formatting, number formatting,
-unit conversion, and data structure serialization.
-"""
-
-from __future__ import annotations
-
+import base64
 import json
 import xml.etree.ElementTree as ET
-from typing import Any, Sequence
+from dataclasses import dataclass, asdict
+from datetime import datetime, date
+from typing import Any, Dict, List, Optional, Union
+from enum import Enum
 
 
-def format_number(n: float, precision: int = 2, unit: str = "") -> str:
-    """Format number with precision and optional unit."""
-    formatted = f"{n:.{precision}f}"
-    return f"{formatted} {unit}".strip() if unit else formatted
+class OutputFormat(Enum):
+    """Supported output formats."""
+    JSON = "json"
+    XML = "xml"
+    CSV = "csv"
+    TSV = "tsv"
+    HTML = "html"
+    MARKDOWN = "markdown"
+    YAML = "yaml"
 
 
-def format_bytes(size: int) -> str:
-    """Format byte size in human-readable form."""
-    units = ["B", "KB", "MB", "GB", "TB", "PB"]
-    size = float(size)
-    for unit in units:
-        if abs(size) < 1024.0:
-            return f"{size:.1f} {unit}"
-        size /= 1024.0
-    return f"{size:.1f} PB"
+@dataclass
+class FormatConfig:
+    """Configuration for formatting output."""
+    indent: int = 2
+    ensure_ascii: bool = False
+    date_format: str = "%Y-%m-%d %H:%M:%S"
+    null_value: str = ""
+
+
+def to_json(
+    data: Any,
+    config: Optional[FormatConfig] = None,
+) -> str:
+    """Format data as JSON.
+
+    Example:
+        json_str = to_json({"key": "value"})
+    """
+    if config is None:
+        config = FormatConfig()
+
+    return json.dumps(
+        data,
+        indent=config.indent,
+        ensure_ascii=config.ensure_ascii,
+        default=_json_default,
+    )
+
+
+def _json_default(obj: Any) -> Any:
+    """JSON serializer for special types."""
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, bytes):
+        return base64.b64encode(obj).decode()
+    if isinstance(obj, set):
+        return list(obj)
+    if hasattr(obj, "__dict__"):
+        return obj.__dict__
+    return str(obj)
+
+
+def from_json(json_str: str) -> Any:
+    """Parse JSON string to Python object."""
+    return json.loads(json_str)
+
+
+def to_xml(
+    data: Union[Dict, List],
+    root_tag: str = "root",
+    item_tag: str = "item",
+) -> str:
+    """Format data as XML.
+
+    Example:
+        xml_str = to_xml({"name": "test"}, root_tag="data")
+    """
+    if isinstance(data, dict):
+        root = ET.Element(root_tag)
+        _dict_to_xml(data, root)
+    else:
+        root = ET.Element(root_tag)
+        for item in data:
+            _dict_to_xml({item_tag: item}, root)
+
+    return ET.tostring(root, encoding="unicode")
+
+
+def _dict_to_xml(data: Any, parent: ET.Element) -> None:
+    """Convert dict/list to XML elements."""
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if isinstance(value, (dict, list)):
+                child = ET.SubElement(parent, str(key))
+                _dict_to_xml(value, child)
+            else:
+                child = ET.SubElement(parent, str(key))
+                child.text = str(value) if value is not None else ""
+    elif isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                _dict_to_xml(item, parent)
+            else:
+                child = ET.SubElement(parent, "item")
+                child.text = str(item)
+    else:
+        parent.text = str(data) if data is not None else ""
+
+
+def to_csv(
+    data: List[Dict[str, Any]],
+    headers: Optional[List[str]] = None,
+    delimiter: str = ",",
+) -> str:
+    """Format data as CSV.
+
+    Example:
+        csv_str = to_csv([{"name": "A", "age": 30}, {"name": "B", "age": 25}])
+    """
+    if not data:
+        return ""
+
+    if headers is None:
+        headers = list(data[0].keys())
+
+    lines = [delimiter.join(headers)]
+
+    for row in data:
+        values = [str(row.get(h, "")) for h in headers]
+        lines.append(delimiter.join(values))
+
+    return "\n".join(lines)
+
+
+def to_tsv(data: List[Dict[str, Any]], headers: Optional[List[str]] = None) -> str:
+    """Format data as TSV."""
+    return to_csv(data, headers, delimiter="\t")
+
+
+def to_markdown_table(
+    data: List[Dict[str, Any]],
+    headers: Optional[List[str]] = None,
+) -> str:
+    """Format data as Markdown table.
+
+    Example:
+        md_table = to_markdown_table([{"name": "A", "v": 1}])
+    """
+    if not data:
+        return ""
+
+    if headers is None:
+        headers = list(data[0].keys())
+
+    header_line = "| " + " | ".join(headers) + " |"
+    separator = "|" + "|".join([" --- " for _ in headers]) + "|"
+
+    rows = []
+    for row in data:
+        values = [str(row.get(h, "")) for h in headers]
+        rows.append("| " + " | ".join(values) + " |")
+
+    return "\n".join([header_line, separator] + rows)
+
+
+def to_html_table(
+    data: List[Dict[str, Any]],
+    headers: Optional[List[str]] = None,
+    table_class: str = "data-table",
+) -> str:
+    """Format data as HTML table."""
+    if not data:
+        return "<table></table>"
+
+    if headers is None:
+        headers = list(data[0].keys())
+
+    html = f'<table class="{table_class}">\n'
+
+    html += "  <thead><tr>"
+    for h in headers:
+        html += f"<th>{h}</th>"
+    html += "</tr></thead>\n"
+
+    html += "  <tbody>\n"
+    for row in data:
+        html += "    <tr>"
+        for h in headers:
+            html += f"<td>{row.get(h, '')}</td>"
+        html += "</tr>\n"
+
+    html += "  </tbody>\n</table>"
+    return html
+
+
+def format_bytes(num_bytes: int) -> str:
+    """Format byte count as human readable string.
+
+    Example:
+        format_bytes(1024 * 1024)  # "1.00 MB"
+    """
+    for unit in ["B", "KB", "MB", "GB", "TB", "PB"]:
+        if abs(num_bytes) < 1024.0:
+            return f"{num_bytes:.2f} {unit}"
+        num_bytes /= 1024.0
+    return f"{num_bytes:.2f} PB"
 
 
 def format_duration(seconds: float) -> str:
-    """Format duration in human-readable form."""
+    """Format duration as human readable string.
+
+    Example:
+        format_duration(3665)  # "1h 1m 5s"
+    """
     if seconds < 1:
         return f"{seconds * 1000:.0f}ms"
-    if seconds < 60:
-        return f"{seconds:.1f}s"
-    if seconds < 3600:
-        minutes = int(seconds // 60)
-        secs = seconds % 60
-        return f"{minutes}m {secs:.0f}s"
+
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
-    return f"{hours}h {minutes}m"
+    secs = int(seconds % 60)
+
+    parts = []
+    if hours > 0:
+        parts.append(f"{hours}h")
+    if minutes > 0:
+        parts.append(f"{minutes}m")
+    if secs > 0 or not parts:
+        parts.append(f"{secs}s")
+
+    return " ".join(parts)
+
+
+def format_number(num: Union[int, float], precision: int = 2) -> str:
+    """Format number with thousands separator.
+
+    Example:
+        format_number(1234567)  # "1,234,567.00"
+    """
+    if isinstance(num, int):
+        return f"{num:,}"
+    return f"{num:,.{precision}f}"
 
 
 def format_percentage(value: float, total: float, precision: int = 1) -> str:
-    """Format as percentage."""
-    if total == 0:
-        return "0.0%"
-    return f"{value / total * 100:.{precision}f}%"
+    """Format as percentage.
 
-
-def format_table(
-    headers: list[str],
-    rows: list[list[Any]],
-    align: str = "left",
-) -> str:
+    Example:
+        format_percentage(25, 100)  # "25.0%"
     """
-    Format data as ASCII table.
+    if total == 0:
+        return "0%"
+    pct = (value / total) * 100
+    return f"{pct:.{precision}f}%"
+
+
+def truncate_string(s: str, max_length: int, suffix: str = "...") -> str:
+    """Truncate string with suffix.
+
+    Example:
+        truncate_string("hello world", 8)  # "hello..."
+    """
+    if len(s) <= max_length:
+        return s
+    return s[:max_length - len(suffix)] + suffix
+
+
+def pretty_print(data: Any, format_type: OutputFormat = OutputFormat.JSON) -> str:
+    """Format data for pretty printing.
 
     Args:
-        headers: Column headers
-        rows: Data rows
-        align: 'left', 'right', or 'center'
+        data: Data to format.
+        format_type: Output format type.
 
     Returns:
-        Formatted table string.
+        Formatted string.
     """
-    if not rows:
-        return ""
-
-    # Convert all to strings
-    str_headers = [str(h) for h in headers]
-    str_rows = [[str(cell) for cell in row] for row in rows]
-
-    # Compute column widths
-    col_widths = [len(h) for h in str_headers]
-    for row in str_rows:
-        for i, cell in enumerate(row):
-            if i < len(col_widths):
-                col_widths[i] = max(col_widths[i], len(cell))
-
-    def format_cell(cell: str, width: int) -> str:
-        if align == "right":
-            return cell.rjust(width)
-        elif align == "center":
-            return cell.center(width)
-        return cell.ljust(width)
-
-    # Build table
-    lines: list[str] = []
-    sep = "+" + "+".join("-" * w for w in col_widths) + "+"
-    lines.append(sep)
-    lines.append("|" + "|".join(format_cell(h, w) for h, w in zip(str_headers, col_widths)) + "|")
-    lines.append(sep)
-    for row in str_rows:
-        cells = [format_cell(row[i] if i < len(row) else "", w) for i, w in enumerate(col_widths)]
-        lines.append("|" + "|".join(cells) + "|")
-    lines.append(sep)
-    return "\n".join(lines)
+    if format_type == OutputFormat.JSON:
+        return to_json(data)
+    elif format_type == OutputFormat.XML:
+        return to_xml(data)
+    elif format_type == OutputFormat.CSV:
+        return to_csv(data)
+    elif format_type == OutputFormat.MARKDOWN:
+        if isinstance(data, list):
+            return to_markdown_table(data)
+        return to_json(data)
+    elif format_type == OutputFormat.HTML:
+        if isinstance(data, list):
+            return to_html_table(data)
+        return to_json(data)
+    else:
+        return str(data)
 
 
-def format_json(data: Any, indent: int = 2) -> str:
-    """Pretty print JSON."""
-    return json.dumps(data, indent=indent, ensure_ascii=False, sort_keys=False)
+def dataclass_to_dict(obj: Any) -> Dict[str, Any]:
+    """Convert dataclass instance to dict."""
+    if hasattr(obj, "__dataclass_fields__"):
+        return {k: getattr(obj, k) for k in obj.__dataclass_fields__}
+    return asdict(obj)
 
 
-def parse_json(text: str) -> Any:
-    """Parse JSON text."""
-    return json.loads(text)
-
-
-def format_xml(element: ET.Element, indent: str = "  ") -> str:
-    """Format XML element as string."""
-    return ET.tostring(element, encoding="unicode")
-
-
-def indent_text(text: str, spaces: int = 4) -> str:
-    """Indent text by spaces."""
-    pad = " " * spaces
-    return "\n".join(pad + line for line in text.splitlines())
-
-
-def truncate(text: str, max_length: int, suffix: str = "...") -> str:
-    """Truncate text to max length."""
-    if len(text) <= max_length:
-        return text
-    return text[:max_length - len(suffix)] + suffix
-
-
-def word_wrap(text: str, width: int = 80) -> list[str]:
-    """Wrap text to specified width."""
-    words = text.split()
-    lines: list[str] = []
-    current_line: list[str] = []
-    current_len = 0
-    for word in words:
-        if current_len + len(word) + len(current_line) <= width:
-            current_line.append(word)
-            current_len += len(word)
-        else:
-            if current_line:
-                lines.append(" ".join(current_line))
-            current_line = [word]
-            current_len = len(word)
-    if current_line:
-        lines.append(" ".join(current_line))
-    return lines
-
-
-def pluralize(word: str, count: int, plural: str | None = None) -> str:
-    """Add plural suffix to word based on count."""
-    if plural:
-        return f"{count} {plural if count != 1 else word}"
-    if count == 1:
-        return f"{count} {word}"
-    if word.endswith("y"):
-        return f"{count} {word[:-1]}ies"
-    if word.endswith(("s", "x", "z", "ch", "sh")):
-        return f"{count} {word}es"
-    return f"{count} {word}s"
-
-
-def format_list(items: list[str], conjunction: str = "and") -> str:
-    """Format list with proper Oxford comma."""
-    n = len(items)
-    if n == 0:
-        return ""
-    if n == 1:
-        return items[0]
-    if n == 2:
-        return f"{items[0]} {conjunction} {items[1]}"
-    return ", ".join(items[:-1]) + f", {conjunction} {items[-1]}"
-
-
-def format_dict(data: dict, indent: int = 2) -> str:
-    """Format dictionary as pretty string."""
-    lines: list[str] = []
-    for key, value in data.items():
-        if isinstance(value, dict):
-            lines.append(f"{key}:")
-            lines.append(format_dict(value, indent))
-        elif isinstance(value, list):
-            lines.append(f"{key}: {value}")
-        else:
-            lines.append(f"{key}: {value}")
-    return "\n".join(lines)
-
-
-def format_progress_bar(
-    progress: float,
-    width: int = 40,
-    filled: str = "#",
-    empty: str = "-",
-) -> str:
-    """Format progress bar."""
-    progress = max(0.0, min(1.0, progress))
-    filled_count = int(width * progress)
-    empty_count = width - filled_count
-    return f"[{filled * filled_count}{empty * empty_count}] {progress * 100:.1f}%"
-
-
-def format_tree(
-    items: dict[str, Any],
-    indent: int = 0,
-    prefix: str = "",
-) -> list[str]:
-    """Format nested dict as tree."""
-    lines: list[str] = []
-    keys = sorted(items.keys())
-    for i, key in enumerate(keys):
-        is_last = i == len(keys) - 1
-        current_prefix = prefix
-        if indent == 0:
-            lines.append(str(key))
-        else:
-            connector = "`--" if is_last else "|--"
-            lines.append(f"{current_prefix}{connector} {key}")
-        value = items[key]
-        if isinstance(value, dict):
-            extension = "`   " if is_last else "|   "
-            lines.extend(format_tree(value, indent + 1, prefix + extension))
-    return lines
-
-
-def to_csv_row(values: list[Any], delimiter: str = ",") -> str:
-    """Format values as CSV row."""
-    def escape(v: Any) -> str:
-        s = str(v)
-        if delimiter in s or '"' in s or '\n' in s:
-            return f'"{s.replace("\"", "\"\"")}"'
-        return s
-    return delimiter.join(escape(v) for v in values)
-
-
-def from_csv_row(row: str, delimiter: str = ",") -> list[str]:
-    """Parse CSV row into values."""
-    values: list[str] = []
-    current = ""
-    in_quotes = False
-    i = 0
-    while i < len(row):
-        ch = row[i]
-        if ch == '"':
-            if in_quotes and i + 1 < len(row) and row[i + 1] == '"':
-                current += '"'
-                i += 1
-            else:
-                in_quotes = not in_quotes
-        elif ch == delimiter and not in_quotes:
-            values.append(current)
-            current = ""
-        else:
-            current += ch
-        i += 1
-    values.append(current)
-    return values
-
-
-def unit_convert(value: float, from_unit: str, to_unit: str) -> float:
-    """
-    Simple unit conversion.
-
-    Supports: length (m, km, mi, ft, in, cm, mm), weight (kg, g, lb, oz),
-    temperature (C, F, K).
-    """
-    conversions: dict[str, dict[str, float]] = {
-        # to meters
-        "m": {"km": 1000, "mi": 1609.344, "ft": 0.3048, "in": 0.0254, "cm": 0.01, "mm": 0.001, "m": 1},
-        # to kg
-        "kg": {"g": 0.001, "lb": 0.453592, "oz": 0.0283495, "kg": 1},
-    }
-
-    # Temperature special cases
-    if from_unit in "CFK" and to_unit in "CFK":
-        c = 0.0
-        if from_unit == "C":
-            c = value
-        elif from_unit == "F":
-            c = (value - 32) * 5 / 9
-        else:  # Kelvin
-            c = value - 273.15
-        if to_unit == "C":
-            return c
-        elif to_unit == "F":
-            return c * 9 / 5 + 32
-        else:  # Kelvin
-            return c + 273.15
-
-    # Find category
-    for category, table in conversions.items():
-        if from_unit in table and to_unit in table:
-            base = value * table[from_unit]
-            return base / table[to_unit]
-
-    raise ValueError(f"Unknown unit conversion: {from_unit} to {to_unit}")
+def dict_to_dataclass(data: Dict[str, Any], cls: type) -> Any:
+    """Create dataclass instance from dict."""
+    return cls(**{k: data.get(k) for k in cls.__dataclass_fields__})
