@@ -1,386 +1,369 @@
-"""API monitor action module for RabAI AutoClick.
+"""
+API Monitor Action Module.
 
-Provides API monitoring with health checks, latency tracking,
-error rate monitoring, and alerting.
+Provides request/response monitoring, metrics collection,
+health checks, and alerting capabilities.
 """
 
-import sys
-import os
+import asyncio
 import time
-import json
-from typing import Any, Dict, List, Optional, Callable
 from dataclasses import dataclass, field
-from collections import defaultdict, deque
-from datetime import datetime, timedelta
-from statistics import mean, median
+from enum import Enum
+from typing import Any, Callable, Optional
+import statistics
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+
+class MetricType(Enum):
+    """Metric types."""
+    COUNTER = "counter"
+    GAUGE = "gauge"
+    HISTOGRAM = "histogram"
+    TIMER = "timer"
 
 
 @dataclass
-class RequestMetric:
-    """A single request metric."""
-    timestamp: float
-    endpoint: str
-    method: str
-    status_code: int
-    latency_ms: float
-    success: bool
-    error_type: Optional[str] = None
+class Metric:
+    """Single metric."""
+    name: str
+    metric_type: MetricType
+    value: float = 0.0
+    count: int = 0
+    min_value: float = float("inf")
+    max_value: float = float("-inf")
+    sum_values: float = 0.0
+    labels: dict = field(default_factory=dict)
+    last_updated: float = field(default_factory=time.time)
+
+
+@dataclass
+class HealthCheck:
+    """Health check definition."""
+    name: str
+    check_func: Callable[[], bool]
+    interval: float = 60.0
+    timeout: float = 5.0
+    critical: bool = False
 
 
 @dataclass
 class HealthStatus:
-    """Health status of an API."""
+    """Health check status."""
+    name: str
     healthy: bool
-    latency_ms: float
-    uptime_percent: float
-    error_rate_percent: float
-    last_check: str
+    latency: float = 0.0
+    error: Optional[str] = None
+    last_check: float = field(default_factory=time.time)
 
 
-class APIMonitorAction(BaseAction):
-    """Monitor API health, latency, and error rates.
-    
-    Tracks request metrics, calculates health indicators,
-    and provides alerting on degradation.
-    """
-    action_type = "api_monitor"
-    display_name = "API监控"
-    description = "API健康检查和性能监控"
-    
-    def __init__(self):
-        super().__init__()
-        self._metrics: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
-        self._health_checks: Dict[str, Callable] = {}
-        self._alert_thresholds = {
-            'latency_ms': 1000,
-            'error_rate_percent': 5.0,
-            'min_requests': 10
+@dataclass
+class MonitorConfig:
+    """Monitor configuration."""
+    enable_metrics: bool = True
+    enable_health_checks: bool = True
+    metrics_window: int = 300
+    alert_threshold: float = 0.95
+
+
+class MetricsCollector:
+    """Collects and manages metrics."""
+
+    def __init__(self, window_size: int = 300):
+        self.window_size = window_size
+        self._metrics: dict[str, Metric] = {}
+        self._lock = asyncio.Lock()
+
+    async def increment(
+        self,
+        name: str,
+        value: float = 1.0,
+        labels: Optional[dict] = None
+    ) -> None:
+        """Increment counter."""
+        async with self._lock:
+            key = self._make_key(name, labels)
+            if key not in self._metrics:
+                self._metrics[key] = Metric(
+                    name=name,
+                    metric_type=MetricType.COUNTER,
+                    labels=labels or {}
+                )
+
+            metric = self._metrics[key]
+            metric.value += value
+            metric.count += 1
+            metric.last_updated = time.time()
+
+    async def record(
+        self,
+        name: str,
+        value: float,
+        metric_type: MetricType = MetricType.GAUGE,
+        labels: Optional[dict] = None
+    ) -> None:
+        """Record metric value."""
+        async with self._lock:
+            key = self._make_key(name, labels)
+            if key not in self._metrics:
+                self._metrics[key] = Metric(
+                    name=name,
+                    metric_type=metric_type,
+                    labels=labels or {}
+                )
+
+            metric = self._metrics[key]
+            metric.value = value
+            metric.count += 1
+            metric.last_updated = time.time()
+
+            if metric_type == MetricType.HISTOGRAM:
+                metric.min_value = min(metric.min_value, value)
+                metric.max_value = max(metric.max_value, value)
+                metric.sum_values += value
+
+    async def get_metric(self, name: str, labels: Optional[dict] = None) -> Optional[Metric]:
+        """Get metric by name."""
+        async with self._lock:
+            key = self._make_key(name, labels)
+            return self._metrics.get(key)
+
+    async def get_all_metrics(self) -> list[Metric]:
+        """Get all metrics."""
+        async with self._lock:
+            return list(self._metrics.values())
+
+    def _make_key(self, name: str, labels: Optional[dict]) -> str:
+        """Make metric key."""
+        if not labels:
+            return name
+        label_str = ",".join(f"{k}={v}" for k, v in sorted(labels.items()))
+        return f"{name}{{{label_str}}}"
+
+
+class HealthChecker:
+    """Performs health checks."""
+
+    def __init__(self, checks: list[HealthCheck]):
+        self.checks = checks
+        self._statuses: dict[str, HealthStatus] = {}
+        self._running = False
+        self._lock = asyncio.Lock()
+
+    async def check_health(self, check: HealthCheck) -> HealthStatus:
+        """Perform single health check."""
+        start = time.monotonic()
+        status = HealthStatus(name=check.name, healthy=False, latency=0.0)
+
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(check.check_func),
+                timeout=check.timeout
+            )
+            status.healthy = result
+            status.latency = time.monotonic() - start
+        except asyncio.TimeoutError:
+            status.error = f"Timeout after {check.timeout}s"
+            status.latency = check.timeout
+        except Exception as e:
+            status.error = str(e)
+            status.latency = time.monotonic() - start
+
+        status.last_check = time.time()
+        return status
+
+    async def run_checks(self) -> dict[str, HealthStatus]:
+        """Run all health checks."""
+        async with self._lock:
+            tasks = [self.check_health(check) for check in self.checks]
+            results = await asyncio.gather(*tasks)
+
+            for status in results:
+                self._statuses[status.name] = status
+
+            return self._statuses.copy()
+
+    async def start_monitoring(self) -> None:
+        """Start continuous health monitoring."""
+        self._running = True
+        while self._running:
+            await self.run_checks()
+            await asyncio.sleep(1.0)
+
+    def stop_monitoring(self) -> None:
+        """Stop monitoring."""
+        self._running = False
+
+
+class AlertManager:
+    """Manages alerts."""
+
+    def __init__(self, threshold: float = 0.95):
+        self.threshold = threshold
+        self._alerts: list[dict] = []
+        self._handlers: list[Callable] = []
+
+    def add_handler(self, handler: Callable[[dict], None]) -> None:
+        """Add alert handler."""
+        self._handlers.append(handler)
+
+    async def trigger_alert(
+        self,
+        metric_name: str,
+        message: str,
+        severity: str = "warning"
+    ) -> None:
+        """Trigger an alert."""
+        alert = {
+            "metric": metric_name,
+            "message": message,
+            "severity": severity,
+            "timestamp": time.time()
         }
-    
-    def execute(
+        self._alerts.append(alert)
+
+        for handler in self._handlers:
+            try:
+                if asyncio.iscoroutinefunction(handler):
+                    await handler(alert)
+                else:
+                    handler(alert)
+            except Exception:
+                pass
+
+    def get_alerts(self, since: Optional[float] = None) -> list[dict]:
+        """Get alerts since timestamp."""
+        if since is None:
+            return self._alerts.copy()
+        return [a for a in self._alerts if a["timestamp"] >= since]
+
+    def clear_alerts(self) -> None:
+        """Clear all alerts."""
+        self._alerts.clear()
+
+
+class APIMonitorAction:
+    """
+    API monitoring with metrics and health checks.
+
+    Example:
+        monitor = APIMonitorAction()
+
+        monitor.record_request("GET", "/api/users", 200, 45.2)
+        monitor.record_request("POST", "/api/orders", 201, 123.4)
+
+        health = await monitor.check_health()
+        metrics = monitor.get_metrics()
+    """
+
+    def __init__(self, config: Optional[MonitorConfig] = None):
+        self.config = config or MonitorConfig()
+        self._metrics = MetricsCollector(self.config.metrics_window)
+        self._health_checks: list[HealthCheck] = []
+        self._health_checker: Optional[HealthChecker] = None
+        self._alert_manager = AlertManager(self.config.alert_threshold)
+
+    def add_health_check(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute monitoring operation.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - operation: 'record', 'health', 'stats', 'alert', 'clear'
-                - endpoint: API endpoint name
-                - metric: Metric data dict
-                - thresholds: Alert threshold overrides
-        
-        Returns:
-            ActionResult with monitoring result.
-        """
-        operation = params.get('operation', 'record').lower()
-        
-        if operation == 'record':
-            return self._record(params)
-        elif operation == 'health':
-            return self._health(params)
-        elif operation == 'stats':
-            return self._stats(params)
-        elif operation == 'alert':
-            return self._alert(params)
-        elif operation == 'clear':
-            return self._clear(params)
-        else:
-            return ActionResult(
-                success=False,
-                message=f"Unknown operation: {operation}"
+        name: str,
+        check_func: Callable[[], bool],
+        interval: float = 60.0,
+        critical: bool = False
+    ) -> None:
+        """Add health check."""
+        check = HealthCheck(
+            name=name,
+            check_func=check_func,
+            interval=interval,
+            critical=critical
+        )
+        self._health_checks.append(check)
+        if self._health_checker:
+            self._health_checker.checks = self._health_checks
+
+    async def record_request(
+        self,
+        method: str,
+        path: str,
+        status_code: int,
+        latency_ms: float
+    ) -> None:
+        """Record API request."""
+        labels = {"method": method, "path": path, "status": str(status_code)}
+        await self._metrics.increment("api_requests_total", 1.0, labels)
+        await self._metrics.record(
+            "api_request_duration_ms",
+            latency_ms,
+            MetricType.HISTOGRAM,
+            labels
+        )
+
+        if status_code >= 500:
+            await self._alert_manager.trigger_alert(
+                "api_requests_total",
+                f"High 5xx error rate: {status_code}",
+                "critical"
             )
-    
-    def _record(self, params: Dict[str, Any]) -> ActionResult:
-        """Record a request metric."""
-        endpoint = params.get('endpoint', 'default')
-        metric_data = params.get('metric', {})
-        
-        metric = RequestMetric(
-            timestamp=time.time(),
-            endpoint=endpoint,
-            method=metric_data.get('method', 'GET'),
-            status_code=metric_data.get('status_code', 0),
-            latency_ms=metric_data.get('latency_ms', 0),
-            success=200 <= metric_data.get('status_code', 0) < 300,
-            error_type=metric_data.get('error_type')
+
+    async def record_response_size(
+        self,
+        path: str,
+        size_bytes: int
+    ) -> None:
+        """Record response size."""
+        await self._metrics.record(
+            "api_response_size_bytes",
+            float(size_bytes),
+            MetricType.HISTOGRAM,
+            {"path": path}
         )
-        
-        self._metrics[endpoint].append(metric)
-        
-        return ActionResult(
-            success=True,
-            message=f"Recorded metric for {endpoint}",
-            data={'endpoint': endpoint, 'latency_ms': metric.latency_ms}
-        )
-    
-    def _health(self, params: Dict[str, Any]) -> ActionResult:
-        """Get health status of an endpoint."""
-        endpoint = params.get('endpoint', 'default')
-        window_seconds = params.get('window_seconds', 300)
-        
-        cutoff = time.time() - window_seconds
-        metrics = [m for m in self._metrics[endpoint] if m.timestamp >= cutoff]
-        
-        if len(metrics) < self._alert_thresholds['min_requests']:
-            return ActionResult(
-                success=True,
-                message="Insufficient data for health check",
-                data={
-                    'healthy': None,
-                    'sample_size': len(metrics)
+
+    async def get_metrics(self) -> dict[str, Any]:
+        """Get all metrics."""
+        metrics = await self._metrics.get_all_metrics()
+        return {
+            "metrics": [
+                {
+                    "name": m.name,
+                    "type": m.metric_type.value,
+                    "value": m.value,
+                    "count": m.count,
+                    "labels": m.labels
                 }
-            )
-        
-        # Calculate health indicators
-        total = len(metrics)
-        successes = sum(1 for m in metrics if m.success)
-        errors = total - successes
-        
-        latencies = [m.latency_ms for m in metrics]
-        
-        uptime = (successes / total) * 100
-        error_rate = (errors / total) * 100
-        avg_latency = mean(latencies)
-        p95_latency = sorted(latencies)[int(len(latencies) * 0.95)] if latencies else 0
-        
-        healthy = (
-            avg_latency < self._alert_thresholds['latency_ms'] and
-            error_rate < self._alert_thresholds['error_rate_percent']
-        )
-        
-        status = HealthStatus(
-            healthy=healthy,
-            latency_ms=avg_latency,
-            uptime_percent=uptime,
-            error_rate_percent=error_rate,
-            last_check=datetime.utcnow().isoformat() + 'Z'
-        )
-        
-        return ActionResult(
-            success=True,
-            message=f"{'Healthy' if healthy else 'Unhealthy'}",
-            data={
-                'healthy': status.healthy,
-                'latency_ms': round(status.latency_ms, 2),
-                'p95_latency_ms': round(p95_latency, 2),
-                'uptime_percent': round(status.uptime_percent, 2),
-                'error_rate_percent': round(status.error_rate_percent, 2),
-                'sample_size': total
-            }
-        )
-    
-    def _stats(self, params: Dict[str, Any]) -> ActionResult:
-        """Get detailed statistics."""
-        endpoint = params.get('endpoint', 'default')
-        window_seconds = params.get('window_seconds', 3600)
-        
-        cutoff = time.time() - window_seconds
-        metrics = [m for m in self._metrics[endpoint] if m.timestamp >= cutoff]
-        
-        if not metrics:
-            return ActionResult(
-                success=True,
-                message="No metrics available",
-                data={'count': 0}
-            )
-        
-        latencies = [m.latency_ms for m in metrics]
-        status_codes = defaultdict(int)
-        error_types = defaultdict(int)
-        
-        for m in metrics:
-            status_codes[m.status_code] += 1
-            if m.error_type:
-                error_types[m.error_type] += 1
-        
-        return ActionResult(
-            success=True,
-            message=f"Statistics for {endpoint}",
-            data={
-                'count': len(metrics),
-                'latency': {
-                    'min': round(min(latencies), 2),
-                    'max': round(max(latencies), 2),
-                    'mean': round(mean(latencies), 2),
-                    'median': round(median(latencies), 2),
-                    'p95': round(sorted(latencies)[int(len(latencies) * 0.95)], 2),
-                    'p99': round(sorted(latencies)[int(len(latencies) * 0.99)], 2)
-                },
-                'status_codes': dict(status_codes),
-                'error_types': dict(error_types)
-            }
-        )
-    
-    def _alert(self, params: Dict[str, Any]) -> ActionResult:
-        """Check if any endpoints need alerting."""
-        alerts = []
-        
-        for endpoint in self._metrics:
-            health_result = self._health({'endpoint': endpoint})
-            if health_result.data and not health_result.data.get('healthy'):
-                alerts.append({
-                    'endpoint': endpoint,
-                    'reason': 'Health check failed',
-                    'details': health_result.data
+                for m in metrics
+            ]
+        }
+
+    async def get_metric_summary(self, name: str) -> Optional[dict]:
+        """Get metric summary."""
+        metric = await self._metrics.get_metric(name)
+        if not metric:
+            return None
+
+        result = {
+            "name": metric.name,
+            "count": metric.count,
+            "value": metric.value
+        }
+
+        if metric.metric_type == MetricType.HISTOGRAM:
+            if metric.count > 0:
+                avg = metric.sum_values / metric.count
+                result.update({
+                    "min": metric.min_value,
+                    "max": metric.max_value,
+                    "avg": avg,
+                    "p50": metric.min_value,
+                    "p95": metric.max_value * 0.95,
+                    "p99": metric.max_value * 0.99
                 })
-        
-        return ActionResult(
-            success=len(alerts) == 0,
-            message=f"{len(alerts)} alerts" if alerts else "No alerts",
-            data={'alerts': alerts, 'count': len(alerts)}
-        )
-    
-    def _clear(self, params: Dict[str, Any]) -> ActionResult:
-        """Clear metrics for an endpoint."""
-        endpoint = params.get('endpoint', 'default')
-        if endpoint in self._metrics:
-            self._metrics[endpoint].clear()
-        
-        return ActionResult(
-            success=True,
-            message=f"Cleared metrics for {endpoint}"
-        )
 
+        return result
 
-class LatencyTrackerAction(BaseAction):
-    """Track and analyze API latency patterns."""
-    action_type = "latency_tracker"
-    display_name = "延迟跟踪"
-    description = "API响应延迟跟踪分析"
-    
-    def __init__(self):
-        super().__init__()
-        self._requests: deque = deque(maxlen=10000)
-    
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute latency tracking operation.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - operation: 'track', 'percentiles', 'trends'
-                - endpoint: Endpoint name
-                - latency_ms: Latency in milliseconds
-                - window: Analysis window in seconds
-        
-        Returns:
-            ActionResult with latency analysis.
-        """
-        operation = params.get('operation', 'track').lower()
-        
-        if operation == 'track':
-            return self._track(params)
-        elif operation == 'percentiles':
-            return self._percentiles(params)
-        elif operation == 'trends':
-            return self._trends(params)
-        else:
-            return ActionResult(
-                success=False,
-                message=f"Unknown operation: {operation}"
-            )
-    
-    def _track(self, params: Dict[str, Any]) -> ActionResult:
-        """Track a single request latency."""
-        endpoint = params.get('endpoint', 'default')
-        latency_ms = params.get('latency_ms', 0)
-        
-        self._requests.append({
-            'timestamp': time.time(),
-            'endpoint': endpoint,
-            'latency_ms': latency_ms
-        })
-        
-        return ActionResult(
-            success=True,
-            message=f"Tracked latency {latency_ms}ms"
-        )
-    
-    def _percentiles(self, params: Dict[str, Any]) -> ActionResult:
-        """Calculate latency percentiles."""
-        endpoint = params.get('endpoint')
-        window = params.get('window', 300)
-        
-        cutoff = time.time() - window
-        requests = self._requests
-        
-        if endpoint:
-            requests = [r for r in requests if r['endpoint'] == endpoint]
-        
-        latencies = sorted([r['latency_ms'] for r in requests if r['timestamp'] >= cutoff])
-        
-        if not latencies:
-            return ActionResult(
-                success=True,
-                message="No latency data",
-                data={}
-            )
-        
-        def percentile(data, p):
-            idx = int(len(data) * p)
-            return data[min(idx, len(data) - 1)]
-        
-        return ActionResult(
-            success=True,
-            message="Latency percentiles calculated",
-            data={
-                'p50': round(percentile(latencies, 0.50), 2),
-                'p75': round(percentile(latencies, 0.75), 2),
-                'p90': round(percentile(latencies, 0.90), 2),
-                'p95': round(percentile(latencies, 0.95), 2),
-                'p99': round(percentile(latencies, 0.99), 2),
-                'count': len(latencies)
-            }
-        )
-    
-    def _trends(self, params: Dict[str, Any]) -> ActionResult:
-        """Analyze latency trends over time."""
-        endpoint = params.get('endpoint', 'default')
-        bucket_size = params.get('bucket_size', 60)  # 1 minute buckets
-        window = params.get('window', 3600)
-        
-        cutoff = time.time() - window
-        requests = [
-            r for r in self._requests
-            if r['endpoint'] == endpoint and r['timestamp'] >= cutoff
-        ]
-        
-        if not requests:
-            return ActionResult(
-                success=True,
-                message="No trend data",
-                data={'buckets': []}
-            )
-        
-        # Group into time buckets
-        buckets = defaultdict(list)
-        for r in requests:
-            bucket_key = int(r['timestamp'] / bucket_size) * bucket_size
-            buckets[bucket_key].append(r['latency_ms'])
-        
-        # Calculate stats per bucket
-        result = []
-        for ts in sorted(buckets.keys()):
-            latencies = buckets[ts]
-            result.append({
-                'timestamp': datetime.fromtimestamp(ts).isoformat(),
-                'latency_mean': round(mean(latencies), 2),
-                'latency_max': round(max(latencies), 2),
-                'count': len(latencies)
-            })
-        
-        return ActionResult(
-            success=True,
-            message=f"Trend analysis with {len(result)} buckets",
-            data={'buckets': result}
-        )
+    async def check_health(self) -> dict[str, HealthStatus]:
+        """Run health checks."""
+        if not self._health_checker:
+            self._health_checker = HealthChecker(self._health_checks)
+        return await self._health_checker.run_checks()
+
+    def add_alert_handler(self, handler: Callable) -> None:
+        """Add alert handler."""
+        self._alert_manager.add_handler(handler)
