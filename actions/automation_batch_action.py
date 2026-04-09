@@ -1,286 +1,402 @@
 """
 Automation Batch Action Module.
 
-Provides batch processing with chunking, parallel execution,
-rate limiting, and progress tracking.
+Provides batch processing capabilities with chunking,
+parallel execution, progress tracking, and error recovery.
 """
 
-from __future__ import annotations
-
 import asyncio
-import logging
+import threading
 import time
+from typing import Optional, Callable, Any, List, Dict, TypeVar, Generic
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Iterator, Optional
-
-logger = logging.getLogger(__name__)
+from collections import deque
 
 
-class BatchStatus(Enum):
-    """Batch processing status."""
-
-    PENDING = "pending"
-    PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
+class BatchStrategy(Enum):
+    """Batch processing strategies."""
+    SEQUENTIAL = "sequential"
+    PARALLEL = "parallel"
+    CHUNKED_PARALLEL = "chunked_parallel"
+    WORK_QUEUE = "work_queue"
 
 
 @dataclass
-class BatchProgress:
-    """Progress tracking for batch operations."""
-
-    total: int = 0
-    processed: int = 0
-    succeeded: int = 0
-    failed: int = 0
-    skipped: int = 0
-    start_time: float = 0.0
-    end_time: float = 0.0
-    current_item: Any = None
+class BatchConfig:
+    """Configuration for batch processing."""
+    strategy: BatchStrategy = BatchStrategy.SEQUENTIAL
+    chunk_size: int = 100
+    max_parallel: int = 4
+    max_retries: int = 2
+    retry_delay: float = 1.0
+    timeout: Optional[float] = None
+    fail_fast: bool = False
+    progress_interval: int = 10  # report progress every N items
 
 
 @dataclass
 class BatchResult:
     """Result of batch processing."""
+    total: int
+    successful: int
+    failed: int
+    skipped: int
+    results: List[Any]
+    errors: List[Dict[str, Any]]
+    duration_ms: float
+    items_per_second: float
 
-    status: BatchStatus
-    progress: BatchProgress
-    results: list[Any] = field(default_factory=list)
-    errors: list[dict[str, Any]] = field(default_factory=list)
+
+@dataclass
+class BatchProgress:
+    """Progress tracking for batch operations."""
+    total: int
+    processed: int
+    successful: int
+    failed: int
+    skipped: int
+    current_chunk: int
+    start_time: float
+    estimated_remaining_seconds: float = 0.0
 
 
 class AutomationBatchAction:
     """
-    Batch processing with configurable strategies.
+    Batch processing action with multiple execution strategies.
 
-    Features:
-    - Configurable chunk sizes
-    - Parallel processing with rate limiting
-    - Progress tracking and callbacks
-    - Error handling and retry
-    - Streaming processing for large datasets
-
-    Example:
-        batch = AutomationBatchAction(chunk_size=100, max_parallel=4)
-        result = await batch.process(items, process_fn)
+    Supports sequential, parallel, and chunked parallel processing
+    with comprehensive progress tracking and error handling.
     """
 
-    def __init__(
+    def __init__(self, config: Optional[BatchConfig] = None):
+        self.config = config or BatchConfig()
+        self._progress_callbacks: List[Callable[[BatchProgress], None]] = []
+        self._lock = threading.Lock()
+
+    def on_progress(
         self,
-        chunk_size: int = 100,
-        max_parallel: int = 4,
-        rate_limit: float = 0.0,
-        enable_progress: bool = True,
-    ) -> None:
-        """
-        Initialize batch action.
-
-        Args:
-            chunk_size: Items per chunk.
-            max_parallel: Maximum parallel chunks.
-            rate_limit: Minimum delay between items (seconds).
-            enable_progress: Enable progress tracking.
-        """
-        self.chunk_size = chunk_size
-        self.max_parallel = max_parallel
-        self.rate_limit = rate_limit
-        self.enable_progress = enable_progress
-        self._progress_callbacks: list[Callable] = []
-        self._stats = {
-            "total_batches": 0,
-            "total_items": 0,
-            "succeeded_items": 0,
-            "failed_items": 0,
-        }
-
-    def on_progress(self, callback: Callable[[BatchProgress], None]) -> None:
-        """
-        Register a progress callback.
-
-        Args:
-            callback: Progress callback function.
-        """
+        callback: Callable[[BatchProgress], None],
+    ) -> "AutomationBatchAction":
+        """Register progress callback."""
         self._progress_callbacks.append(callback)
+        return self
 
-    async def process(
+    def _report_progress(
         self,
-        items: list[Any],
-        process_fn: Callable[[Any], Any],
-        error_handler: Optional[Callable[[Any, Exception], Any]] = None,
-    ) -> BatchResult:
-        """
-        Process items in batches.
-
-        Args:
-            items: Items to process.
-            process_fn: Processing function.
-            error_handler: Optional error handler.
-
-        Returns:
-            BatchResult with all results.
-        """
-        progress = BatchProgress(total=len(items), start_time=time.time())
-        result = BatchResult(status=BatchStatus.PROCESSING, progress=progress)
-
-        self._stats["total_batches"] += 1
-        self._stats["total_items"] += len(items)
-
-        chunks = self._chunk_items(items)
-
-        for chunk_idx, chunk in enumerate(chunks):
-            chunk_tasks = []
-
-            for item in chunk:
-                task = self._process_item(
-                    item, process_fn, error_handler, progress, result
-                )
-                chunk_tasks.append(task)
-
-            await asyncio.gather(*chunk_tasks, return_exceptions=True)
-
-            if progress.total > 0:
-                self._report_progress(progress)
-
-        progress.end_time = time.time()
-        result.status = BatchStatus.COMPLETED
-        self._stats["succeeded_items"] += progress.succeeded
-        self._stats["failed_items"] += progress.failed
-
-        logger.info(
-            f"Batch completed: {progress.succeeded}/{progress.total} succeeded "
-            f"in {progress.end_time - progress.start_time:.2f}s"
-        )
-
-        return result
-
-    async def _process_item(
-        self,
-        item: Any,
-        process_fn: Callable,
-        error_handler: Optional[Callable],
         progress: BatchProgress,
-        result: BatchResult,
     ) -> None:
-        """Process a single item."""
-        progress.current_item = item
-
-        try:
-            if asyncio.iscoroutinefunction(process_fn):
-                processed = await process_fn(item)
-            else:
-                processed = process_fn(item)
-
-            progress.processed += 1
-            progress.succeeded += 1
-            result.results.append(processed)
-
-        except Exception as e:
-            progress.processed += 1
-            progress.failed += 1
-
-            error_record = {"item": str(item), "error": str(e)}
-            result.errors.append(error_record)
-
-            if error_handler:
-                try:
-                    handled = error_handler(item, e)
-                    if handled is not None:
-                        result.results.append(handled)
-                except Exception:
-                    pass
-
-        if self.rate_limit > 0:
-            await asyncio.sleep(self.rate_limit)
-
-    def _chunk_items(self, items: list[Any]) -> list[list[Any]]:
-        """Split items into chunks."""
-        chunks = []
-        for i in range(0, len(items), self.chunk_size):
-            chunks.append(items[i:i + self.chunk_size])
-        return chunks
-
-    def process_stream(
-        self,
-        item_iterator: Iterator[Any],
-        process_fn: Callable[[Any], Any],
-        max_buffer: int = 1000,
-    ) -> BatchResult:
-        """
-        Process items from an iterator/stream.
-
-        Args:
-            item_iterator: Iterator yielding items.
-            process_fn: Processing function.
-            max_buffer: Maximum buffered items.
-
-        Returns:
-            BatchResult (streaming mode, partial results).
-        """
-        progress = BatchProgress(start_time=time.time())
-        result = BatchResult(status=BatchStatus.PROCESSING, progress=progress)
-
-        buffer = []
-
-        for item in item_iterator:
-            buffer.append(item)
-
-            if len(buffer) >= max_buffer:
-                processed = self._process_chunk_sync(buffer, process_fn)
-                result.results.extend(processed)
-                progress.processed += len(buffer)
-                progress.succeeded += len(processed)
-                buffer.clear()
-
-        if buffer:
-            processed = self._process_chunk_sync(buffer, process_fn)
-            result.results.extend(processed)
-            progress.processed += len(buffer)
-            progress.succeeded += len(processed)
-
-        progress.end_time = time.time()
-        progress.total = progress.processed
-        result.status = BatchStatus.COMPLETED
-
-        return result
-
-    def _process_chunk_sync(
-        self,
-        chunk: list[Any],
-        process_fn: Callable,
-    ) -> list[Any]:
-        """Process a chunk synchronously."""
-        results = []
-        for item in chunk:
-            try:
-                result = process_fn(item)
-                results.append(result)
-            except Exception:
-                pass
-        return results
-
-    def _report_progress(self, progress: BatchProgress) -> None:
         """Report progress to callbacks."""
-        if not self.enable_progress:
-            return
-
         for callback in self._progress_callbacks:
             try:
                 callback(progress)
-            except Exception as e:
-                logger.error(f"Progress callback error: {e}")
+            except Exception:
+                pass
 
-    def get_stats(self) -> dict[str, Any]:
+    def _calculate_progress(
+        self,
+        total: int,
+        processed: int,
+        successful: int,
+        failed: int,
+        skipped: int,
+        start_time: float,
+        current_chunk: int,
+    ) -> BatchProgress:
+        """Calculate current progress."""
+        elapsed = time.time() - start_time
+        if processed > 0:
+            rate = processed / elapsed
+            remaining = total - processed
+            estimated_remaining = remaining / rate if rate > 0 else 0
+        else:
+            estimated_remaining = 0
+
+        return BatchProgress(
+            total=total,
+            processed=processed,
+            successful=successful,
+            failed=failed,
+            skipped=skipped,
+            current_chunk=current_chunk,
+            start_time=start_time,
+            estimated_remaining_seconds=estimated_remaining,
+        )
+
+    def _chunks(self, items: List[Any], chunk_size: int) -> List[List[Any]]:
+        """Split items into chunks."""
+        return [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
+
+    async def _process_item_async(
+        self,
+        item: Any,
+        processor: Callable[[Any], Any],
+        retries: int = 0,
+    ) -> tuple[bool, Any, Optional[Exception]]:
+        """Process a single item asynchronously."""
+        last_error = None
+
+        for attempt in range(retries + 1):
+            try:
+                result = processor(item)
+                if asyncio.iscoroutine(result):
+                    result = await result
+                return True, result, None
+            except Exception as e:
+                last_error = e
+                if attempt < retries:
+                    await asyncio.sleep(self.config.retry_delay)
+
+        return False, None, last_error
+
+    async def process_async(
+        self,
+        items: List[Any],
+        processor: Callable[[Any], Any],
+    ) -> BatchResult:
         """
-        Get batch processing statistics.
+        Process items in batch asynchronously.
+
+        Args:
+            items: List of items to process
+            processor: Function to process each item
 
         Returns:
-            Statistics dictionary.
+            BatchResult with processing outcomes
         """
-        return {
-            **self._stats,
-            "success_rate": (
-                f"{self._stats['succeeded_items'] / max(1, self._stats['total_items']) * 100:.1f}%"
-            ),
-        }
+        start_time = time.time()
+        total = len(items)
+        results: List[Any] = []
+        errors: List[Dict[str, Any]] = []
+        successful = 0
+        failed = 0
+        skipped = 0
+        processed = 0
+
+        strategy = self.config.strategy
+
+        if strategy == BatchStrategy.SEQUENTIAL:
+            for i, item in enumerate(items):
+                success, result, error = await self._process_item_async(
+                    item, processor, self.config.max_retries
+                )
+                processed += 1
+
+                if success:
+                    results.append(result)
+                    successful += 1
+                elif error is None:
+                    skipped += 1
+                else:
+                    errors.append({
+                        "index": i,
+                        "item": item,
+                        "error": str(error),
+                    })
+                    failed += 1
+                    if self.config.fail_fast:
+                        break
+
+                # Progress reporting
+                if processed % self.config.progress_interval == 0:
+                    progress = self._calculate_progress(
+                        total, processed, successful, failed, skipped,
+                        start_time, 0
+                    )
+                    self._report_progress(progress)
+
+        elif strategy == BatchStrategy.PARALLEL:
+            tasks = []
+            for i, item in enumerate(items):
+                task = asyncio.create_task(
+                    self._process_item_async(
+                        item, processor, self.config.max_retries
+                    )
+                )
+                tasks.append((i, item, task))
+
+            for i, item, task in tasks:
+                success, result, error = await task
+                processed += 1
+
+                if success:
+                    results.append(result)
+                    successful += 1
+                else:
+                    errors.append({
+                        "index": i,
+                        "item": item,
+                        "error": str(error) if error else "skipped",
+                    })
+                    failed += 1
+
+                if processed % self.config.progress_interval == 0:
+                    progress = self._calculate_progress(
+                        total, processed, successful, failed, skipped,
+                        start_time, 0
+                    )
+                    self._report_progress(progress)
+
+        elif strategy == BatchStrategy.CHUNKED_PARALLEL:
+            chunks = self._chunks(items, self.config.chunk_size)
+            max_parallel = min(self.config.max_parallel, len(chunks))
+
+            for chunk_idx, chunk in enumerate(chunks):
+                # Process chunk with limited parallelism
+                semaphore = asyncio.Semaphore(max_parallel)
+
+                async def process_with_semaphore(item, idx):
+                    async with semaphore:
+                        return await self._process_item_async(
+                            item, processor, self.config.max_retries
+                        )
+
+                tasks = [
+                    asyncio.create_task(process_with_semaphore(item, i))
+                    for i, item in enumerate(chunk)
+                ]
+
+                chunk_results = await asyncio.gather(*tasks)
+
+                for local_idx, (success, result, error) in enumerate(chunk_results):
+                    processed += 1
+                    global_idx = chunk_idx * self.config.chunk_size + local_idx
+
+                    if success:
+                        results.append(result)
+                        successful += 1
+                    else:
+                        errors.append({
+                            "index": global_idx,
+                            "item": items[global_idx],
+                            "error": str(error) if error else "skipped",
+                        })
+                        failed += 1
+
+                # Progress reporting
+                progress = self._calculate_progress(
+                    total, processed, successful, failed, skipped,
+                    start_time, chunk_idx + 1
+                )
+                self._report_progress(progress)
+
+                if self.config.fail_fast and failed > 0:
+                    break
+
+        # Final statistics
+        duration_ms = (time.time() - start_time) * 1000
+        items_per_second = processed / (duration_ms / 1000) if duration_ms > 0 else 0
+
+        return BatchResult(
+            total=total,
+            successful=successful,
+            failed=failed,
+            skipped=skipped,
+            results=results,
+            errors=errors,
+            duration_ms=duration_ms,
+            items_per_second=items_per_second,
+        )
+
+    def process(
+        self,
+        items: List[Any],
+        processor: Callable[[Any], Any],
+    ) -> BatchResult:
+        """Process items in batch (sync version)."""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(
+                    self.process_async(items, processor), loop
+                )
+                return future.result(timeout=self.config.timeout)
+            return asyncio.run(self.process_async(items, processor))
+        except Exception as e:
+            return BatchResult(
+                total=len(items),
+                successful=0,
+                failed=len(items),
+                skipped=0,
+                results=[],
+                errors=[{"error": str(e)}],
+                duration_ms=0,
+                items_per_second=0,
+            )
+
+    async def map_async(
+        self,
+        items: List[Any],
+        mapper: Callable[[Any], Any],
+    ) -> List[Any]:
+        """Map function over items, returning all results."""
+        result = await self.process_async(items, mapper)
+        return result.results
+
+    def map(
+        self,
+        items: List[Any],
+        mapper: Callable[[Any], Any],
+    ) -> List[Any]:
+        """Map function over items (sync version)."""
+        batch_result = self.process(items, mapper)
+        return batch_result.results
+
+    async def filter_async(
+        self,
+        items: List[Any],
+        predicate: Callable[[Any], bool],
+    ) -> List[Any]:
+        """Filter items using async predicate."""
+        async def filter_wrapper(item):
+            result = predicate(item)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return result, item
+
+        tasks = [filter_wrapper(item) for item in items]
+        results = await asyncio.gather(*tasks)
+        return [item for passed, item in results if passed]
+
+    def filter(
+        self,
+        items: List[Any],
+        predicate: Callable[[Any], bool],
+    ) -> List[Any]:
+        """Filter items (sync version)."""
+        return [item for item in items if predicate(item)]
+
+
+class BatchProcessor:
+    """Helper for creating batch processors with common configurations."""
+
+    @staticmethod
+    def small_jobs(config: Optional[BatchConfig] = None) -> BatchConfig:
+        """Configuration for small, quick jobs."""
+        return config or BatchConfig(
+            strategy=BatchStrategy.PARALLEL,
+            chunk_size=10,
+            max_parallel=8,
+            progress_interval=5,
+        )
+
+    @staticmethod
+    def large_jobs(config: Optional[BatchConfig] = None) -> BatchConfig:
+        """Configuration for large, long-running jobs."""
+        return config or BatchConfig(
+            strategy=BatchStrategy.CHUNKED_PARALLEL,
+            chunk_size=100,
+            max_parallel=4,
+            progress_interval=50,
+            fail_fast=False,
+        )
+
+    @staticmethod
+    def critical_jobs(config: Optional[BatchConfig] = None) -> BatchConfig:
+        """Configuration for critical jobs requiring all successes."""
+        return config or BatchConfig(
+            strategy=BatchStrategy.SEQUENTIAL,
+            max_retries=3,
+            fail_fast=True,
+            progress_interval=1,
+        )
