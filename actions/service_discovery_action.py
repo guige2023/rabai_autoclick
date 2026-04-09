@@ -1,314 +1,259 @@
-"""Service discovery action module for RabAI AutoClick.
+"""Service discovery and registry for API endpoints.
 
-Provides service discovery operations:
-- ServiceRegisterAction: Register service
-- ServiceDeregisterAction: Deregister service
-- ServiceDiscoverAction: Discover services
-- ServiceListAction: List registered services
-- ServiceHealthAction: Check service health
-- ServiceEndpointAction: Get service endpoints
-- ServiceWatchAction: Watch for changes
-- ServiceResolveAction: Resolve service name
+This module provides service discovery:
+- Service registration and deregistration
+- Health monitoring
+- Service lookup by name/tag
+- Load balancing integration
+
+Example:
+    >>> from actions.service_discovery_action import ServiceRegistry
+    >>> registry = ServiceRegistry()
+    >>> registry.register("user-service", "localhost:8001")
+    >>> endpoints = registry.discover("user-service")
 """
 
-import os
-import sys
-import time
-from typing import Any, Dict, List, Optional
+from __future__ import annotations
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+import time
+import threading
+import logging
+from typing import Any, Callable, Optional
+from dataclasses import dataclass, field
+from collections import defaultdict
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ServiceInstance:
+    """A service instance."""
+    id: str
+    name: str
+    url: str
+    port: int
+    host: str
+    tags: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    health_check_url: Optional[str] = None
+    registered_at: float = field(default_factory=time.time)
+    last_heartbeat: float = field(default_factory=time.time)
+    is_healthy: bool = True
 
 
 class ServiceRegistry:
-    """In-memory service registry."""
-    
-    _services: Dict[str, Dict[str, Any]] = {}
-    
-    @classmethod
-    def register(cls, name: str, host: str, port: int, metadata: Dict[str, Any] = None) -> None:
-        if name not in cls._services:
-            cls._services[name] = {"name": name, "instances": [], "metadata": {}}
-        cls._services[name]["instances"].append({
-            "host": host,
-            "port": port,
-            "registered_at": time.time(),
-            "healthy": True
-        })
-        if metadata:
-            cls._services[name]["metadata"].update(metadata)
-    
-    @classmethod
-    def deregister(cls, name: str, host: str = None, port: int = None) -> bool:
-        if name not in cls._services:
-            return False
-        if host and port:
-            cls._services[name]["instances"] = [
-                i for i in cls._services[name]["instances"]
-                if not (i["host"] == host and i["port"] == port)
-            ]
-        else:
-            cls._services[name]["instances"] = cls._services[name]["instances"][:-1]
-        return True
-    
-    @classmethod
-    def discover(cls, name: str) -> Optional[Dict[str, Any]]:
-        return cls._services.get(name)
-    
-    @classmethod
-    def list_all(cls) -> List[Dict[str, Any]]:
-        return list(cls._services.values())
-    
-    @classmethod
-    def update_health(cls, name: str, healthy: bool) -> None:
-        if name in cls._services:
-            for instance in cls._services[name]["instances"]:
-                instance["healthy"] = healthy
+    """Service registry for managing service instances.
+
+    Example:
+        >>> registry = ServiceRegistry()
+        >>> registry.register("api", "localhost", 8000)
+        >>> services = registry.discover("api")
+    """
+
+    def __init__(
+        self,
+        ttl: float = 30.0,
+        cleanup_interval: float = 10.0,
+    ) -> None:
+        self.ttl = ttl
+        self.cleanup_interval = cleanup_interval
+        self._services: dict[str, dict[str, ServiceInstance]] = defaultdict(dict)
+        self._lock = threading.RLock()
+        self._running = True
+        self._cleanup_thread: Optional[threading.Thread] = None
+        self._start_cleanup_thread()
+        logger.info("ServiceRegistry initialized")
+
+    def _start_cleanup_thread(self) -> None:
+        """Start background cleanup thread."""
+        def cleanup_loop() -> None:
+            while self._running:
+                time.sleep(self.cleanup_interval)
+                self._cleanup_expired()
+        self._cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True)
+        self._cleanup_thread.start()
+
+    def _cleanup_expired(self) -> None:
+        """Remove expired service instances."""
+        with self._lock:
+            now = time.time()
+            for service_name in list(self._services.keys()):
+                instances = self._services[service_name]
+                expired = [
+                    instance_id
+                    for instance_id, inst in instances.items()
+                    if now - inst.last_heartbeat > self.ttl
+                ]
+                for instance_id in expired:
+                    del instances[instance_id]
+                    logger.info(f"Removed expired instance: {instance_id}")
+
+    def register(
+        self,
+        name: str,
+        host: str,
+        port: int,
+        instance_id: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        health_check_url: Optional[str] = None,
+    ) -> ServiceInstance:
+        """Register a service instance.
+
+        Args:
+            name: Service name.
+            host: Service host.
+            port: Service port.
+            instance_id: Optional instance ID.
+            tags: Optional list of tags.
+            metadata: Optional metadata.
+            health_check_url: Optional health check URL.
+
+        Returns:
+            The registered ServiceInstance.
+        """
+        import uuid
+        instance = ServiceInstance(
+            id=instance_id or str(uuid.uuid4())[:8],
+            name=name,
+            url=f"http://{host}:{port}",
+            host=host,
+            port=port,
+            tags=tags or [],
+            metadata=metadata or {},
+            health_check_url=health_check_url,
+        )
+        with self._lock:
+            self._services[name][instance.id] = instance
+        logger.info(f"Registered service: {name} ({instance.url})")
+        return instance
+
+    def deregister(self, name: str, instance_id: str) -> bool:
+        """Deregister a service instance.
+
+        Args:
+            name: Service name.
+            instance_id: Instance ID.
+
+        Returns:
+            True if deregistered successfully.
+        """
+        with self._lock:
+            if name in self._services and instance_id in self._services[name]:
+                del self._services[name][instance_id]
+                logger.info(f"Deregistered service: {name}/{instance_id}")
+                return True
+        return False
+
+    def heartbeat(self, name: str, instance_id: str) -> bool:
+        """Send heartbeat for a service instance.
+
+        Args:
+            name: Service name.
+            instance_id: Instance ID.
+
+        Returns:
+            True if heartbeat was recorded.
+        """
+        with self._lock:
+            if name in self._services and instance_id in self._services[name]:
+                self._services[name][instance_id].last_heartbeat = time.time()
+                return True
+        return False
+
+    def discover(
+        self,
+        name: str,
+        tags: Optional[list[str]] = None,
+        healthy_only: bool = True,
+    ) -> list[ServiceInstance]:
+        """Discover service instances.
+
+        Args:
+            name: Service name to discover.
+            tags: Optional tags to filter by.
+            healthy_only: Only return healthy instances.
+
+        Returns:
+            List of matching ServiceInstances.
+        """
+        with self._lock:
+            if name not in self._services:
+                return []
+            instances = list(self._services[name].values())
+            if healthy_only:
+                instances = [i for i in instances if i.is_healthy]
+            if tags:
+                instances = [
+                    i for i in instances
+                    if any(tag in i.tags for tag in tags)
+                ]
+            return instances
+
+    def set_health(self, name: str, instance_id: str, is_healthy: bool) -> bool:
+        """Set health status for a service instance."""
+        with self._lock:
+            if name in self._services and instance_id in self._services[name]:
+                self._services[name][instance_id].is_healthy = is_healthy
+                return True
+        return False
+
+    def get_all_services(self) -> dict[str, list[ServiceInstance]]:
+        """Get all registered services."""
+        with self._lock:
+            return {
+                name: list(instances.values())
+                for name, instances in self._services.items()
+            }
+
+    def stop(self) -> None:
+        """Stop the registry and cleanup thread."""
+        self._running = False
+        if self._cleanup_thread:
+            self._cleanup_thread.join(timeout=1.0)
+        logger.info("ServiceRegistry stopped")
 
 
-class ServiceRegisterAction(BaseAction):
-    """Register a service."""
-    action_type = "service_register"
-    display_name = "注册服务"
-    description = "注册服务"
+class ServiceDiscovery:
+    """Client-side service discovery with caching."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "")
-            host = params.get("host", "localhost")
-            port = params.get("port", 8080)
-            metadata = params.get("metadata", {})
-            
-            if not name:
-                return ActionResult(success=False, message="name required")
-            
-            ServiceRegistry.register(name, host, port, metadata)
-            
-            return ActionResult(
-                success=True,
-                message=f"Registered service: {name} at {host}:{port}",
-                data={"name": name, "host": host, "port": port}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Service register failed: {str(e)}")
+    def __init__(
+        self,
+        registry: ServiceRegistry,
+        cache_ttl: float = 10.0,
+    ) -> None:
+        self.registry = registry
+        self.cache_ttl = cache_ttl
+        self._cache: dict[str, tuple[list[ServiceInstance], float]] = {}
+        self._lock = threading.RLock()
 
+    def discover(
+        self,
+        name: str,
+        tags: Optional[list[str]] = None,
+        use_cache: bool = True,
+    ) -> list[ServiceInstance]:
+        """Discover service with caching.
 
-class ServiceDeregisterAction(BaseAction):
-    """Deregister a service."""
-    action_type = "service_deregister"
-    display_name = "注销服务"
-    description = "注销服务"
+        Args:
+            name: Service name.
+            tags: Optional tags filter.
+            use_cache: Whether to use cached results.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "")
-            host = params.get("host")
-            port = params.get("port")
-            
-            if not name:
-                return ActionResult(success=False, message="name required")
-            
-            deregistered = ServiceRegistry.deregister(name, host, port)
-            
-            return ActionResult(
-                success=deregistered,
-                message=f"Deregistered service: {name}" if deregistered else f"Service not found: {name}",
-                data={"name": name, "deregistered": deregistered}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Service deregister failed: {str(e)}")
+        Returns:
+            List of ServiceInstances.
+        """
+        cache_key = f"{name}:{','.join(tags or [])}"
+        with self._lock:
+            if use_cache and cache_key in self._cache:
+                instances, cached_at = self._cache[cache_key]
+                if time.time() - cached_at < self.cache_ttl:
+                    return instances
+            instances = self.registry.discover(name, tags)
+            self._cache[cache_key] = (instances, time.time())
+            return instances
 
-
-class ServiceDiscoverAction(BaseAction):
-    """Discover a service."""
-    action_type = "service_discover"
-    display_name = "发现服务"
-    description = "发现服务"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "")
-            
-            if not name:
-                return ActionResult(success=False, message="name required")
-            
-            service = ServiceRegistry.discover(name)
-            
-            if not service:
-                return ActionResult(success=False, message=f"Service not found: {name}")
-            
-            healthy_instances = [i for i in service["instances"] if i.get("healthy", True)]
-            
-            return ActionResult(
-                success=True,
-                message=f"Discovered service: {name} with {len(healthy_instances)} healthy instances",
-                data={
-                    "name": name,
-                    "service": service,
-                    "healthy_count": len(healthy_instances),
-                    "total_count": len(service["instances"])
-                }
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Service discover failed: {str(e)}")
-
-
-class ServiceListAction(BaseAction):
-    """List all registered services."""
-    action_type = "service_list"
-    display_name = "服务列表"
-    description = "列出所有服务"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            services = ServiceRegistry.list_all()
-            
-            return ActionResult(
-                success=True,
-                message=f"Found {len(services)} registered services",
-                data={"services": services, "count": len(services)}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Service list failed: {str(e)}")
-
-
-class ServiceHealthAction(BaseAction):
-    """Check service health."""
-    action_type = "service_health"
-    display_name = "服务健康检查"
-    description = "检查服务健康状态"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "")
-            
-            if not name:
-                return ActionResult(success=False, message="name required")
-            
-            service = ServiceRegistry.discover(name)
-            if not service:
-                return ActionResult(success=False, message=f"Service not found: {name}")
-            
-            healthy = sum(1 for i in service["instances"] if i.get("healthy", True))
-            total = len(service["instances"])
-            
-            health_status = "healthy" if healthy == total else "degraded" if healthy > 0 else "unhealthy"
-            
-            return ActionResult(
-                success=True,
-                message=f"Service {name} health: {health_status}",
-                data={
-                    "name": name,
-                    "healthy_count": healthy,
-                    "total_count": total,
-                    "health_status": health_status
-                }
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Service health check failed: {str(e)}")
-
-
-class ServiceEndpointAction(BaseAction):
-    """Get service endpoints."""
-    action_type = "service_endpoint"
-    display_name = "获取服务端点"
-    description = "获取服务端点"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "")
-            
-            if not name:
-                return ActionResult(success=False, message="name required")
-            
-            service = ServiceRegistry.discover(name)
-            if not service:
-                return ActionResult(success=False, message=f"Service not found: {name}")
-            
-            endpoints = [f"http://{i['host']}:{i['port']}" for i in service["instances"]]
-            
-            return ActionResult(
-                success=True,
-                message=f"Endpoints for {name}: {len(endpoints)}",
-                data={"name": name, "endpoints": endpoints}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Service endpoint failed: {str(e)}")
-
-
-class ServiceWatchAction(BaseAction):
-    """Watch for service changes."""
-    action_type = "service_watch"
-    display_name = "监控服务"
-    description = "监控服务变化"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            names = params.get("names", [])
-            duration = params.get("duration", 60)
-            
-            if not names:
-                names = list(ServiceRegistry._services.keys())
-            
-            start_time = time.time()
-            changes = []
-            
-            while time.time() - start_time < duration:
-                for name in names:
-                    service = ServiceRegistry.discover(name)
-                    if service:
-                        pass
-                time.sleep(1)
-            
-            return ActionResult(
-                success=True,
-                message=f"Watched {len(names)} services for {duration}s",
-                data={"names": names, "duration": duration, "changes": changes}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Service watch failed: {str(e)}")
-
-
-class ServiceResolveAction(BaseAction):
-    """Resolve service to endpoint."""
-    action_type = "service_resolve"
-    display_name = "解析服务"
-    description = "解析服务名称到端点"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "")
-            strategy = params.get("strategy", "random")
-            
-            if not name:
-                return ActionResult(success=False, message="name required")
-            
-            service = ServiceRegistry.discover(name)
-            if not service:
-                return ActionResult(success=False, message=f"Service not found: {name}")
-            
-            instances = [i for i in service["instances"] if i.get("healthy", True)]
-            
-            if not instances:
-                return ActionResult(success=False, message=f"No healthy instances for {name}")
-            
-            if strategy == "random":
-                import random
-                instance = random.choice(instances)
-            elif strategy == "round_robin":
-                instance = instances[0]
-            elif strategy == "least_connections":
-                instance = instances[0]
-            else:
-                instance = instances[0]
-            
-            endpoint = f"http://{instance['host']}:{instance['port']}"
-            
-            return ActionResult(
-                success=True,
-                message=f"Resolved {name} to {endpoint}",
-                data={"name": name, "endpoint": endpoint, "strategy": strategy}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Service resolve failed: {str(e)}")
+    def clear_cache(self) -> None:
+        """Clear the discovery cache."""
+        with self._lock:
+            self._cache.clear()
