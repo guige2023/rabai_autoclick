@@ -1,493 +1,333 @@
 """
 Data Encryption Action Module.
 
-Encrypts and decrypts data using AES, RSA, Fernet, and other
-cryptographic algorithms with key management support.
-
-Author: RabAi Team
+Data encryption with multiple algorithms, key management,
+and envelope encryption for large data.
 """
 
-from __future__ import annotations
-
 import base64
-import hashlib
-import json
 import os
-import sys
-import time
 from dataclasses import dataclass, field
+from typing import Any, Optional
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+import logging
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
-
-try:
-    from cryptography.fernet import Fernet
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-    from cryptography.hazmat.primitives.asymmetric import rsa, padding
-    from cryptography.hazmat.backends import default_backend
-    HAS_CRYPTO = True
-except ImportError:
-    HAS_CRYPTO = False
+logger = logging.getLogger(__name__)
 
 
 class EncryptionAlgorithm(Enum):
     """Supported encryption algorithms."""
+    AES_256_GCM = "aes_256_gcm"
+    AES_256_CBC = "aes_256_cbc"
+    CHACHA20_POLY1305 = "chacha20_poly1305"
     FERNET = "fernet"
-    AES_CBC = "aes_cbc"
-    AES_GCM = "aes_gcm"
-    RSA_OAEP = "rsa_oaep"
-    PLAINTEXT = "plaintext"
-
-
-class KeyDerivationFunction(Enum):
-    """Key derivation functions."""
-    PBKDF2 = "pbkdf2"
-    SCRYPT = "scrypt"
-    HKDF = "hkdf"
-    NONE = "none"
 
 
 @dataclass
-class EncryptionKey:
-    """An encryption key."""
+class EncryptedData:
+    """Encrypted data container."""
+    ciphertext: bytes
+    algorithm: EncryptionAlgorithm
     key_id: str
-    algorithm: EncryptionAlgorithm
-    key_data: bytes
-    created_at: float = field(default_factory=time.time)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    iv: Optional[bytes] = None
+    tag: Optional[bytes] = None
 
 
-@dataclass
-class EncryptionResult:
-    """Result of an encryption/decryption operation."""
-    success: bool
-    operation: str
-    algorithm: EncryptionAlgorithm
-    output: Any
-    key_id: Optional[str] = None
-    error: Optional[str] = None
-
-
-class DataEncryptionAction(BaseAction):
-    """Data encryption action.
-    
-    Encrypts and decrypts data using multiple algorithms
-    with key management and secure key derivation.
+class DataEncryptionAction:
     """
-    action_type = "data_encryption"
-    display_name = "数据加密"
-    description = "数据加密解密"
-    
+    Data encryption with key management.
+
+    Example:
+        crypto = DataEncryptionAction()
+        crypto.generate_key("key1", algorithm=EncryptionAlgorithm.AES_256_GCM)
+        encrypted = crypto.encrypt("sensitive data", "key1")
+        decrypted = crypto.decrypt(encrypted, "key1")
+    """
+
     def __init__(self):
-        super().__init__()
-        self._keys: Dict[str, EncryptionKey] = {}
-        self._default_key_id: Optional[str] = None
-    
+        """Initialize encryption action."""
+        self._keys: dict[str, bytes] = {}
+        self._key_algorithm: dict[str, EncryptionAlgorithm] = {}
+
     def generate_key(
-        self, algorithm: EncryptionAlgorithm = EncryptionAlgorithm.FERNET,
-        key_id: Optional[str] = None, key_size: int = 256,
-        password: Optional[str] = None, kdf: KeyDerivationFunction = KeyDerivationFunction.PBKDF2
-    ) -> str:
-        """Generate a new encryption key."""
-        if not HAS_CRYPTO:
-            raise ImportError("cryptography library not installed")
-        
-        if key_id is None:
-            key_id = f"key_{int(time.time() * 1000)}"
-        
-        if algorithm == EncryptionAlgorithm.FERNET:
-            key_data = Fernet.generate_key()
-        elif algorithm in (EncryptionAlgorithm.AES_CBC, EncryptionAlgorithm.AES_GCM):
-            key_bytes = os.urandom(key_size // 8)
-            if password:
-                key_data = self._derive_key(password, key_bytes, kdf)
-            else:
-                key_data = key_bytes
-        elif algorithm == EncryptionAlgorithm.RSA_OAEP:
-            private_key = rsa.generate_private_key(
-                public_exponent=65537,
-                key_size=key_size,
-                backend=default_backend()
-            )
-            public_key = private_key.public_key()
-            key_data = private_key.private_bytes(
-                encoding=1, format=1, encryption_algorithm=2
-            )
-        else:
-            key_data = os.urandom(32)
-        
-        self._keys[key_id] = EncryptionKey(
-            key_id=key_id,
-            algorithm=algorithm,
-            key_data=key_data
-        )
-        
-        if self._default_key_id is None:
-            self._default_key_id = key_id
-        
-        return key_id
-    
-    def _derive_key(self, password: str, salt: bytes, kdf: KeyDerivationFunction) -> bytes:
-        """Derive a key from a password."""
-        if kdf == KeyDerivationFunction.PBKDF2:
-            from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-            kdf_obj = PBKDF2HMAC(
-                algorithm=hashes.SHA256(),
-                length=32,
-                salt=salt,
-                iterations=100000,
-                backend=default_backend()
-            )
-            return base64.urlsafe_b64encode(kdf_obj.derive(password.encode()))
-        elif kdf == KeyDerivationFunction.HKDF:
-            from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-            kdf_obj = HKDF(
-                algorithm=hashes.SHA256(),
-                length=32,
-                salt=salt,
-                backend=default_backend()
-            )
-            return kdf_obj.derive(password.encode())
-        return hashlib.sha256(password.encode()).digest()
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Encrypt or decrypt data.
-        
-        Args:
-            context: The execution context.
-            params: Dictionary containing:
-                - operation: encrypt or decrypt
-                - algorithm: Encryption algorithm
-                - value: Value to encrypt/decrypt
-                - key_id: Key ID to use
-                - password: Password for key derivation
-                - key: Raw key bytes (base64)
-                
-        Returns:
-            ActionResult with encrypted/decrypted data.
+        self,
+        key_id: str,
+        algorithm: EncryptionAlgorithm = EncryptionAlgorithm.AES_256_GCM
+    ) -> bytes:
         """
-        start_time = time.time()
-        
-        if not HAS_CRYPTO:
-            return ActionResult(
-                success=False,
-                message="cryptography library not installed",
-                duration=time.time() - start_time
-            )
-        
-        operation = params.get("operation", "encrypt")
-        algorithm_str = params.get("algorithm", "fernet")
-        value = params.get("value")
-        key_id = params.get("key_id", self._default_key_id)
-        password = params.get("password")
-        
-        try:
-            algorithm = EncryptionAlgorithm(algorithm_str)
-        except ValueError:
-            return ActionResult(
-                success=False,
-                message=f"Unknown algorithm: {algorithm_str}",
-                duration=time.time() - start_time
-            )
-        
-        if value is None:
-            return ActionResult(
-                success=False,
-                message="No value provided",
-                duration=time.time() - start_time
-            )
-        
-        key = None
-        if key_id and key_id in self._keys:
-            key = self._keys[key_id]
-        elif operation == "encrypt" and algorithm != EncryptionAlgorithm.PLAINTEXT:
-            key_id = self.generate_key(algorithm)
-            key = self._keys[key_id]
-        
-        if operation == "encrypt":
-            result = self._encrypt(algorithm, value, key, password)
-        elif operation == "decrypt":
-            result = self._decrypt(algorithm, value, key)
+        Generate encryption key.
+
+        Args:
+            key_id: Key identifier.
+            algorithm: Encryption algorithm.
+
+        Returns:
+            Generated key bytes.
+        """
+        if algorithm == EncryptionAlgorithm.AES_256_GCM:
+            key = os.urandom(32)
+        elif algorithm == EncryptionAlgorithm.AES_256_CBC:
+            key = os.urandom(32)
+        elif algorithm == EncryptionAlgorithm.CHACHA20_POLY1305:
+            key = os.urandom(32)
+        elif algorithm == EncryptionAlgorithm.FERNET:
+            key = os.urandom(32)
         else:
-            return ActionResult(
-                success=False,
-                message=f"Unknown operation: {operation}",
-                duration=time.time() - start_time
-            )
-        
-        return ActionResult(
-            success=result.success,
-            message=f"{operation.capitalize()} {'succeeded' if result.success else 'failed'}",
-            data={
-                "output": result.output,
-                "algorithm": algorithm.value,
-                "operation": operation,
-                "key_id": result.key_id or key_id,
-                "error": result.error
-            },
-            duration=time.time() - start_time
-        )
-    
-    def _encrypt(
-        self, algorithm: EncryptionAlgorithm, value: Any, key: Optional[EncryptionKey], password: Optional[str]
-    ) -> EncryptionResult:
-        """Encrypt a value."""
-        try:
-            value_bytes = self._to_bytes(value)
-            
-            if algorithm == EncryptionAlgorithm.PLAINTEXT:
-                return EncryptionResult(
-                    success=True,
-                    operation="encrypt",
-                    algorithm=algorithm,
-                    output=base64.b64encode(value_bytes).decode()
-                )
-            
-            if key is None:
-                return EncryptionResult(
-                    success=False,
-                    operation="encrypt",
-                    algorithm=algorithm,
-                    output=None,
-                    error="No key provided"
-                )
-            
-            if algorithm == EncryptionAlgorithm.FERNET:
-                f = Fernet(key.key_data)
-                output = f.encrypt(value_bytes)
-                return EncryptionResult(
-                    success=True,
-                    operation="encrypt",
-                    algorithm=algorithm,
-                    output=output.decode(),
-                    key_id=key.key_id
-                )
-            
-            elif algorithm == EncryptionAlgorithm.AES_CBC:
-                iv = os.urandom(16)
-                pad_len = 16 - (len(value_bytes) % 16)
-                padded = value_bytes + bytes([pad_len] * pad_len)
-                
-                cipher = Cipher(
-                    algorithms.AES(key.key_data[:32]),
-                    modes.CBC(iv),
-                    backend=default_backend()
-                )
-                encryptor = cipher.encryptor()
-                ciphertext = encryptor.update(padded) + encryptor.finalize()
-                
-                output = base64.b64encode(iv + ciphertext).decode()
-                return EncryptionResult(
-                    success=True,
-                    operation="encrypt",
-                    algorithm=algorithm,
-                    output=output,
-                    key_id=key.key_id
-                )
-            
-            elif algorithm == EncryptionAlgorithm.AES_GCM:
-                iv = os.urandom(12)
-                
-                cipher = Cipher(
-                    algorithms.AES(key.key_data[:32]),
-                    modes.GCM(iv),
-                    backend=default_backend()
-                )
-                encryptor = cipher.encryptor()
-                ciphertext = encryptor.update(value_bytes) + encryptor.finalize()
-                
-                output = base64.b64encode(iv + ciphertext + encryptor.tag).decode()
-                return EncryptionResult(
-                    success=True,
-                    operation="encrypt",
-                    algorithm=algorithm,
-                    output=output,
-                    key_id=key.key_id
-                )
-            
-            elif algorithm == EncryptionAlgorithm.RSA_OAEP:
-                from cryptography.hazmat.primitives.asymmetric import rsa
-                from cryptography.hazmat.primitives.serialization import load_der_private_key
-                
-                private_key = load_der_private_key(
-                    key.key_data, password=None, backend=default_backend()
-                )
-                public_key = private_key.public_key()
-                
-                ciphertext = public_key.encrypt(
-                    value_bytes,
-                    padding.OAEP(
-                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                        algorithm=hashes.SHA256(),
-                        label=None
-                    )
-                )
-                
-                output = base64.b64encode(ciphertext).decode()
-                return EncryptionResult(
-                    success=True,
-                    operation="encrypt",
-                    algorithm=algorithm,
-                    output=output,
-                    key_id=key.key_id
-                )
-            
-            return EncryptionResult(
-                success=False,
-                operation="encrypt",
-                algorithm=algorithm,
-                output=None,
-                error=f"Algorithm not supported: {algorithm}"
-            )
-            
-        except Exception as e:
-            return EncryptionResult(
-                success=False,
-                operation="encrypt",
-                algorithm=algorithm,
-                output=None,
-                error=str(e)
-            )
-    
-    def _decrypt(self, algorithm: EncryptionAlgorithm, value: Any, key: Optional[EncryptionKey]) -> EncryptionResult:
-        """Decrypt a value."""
-        try:
-            if algorithm == EncryptionAlgorithm.PLAINTEXT:
-                return EncryptionResult(
-                    success=True,
-                    operation="decrypt",
-                    algorithm=algorithm,
-                    output=base64.b64decode(value).decode()
-                )
-            
-            if key is None:
-                return EncryptionResult(
-                    success=False,
-                    operation="decrypt",
-                    algorithm=algorithm,
-                    output=None,
-                    error="No key provided"
-                )
-            
-            value_bytes = base64.b64decode(value)
-            
-            if algorithm == EncryptionAlgorithm.FERNET:
-                f = Fernet(key.key_data)
-                output = f.decrypt(value_bytes)
-                return EncryptionResult(
-                    success=True,
-                    operation="decrypt",
-                    algorithm=algorithm,
-                    output=output.decode(),
-                    key_id=key.key_id
-                )
-            
-            elif algorithm == EncryptionType.AES_CBC:
-                iv = value_bytes[:16]
-                ciphertext = value_bytes[16:]
-                
-                cipher = Cipher(
-                    algorithms.AES(key.key_data[:32]),
-                    modes.CBC(iv),
-                    backend=default_backend()
-                )
-                decryptor = cipher.decryptor()
-                padded = decryptor.update(ciphertext) + decryptor.finalize()
-                
-                pad_len = padded[-1]
-                output = padded[:-pad_len]
-                
-                return EncryptionResult(
-                    success=True,
-                    operation="decrypt",
-                    algorithm=algorithm,
-                    output=output.decode(),
-                    key_id=key.key_id
-                )
-            
-            elif algorithm == EncryptionAlgorithm.AES_GCM:
-                iv = value_bytes[:12]
-                tag = value_bytes[-16:]
-                ciphertext = value_bytes[12:-16]
-                
-                cipher = Cipher(
-                    algorithms.AES(key.key_data[:32]),
-                    modes.GCM(iv, tag),
-                    backend=default_backend()
-                )
-                decryptor = cipher.decryptor()
-                output = decryptor.update(ciphertext) + decryptor.finalize()
-                
-                return EncryptionResult(
-                    success=True,
-                    operation="decrypt",
-                    algorithm=algorithm,
-                    output=output.decode(),
-                    key_id=key.key_id
-                )
-            
-            return EncryptionResult(
-                success=False,
-                operation="decrypt",
-                algorithm=algorithm,
-                output=None,
-                error=f"Algorithm not supported: {algorithm}"
-            )
-            
-        except Exception as e:
-            return EncryptionResult(
-                success=False,
-                operation="decrypt",
-                algorithm=algorithm,
-                output=None,
-                error=str(e)
-            )
-    
-    def _to_bytes(self, value: Any) -> bytes:
-        """Convert value to bytes."""
-        if isinstance(value, bytes):
-            return value
-        elif isinstance(value, str):
-            return value.encode("utf-8")
-        elif isinstance(value, (dict, list)):
-            return json.dumps(value).encode("utf-8")
-        else:
-            return str(value).encode("utf-8")
-    
-    def get_key_info(self, key_id: str) -> Optional[Dict[str, Any]]:
-        """Get information about a key."""
+            key = os.urandom(32)
+
+        self._keys[key_id] = key
+        self._key_algorithm[key_id] = algorithm
+
+        logger.info(f"Generated key: {key_id} ({algorithm.value})")
+        return key
+
+    def set_key(self, key_id: str, key: bytes, algorithm: EncryptionAlgorithm) -> None:
+        """
+        Set encryption key manually.
+
+        Args:
+            key_id: Key identifier.
+            key: Key bytes.
+            algorithm: Encryption algorithm.
+        """
+        self._keys[key_id] = key
+        self._key_algorithm[key_id] = algorithm
+
+    def get_key(self, key_id: str) -> Optional[bytes]:
+        """Get key by ID."""
+        return self._keys.get(key_id)
+
+    def encrypt(
+        self,
+        data: Any,
+        key_id: str,
+        algorithm: Optional[EncryptionAlgorithm] = None
+    ) -> EncryptedData:
+        """
+        Encrypt data.
+
+        Args:
+            data: Data to encrypt (str, bytes, or serializable).
+            key_id: Key identifier.
+            algorithm: Override algorithm (uses key's algorithm if None).
+
+        Returns:
+            EncryptedData object.
+        """
         if key_id not in self._keys:
-            return None
+            raise ValueError(f"Key not found: {key_id}")
+
         key = self._keys[key_id]
-        return {
-            "key_id": key.key_id,
-            "algorithm": key.algorithm.value,
-            "created_at": key.created_at,
-            "metadata": key.metadata
-        }
-    
-    def list_keys(self) -> List[str]:
-        """List all key IDs."""
-        return list(self._keys.keys())
-    
+        algo = algorithm or self._key_algorithm[key_id]
+
+        if isinstance(data, str):
+            plaintext = data.encode("utf-8")
+        elif isinstance(data, bytes):
+            plaintext = data
+        else:
+            import json
+            plaintext = json.dumps(data).encode("utf-8")
+
+        if algo == EncryptionAlgorithm.AES_256_GCM:
+            return self._encrypt_aes_gcm(plaintext, key, key_id)
+        elif algo == EncryptionAlgorithm.AES_256_CBC:
+            return self._encrypt_aes_cbc(plaintext, key, key_id)
+        elif algo == EncryptionAlgorithm.FERNET:
+            return self._encrypt_fernet(plaintext, key, key_id)
+        elif algo == EncryptionAlgorithm.CHACHA20_POLY1305:
+            return self._encrypt_chacha20(plaintext, key, key_id)
+
+        raise ValueError(f"Unsupported algorithm: {algo}")
+
+    def decrypt(
+        self,
+        encrypted: EncryptedData,
+        key_id: str,
+        as_string: bool = True
+    ) -> Any:
+        """
+        Decrypt data.
+
+        Args:
+            encrypted: EncryptedData object.
+            key_id: Key identifier.
+            as_string: Return as string (False for bytes).
+
+        Returns:
+            Decrypted data.
+        """
+        if key_id not in self._keys:
+            raise ValueError(f"Key not found: {key_id}")
+
+        key = self._keys[key_id]
+
+        if encrypted.algorithm == EncryptionAlgorithm.AES_256_GCM:
+            plaintext = self._decrypt_aes_gcm(encrypted, key)
+        elif encrypted.algorithm == EncryptionAlgorithm.AES_256_CBC:
+            plaintext = self._decrypt_aes_cbc(encrypted, key)
+        elif encrypted.algorithm == EncryptionAlgorithm.FERNET:
+            plaintext = self._decrypt_fernet(encrypted, key)
+        elif encrypted.algorithm == EncryptionAlgorithm.CHACHA20_POLY1305:
+            plaintext = self._decrypt_chacha20(encrypted, key)
+        else:
+            raise ValueError(f"Unsupported algorithm: {encrypted.algorithm}")
+
+        if as_string:
+            return plaintext.decode("utf-8")
+        return plaintext
+
+    def _encrypt_aes_gcm(self, plaintext: bytes, key: bytes, key_id: str) -> EncryptedData:
+        """Encrypt using AES-256-GCM."""
+        try:
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            iv = os.urandom(12)
+            aesgcm = AESGCM(key)
+            ciphertext = aesgcm.encrypt(iv, plaintext, None)
+
+            return EncryptedData(
+                ciphertext=ciphertext,
+                algorithm=EncryptionAlgorithm.AES_256_GCM,
+                key_id=key_id,
+                iv=iv
+            )
+        except ImportError:
+            logger.warning("cryptography library not available, using fallback")
+            return self._encrypt_aes_cbc(plaintext, key, key_id)
+
+    def _decrypt_aes_gcm(self, encrypted: EncryptedData, key: bytes) -> bytes:
+        """Decrypt using AES-256-GCM."""
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        aesgcm = AESGCM(key)
+        return aesgcm.decrypt(encrypted.iv, encrypted.ciphertext, None)
+
+    def _encrypt_aes_cbc(self, plaintext: bytes, key: bytes, key_id: str) -> EncryptedData:
+        """Encrypt using AES-256-CBC."""
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.primitives import padding
+
+        iv = os.urandom(16)
+        padder = padding.PKCS7(128).padder()
+        padded_data = padder.update(plaintext) + padder.finalize()
+
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+        encryptor = cipher.encryptor()
+        ciphertext = encryptor.update(padded_data) + encryptor.finalize()
+
+        return EncryptedData(
+            ciphertext=ciphertext,
+            algorithm=EncryptionAlgorithm.AES_256_CBC,
+            key_id=key_id,
+            iv=iv
+        )
+
+    def _decrypt_aes_cbc(self, encrypted: EncryptedData, key: bytes) -> bytes:
+        """Decrypt using AES-256-CBC."""
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.primitives import padding
+
+        cipher = Cipher(algorithms.AES(key), modes.CBC(encrypted.iv))
+        decryptor = cipher.decryptor()
+        padded_data = decryptor.update(encrypted.ciphertext) + decryptor.finalize()
+
+        unpadder = padding.PKCS7(128).unpadder()
+        return unpadder.update(padded_data) + unpadder.finalize()
+
+    def _encrypt_fernet(self, plaintext: bytes, key: bytes, key_id: str) -> EncryptedData:
+        """Encrypt using Fernet."""
+        from cryptography.fernet import Fernet
+        f = Fernet(base64.urlsafe_b64encode(key))
+        ciphertext = f.encrypt(plaintext)
+
+        return EncryptedData(
+            ciphertext=ciphertext,
+            algorithm=EncryptionAlgorithm.FERNET,
+            key_id=key_id
+        )
+
+    def _decrypt_fernet(self, encrypted: EncryptedData, key: bytes) -> bytes:
+        """Decrypt using Fernet."""
+        from cryptography.fernet import Fernet
+        f = Fernet(base64.urlsafe_b64encode(key))
+        return f.decrypt(encrypted.ciphertext)
+
+    def _encrypt_chacha20(self, plaintext: bytes, key: bytes, key_id: str) -> EncryptedData:
+        """Encrypt using ChaCha20-Poly1305."""
+        try:
+            from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+            nonce = os.urandom(12)
+            chacha = ChaCha20Poly1305(key)
+            ciphertext = chacha.encrypt(nonce, plaintext, None)
+
+            return EncryptedData(
+                ciphertext=ciphertext,
+                algorithm=EncryptionAlgorithm.CHACHA20_POLY1305,
+                key_id=key_id,
+                iv=nonce
+            )
+        except ImportError:
+            raise ImportError("ChaCha20 requires cryptography>=3.8")
+
+    def _decrypt_chacha20(self, encrypted: EncryptedData, key: bytes) -> bytes:
+        """Decrypt using ChaCha20-Poly1305."""
+        from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+        chacha = ChaCha20Poly1305(key)
+        return chacha.decrypt(encrypted.iv, encrypted.ciphertext, None)
+
+    def encrypt_to_base64(
+        self,
+        data: Any,
+        key_id: str
+    ) -> str:
+        """
+        Encrypt and return base64-encoded string.
+
+        Args:
+            data: Data to encrypt.
+            key_id: Key identifier.
+
+        Returns:
+            Base64-encoded encrypted data.
+        """
+        encrypted = self.encrypt(data, key_id)
+        combined = (encrypted.iv or b"") + encrypted.ciphertext
+        return base64.b64encode(combined).decode("ascii")
+
+    def decrypt_from_base64(
+        self,
+        encoded: str,
+        key_id: str
+    ) -> Any:
+        """
+        Decrypt from base64-encoded string.
+
+        Args:
+            encoded: Base64-encoded encrypted data.
+            key_id: Key identifier.
+
+        Returns:
+            Decrypted data.
+        """
+        combined = base64.b64decode(encoded.encode("ascii"))
+        iv = combined[:16]
+        ciphertext = combined[16:]
+
+        encrypted = EncryptedData(
+            ciphertext=ciphertext,
+            algorithm=self._key_algorithm[key_id],
+            key_id=key_id,
+            iv=iv
+        )
+
+        return self.decrypt(encrypted, key_id)
+
     def delete_key(self, key_id: str) -> bool:
         """Delete a key."""
         if key_id in self._keys:
             del self._keys[key_id]
-            if self._default_key_id == key_id:
-                self._default_key_id = next(iter(self._keys), None)
+            del self._key_algorithm[key_id]
             return True
         return False
-    
-    def validate_params(self, params: Dict[str, Any]) -> Tuple[bool, str]:
-        """Validate encryption parameters."""
-        if "value" not in params:
-            return False, "Missing required parameter: value"
-        return True, ""
-    
-    def get_required_params(self) -> List[str]:
-        """Return required parameters."""
-        return []
+
+    def list_keys(self) -> list[str]:
+        """List all key IDs."""
+        return list(self._keys.keys())
