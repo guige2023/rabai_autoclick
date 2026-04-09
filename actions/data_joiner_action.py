@@ -1,325 +1,443 @@
-"""Data joining and relational operations.
+"""
+Data Joiner Action Module.
 
-This module provides join operations:
-- Inner, left, right, full joins
-- Lookup operations
-- Union and intersection
-- Key-based merging
+Provides SQL-style join operations for data sources
+including inner, left, right, full, and cross joins.
 
-Example:
-    >>> from actions.data_joiner_action import join, merge
-    >>> result = join(orders, customers, on="customer_id", how="left")
+Author: rabai_autoclick team
 """
 
-from __future__ import annotations
-
 import logging
-from typing import Any, Optional, Callable
-from collections import defaultdict
+from typing import (
+    Optional, Dict, Any, List, Callable, Union,
+    Tuple, TypeVar
+)
+from dataclasses import dataclass, field
+from enum import Enum
+from itertools import product
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar("T")
 
-class JoinType:
-    """Join type constants."""
+
+class JoinType(Enum):
+    """Join types supported."""
     INNER = "inner"
     LEFT = "left"
     RIGHT = "right"
     FULL = "full"
     CROSS = "cross"
+    LEFT_ANTI = "left_anti"
+    RIGHT_ANTI = "right_anti"
 
 
-def join(
-    left: list[dict[str, Any]],
-    right: list[dict[str, Any]],
-    on: Optional[str] = None,
-    left_on: Optional[str] = None,
-    right_on: Optional[str] = None,
-    how: str = JoinType.INNER,
-    suffix_left: str = "_x",
-    suffix_right: str = "_y",
-) -> list[dict[str, Any]]:
-    """Join two collections.
+@dataclass
+class JoinConfig:
+    """Configuration for join operations."""
+    join_type: JoinType = JoinType.INNER
+    left_key: Union[str, Callable] = "id"
+    right_key: Union[str, Callable] = "id"
+    left_suffix: str = ""
+    right_suffix: str = "_right"
+    how: Optional[str] = None
+    validate: bool = True
 
-    Args:
-        left: Left collection.
-        right: Right collection.
-        on: Field to join on (same name in both).
-        left_on: Field in left collection.
-        right_on: Field in right collection.
-        how: Join type (inner, left, right, full, cross).
-        suffix_left: Suffix for conflicting left fields.
-        suffix_right: Suffix for conflicting right fields.
 
-    Returns:
-        Joined collection.
+@dataclass
+class DataSource:
+    """Represents a data source for joining."""
+    data: List[Dict[str, Any]]
+    alias: Optional[str] = None
+    key_field: Optional[str] = None
+
+    @property
+    def size(self) -> int:
+        """Get number of records."""
+        return len(self.data)
+
+
+class DataJoinerAction:
     """
-    left_key = left_on or on
-    right_key = right_on or on
-    if how == JoinType.CROSS:
-        return _cross_join(left, right)
-    if not left_key or not right_key:
-        raise ValueError("Must specify join key(s)")
-    if how == JoinType.INNER:
-        return _inner_join(left, right, left_key, right_key, suffix_left, suffix_right)
-    elif how == JoinType.LEFT:
-        return _left_join(left, right, left_key, right_key, suffix_left, suffix_right)
-    elif how == JoinType.RIGHT:
-        return _right_join(left, right, left_key, right_key, suffix_left, suffix_right)
-    elif how == JoinType.FULL:
-        return _full_join(left, right, left_key, right_key, suffix_left, suffix_right)
-    return []
+    SQL-Style Join Operations.
 
+    Provides various join types for combining data from
+    multiple sources with support for complex key functions.
 
-def _inner_join(
-    left: list[dict[str, Any]],
-    right: list[dict[str, Any]],
-    left_key: str,
-    right_key: str,
-    suffix_left: str,
-    suffix_right: str,
-) -> list[dict[str, Any]]:
-    """Inner join implementation."""
-    right_index = defaultdict(list)
-    for item in right:
-        right_index[item.get(right_key)].append(item)
-    result = []
-    for l_item in left:
-        for r_item in right_index.get(l_item.get(left_key), []):
-            result.append(_merge_items(l_item, r_item, suffix_left, suffix_right))
-    return result
-
-
-def _left_join(
-    left: list[dict[str, Any]],
-    right: list[dict[str, Any]],
-    left_key: str,
-    right_key: str,
-    suffix_left: str,
-    suffix_right: str,
-) -> list[dict[str, Any]]:
-    """Left join implementation."""
-    right_index = defaultdict(list)
-    for item in right:
-        right_index[item.get(right_key)].append(item)
-    result = []
-    for l_item in left:
-        matches = right_index.get(l_item.get(left_key), [])
-        if matches:
-            for r_item in matches:
-                result.append(_merge_items(l_item, r_item, suffix_left, suffix_right))
-        else:
-            result.append(l_item.copy())
-    return result
-
-
-def _right_join(
-    left: list[dict[str, Any]],
-    right: list[dict[str, Any]],
-    left_key: str,
-    right_key: str,
-    suffix_left: str,
-    suffix_right: str,
-) -> list[dict[str, Any]]:
-    """Right join implementation."""
-    left_index = defaultdict(list)
-    for item in left:
-        left_index[item.get(left_key)].append(item)
-    result = []
-    for r_item in right:
-        matches = left_index.get(r_item.get(right_key), [])
-        if matches:
-            for l_item in matches:
-                result.append(_merge_items(l_item, r_item, suffix_left, suffix_right))
-        else:
-            result.append(r_item.copy())
-    return result
-
-
-def _full_join(
-    left: list[dict[str, Any]],
-    right: list[dict[str, Any]],
-    left_key: str,
-    right_key: str,
-    suffix_left: str,
-    suffix_right: str,
-) -> list[dict[str, Any]]:
-    """Full outer join implementation."""
-    right_index = defaultdict(list)
-    for item in right:
-        right_index[item.get(right_key)].append(item)
-    left_index = defaultdict(list)
-    for item in left:
-        left_index[item.get(left_key)].append(item)
-    result = []
-    all_keys = set(k for k in left_index) | set(k for k in right_index)
-    for key in all_keys:
-        l_items = left_index.get(key, [None])
-        r_items = right_index.get(key, [None])
-        for l_item in l_items:
-            for r_item in r_items:
-                if l_item and r_item:
-                    result.append(_merge_items(l_item, r_item, suffix_left, suffix_right))
-                elif l_item:
-                    result.append(l_item.copy())
-                elif r_item:
-                    result.append(r_item.copy())
-    return result
-
-
-def _cross_join(
-    left: list[dict[str, Any]],
-    right: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Cross join (Cartesian product)."""
-    result = []
-    for l_item in left:
-        for r_item in right:
-            merged = l_item.copy()
-            merged.update(r_item)
-            result.append(merged)
-    return result
-
-
-def _merge_items(
-    left: dict[str, Any],
-    right: dict[str, Any],
-    suffix_left: str,
-    suffix_right: str,
-) -> dict[str, Any]:
-    """Merge two items with suffix handling for conflicts."""
-    result = {}
-    all_keys = set(left.keys()) | set(right.keys())
-    for key in all_keys:
-        if key in left and key in right:
-            if left[key] == right[key]:
-                result[key] = left[key]
-            else:
-                result[key + suffix_left] = left[key]
-                result[key + suffix_right] = right[key]
-        elif key in left:
-            result[key] = left[key]
-        else:
-            result[key] = right[key]
-    return result
-
-
-def lookup(
-    data: list[dict[str, Any]],
-    key_field: str,
-    lookup_key: Any,
-) -> Optional[dict[str, Any]]:
-    """Lookup a single item by key.
-
-    Args:
-        data: Collection to search.
-        key_field: Field to match on.
-        lookup_key: Value to find.
-
-    Returns:
-        Matched item or None.
+    Example:
+        >>> joiner = DataJoinerAction()
+        >>> left = [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
+        >>> right = [{"id": 1, "value": 100}, {"id": 3, "value": 300}]
+        >>> result = joiner.join(left, right, JoinType.LEFT, "id")
     """
-    for item in data:
-        if item.get(key_field) == lookup_key:
-            return item
-    return None
 
+    def __init__(self, config: Optional[JoinConfig] = None):
+        self.config = config or JoinConfig()
 
-def merge_dicts(
-    dicts: list[dict[str, Any]],
-    key_field: str,
-    merge_strategy: str = "first",
-) -> list[dict[str, Any]]:
-    """Merge dicts with the same key value.
+    def _get_key_value(
+        self,
+        record: Dict[str, Any],
+        key: Union[str, Callable],
+    ) -> Any:
+        """
+        Get key value from a record.
 
-    Args:
-        dicts: List of dicts to merge.
-        key_field: Field to use as key.
-        merge_strategy: How to handle duplicates (first, last, combine).
+        Args:
+            record: Data record
+            key: Key field name or key function
 
-    Returns:
-        Merged list with unique keys.
-    """
-    index: dict[Any, dict[str, Any]] = {}
-    for d in dicts:
-        key = d.get(key_field)
-        if key not in index:
-            index[key] = d.copy()
-        else:
-            if merge_strategy == "last":
-                index[key].update(d)
-            elif merge_strategy == "combine":
-                for k, v in d.items():
-                    if k != key_field:
-                        if k in index[key]:
-                            if isinstance(index[key][k], list):
-                                index[key][k] = index[key][k] + [v]
-                            else:
-                                index[key][k] = [index[key][k], v]
-                        else:
-                            index[key][k] = v
-    return list(index.values())
+        Returns:
+            Key value
+        """
+        if callable(key):
+            return key(record)
+        return record.get(key)
 
+    def _create_index(
+        self,
+        data: List[Dict[str, Any]],
+        key: Union[str, Callable],
+    ) -> Dict[Any, List[Dict[str, Any]]]:
+        """
+        Create an index on key field for efficient lookup.
 
-def union_all(*collections: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Union of multiple collections (with duplicates).
+        Args:
+            data: Data records
+            key: Key field or function
 
-    Args:
-        *collections: Collections to union.
+        Returns:
+            Dictionary mapping key values to records
+        """
+        index: Dict[Any, List[Dict[str, Any]]] = {}
 
-    Returns:
-        Combined collection.
-    """
-    result = []
-    for coll in collections:
-        result.extend(coll)
-    return result
+        for record in data:
+            key_value = self._get_key_value(record, key)
+            if key_value not in index:
+                index[key_value] = []
+            index[key_value].append(record)
 
+        return index
 
-def intersect_all(
-    *collections: list[dict[str, Any]],
-    key_field: Optional[str] = None,
-) -> list[dict[str, Any]]:
-    """Intersection of multiple collections.
+    def join(
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        join_type: JoinType = JoinType.INNER,
+        left_key: Union[str, Callable] = "id",
+        right_key: Union[str, Callable] = "id",
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        """
+        Join two data sources.
 
-    Args:
-        *collections: Collections to intersect.
-        key_field: Optional field key for comparison.
+        Args:
+            left: Left data source
+            right: Right data source
+            join_type: Type of join
+            left_key: Key field/function for left
+            right_key: Key field/function for right
+            **kwargs: Additional configuration
 
-    Returns:
-        Items common to all collections.
-    """
-    if not collections:
-        return []
-    if key_field:
-        keysets = [set(d.get(key_field) for d in coll) for coll in collections]
-        common_keys = set.intersection(*keysets) if keysets else set()
-        return [d for d in collections[0] if d.get(key_field) in common_keys]
-    else:
-        result = collections[0]
-        for coll in collections[1:]:
-            result = [item for item in result if item in coll]
+        Returns:
+            Joined records
+        """
+        if not left or not right:
+            return self._handle_empty_join(left, right, join_type)
+
+        if join_type == JoinType.CROSS:
+            return self._cross_join(left, right, **kwargs)
+
+        left_index = self._create_index(left, left_key)
+        right_index = self._create_index(right, right_key)
+
+        left_keys = set(left_index.keys())
+        right_keys = set(right_index.keys())
+
+        result: List[Dict[str, Any]] = []
+
+        if join_type == JoinType.INNER:
+            common_keys = left_keys & right_keys
+            for key in common_keys:
+                result.extend(
+                    self._merge_records(l, r, **kwargs)
+                    for l in left_index[key]
+                    for r in right_index[key]
+                )
+
+        elif join_type == JoinType.LEFT:
+            for record in left:
+                key = self._get_key_value(record, left_key)
+                if key in right_index:
+                    result.extend(
+                        self._merge_records(record, r, **kwargs)
+                        for r in right_index[key]
+                    )
+                else:
+                    result.append(self._pad_record(record, len(right[0]) if right else 0, is_left=True, **kwargs))
+
+        elif join_type == JoinType.RIGHT:
+            for record in right:
+                key = self._get_key_value(record, right_key)
+                if key in left_index:
+                    result.extend(
+                        self._merge_records(l, record, **kwargs)
+                        for l in left_index[key]
+                    )
+                else:
+                    result.append(self._pad_record(record, len(left[0]) if left else 0, is_left=False, **kwargs))
+
+        elif join_type == JoinType.FULL:
+            matched_keys = left_keys & right_keys
+
+            for key in matched_keys:
+                result.extend(
+                    self._merge_records(l, r, **kwargs)
+                    for l in left_index[key]
+                    for r in right_index[key]
+                )
+
+            for key in left_keys - right_keys:
+                for record in left_index[key]:
+                    result.append(
+                        self._pad_record(record, 0, is_left=True, **kwargs)
+                    )
+
+            for key in right_keys - left_keys:
+                for record in right_index[key]:
+                    result.append(
+                        self._pad_record(record, 0, is_left=False, **kwargs)
+                    )
+
+        elif join_type == JoinType.LEFT_ANTI:
+            for record in left:
+                key = self._get_key_value(record, left_key)
+                if key not in right_keys:
+                    result.append(record)
+
+        elif join_type == JoinType.RIGHT_ANTI:
+            for record in right:
+                key = self._get_key_value(record, right_key)
+                if key not in left_keys:
+                    result.append(record)
+
         return result
 
+    def _cross_join(
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        """Execute cross join."""
+        result = []
+        for l_record, r_record in product(left, right):
+            result.append(self._merge_records(l_record, r_record, **kwargs))
+        return result
 
-def except_items(
-    minuend: list[dict[str, Any]],
-    subtrahend: list[dict[str, Any]],
-    key_field: Optional[str] = None,
-) -> list[dict[str, Any]]:
-    """Return items in minuend not in subtrahend.
+    def _merge_records(
+        self,
+        left: Dict[str, Any],
+        right: Dict[str, Any],
+        left_suffix: str = "",
+        right_suffix: str = "_right",
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """
+        Merge two records into one.
 
-    Args:
-        minuend: Base collection.
-        subtrahend: Collection to subtract.
-        key_field: Optional field key for comparison.
+        Args:
+            left: Left record
+            right: Right record
+            left_suffix: Suffix for left-conflicting keys
+            right_suffix: Suffix for right-conflicting keys
 
-    Returns:
-        Items in minuend minus subtrahend.
-    """
-    if key_field:
-        sub_keys = set(d.get(key_field) for d in subtrahend)
-        return [d for d in minuend if d.get(key_field) not in sub_keys]
-    else:
-        sub_set = set(id(d) for d in subtrahend)
-        return [d for d in minuend if id(d) not in sub_set]
+        Returns:
+            Merged record
+        """
+        result = {}
+
+        for key, value in left.items():
+            if key in right and left_suffix or right_suffix:
+                result[f"{key}{left_suffix}"] = value
+            else:
+                result[key] = value
+
+        for key, value in right.items():
+            if key in left:
+                result[f"{key}{right_suffix}"] = value
+            else:
+                result[key] = value
+
+        return result
+
+    def _pad_record(
+        self,
+        record: Dict[str, Any],
+        padding_count: int,
+        is_left: bool,
+        right_suffix: str = "_right",
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Pad record with null values."""
+        result = record.copy()
+        for i in range(padding_count):
+            result[f"_padding_{i}{right_suffix}"] = None
+        return result
+
+    def _handle_empty_join(
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        join_type: JoinType,
+    ) -> List[Dict[str, Any]]:
+        """Handle joins with empty data sources."""
+        if join_type in (JoinType.INNER, JoinType.LEFT_ANTI, JoinType.RIGHT_ANTI):
+            return []
+        if join_type == JoinType.LEFT:
+            return left.copy()
+        if join_type == JoinType.RIGHT:
+            return right.copy()
+        if join_type == JoinType.FULL:
+            return left.copy() + right.copy()
+        if join_type == JoinType.CROSS:
+            return []
+        return []
+
+    def multi_join(
+        self,
+        sources: List[Tuple[List[Dict[str, Any]], JoinType, str, str]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Perform multiple joins in sequence.
+
+        Args:
+            sources: List of (data, join_type, left_key, right_key) tuples
+
+        Returns:
+            Final joined result
+        """
+        if not sources:
+            return []
+
+        result = sources[0][0]
+
+        for left_data, join_type, left_key, right_key in sources[1:]:
+            result = self.join(
+                result,
+                left_data,
+                join_type=join_type,
+                left_key=left_key,
+                right_key=right_key,
+            )
+
+        return result
+
+    def broadcast_join(
+        self,
+        small: List[Dict[str, Any]],
+        large: List[Dict[str, Any]],
+        key: Union[str, Callable] = "id",
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        """
+        Optimize join by broadcasting small dataset.
+
+        Args:
+            small: Small data source (broadcasted)
+            large: Large data source
+            key: Join key
+            **kwargs: Additional join config
+
+        Returns:
+            Join result
+        """
+        return self.join(
+            small if len(small) <= len(large) else large,
+            large if len(small) <= len(large) else small,
+            left_key=key,
+            right_key=key,
+            **kwargs,
+        )
+
+    def hash_join(
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        key: Union[str, Callable] = "id",
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        """
+        Perform hash join (alias for standard join).
+
+        Args:
+            left: Left data source
+            right: Right data source
+            key: Join key
+            **kwargs: Additional configuration
+
+        Returns:
+            Join result
+        """
+        return self.join(left, right, left_key=key, right_key=key, **kwargs)
+
+    def merge_asof(
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        left_time: str = "timestamp",
+        right_time: str = "timestamp",
+        direction: str = "nearest",
+    ) -> List[Dict[str, Any]]:
+        """
+        Perform asof merge (time-based join).
+
+        Args:
+            left: Left data source
+            right: Right data source
+            left_time: Time field in left
+            right_time: Time field in right
+            direction: Merge direction (nearest, forward, backward)
+
+        Returns:
+            Merged result
+        """
+        import bisect
+
+        result = []
+        right_times = sorted([r[right_time] for r in right])
+
+        for record in left:
+            lt = record.get(left_time)
+
+            if not right_times:
+                result.append({**record, **dict.fromkeys(right[0].keys(), None) if right else {}})
+                continue
+
+            idx = bisect.bisect_left(right_times, lt)
+
+            if direction == "nearest":
+                candidates = []
+                if idx < len(right_times):
+                    candidates.append((abs(right_times[idx] - lt), idx))
+                if idx > 0:
+                    candidates.append((abs(right_times[idx - 1] - lt), idx - 1))
+                if candidates:
+                    _, best_idx = min(candidates)
+                else:
+                    best_idx = idx if idx < len(right_times) else idx - 1
+
+            elif direction == "forward":
+                best_idx = idx if idx < len(right_times) else len(right_times) - 1
+
+            elif direction == "backward":
+                best_idx = idx - 1 if idx > 0 else 0
+
+            else:
+                best_idx = idx if idx < len(right_times) else len(right_times) - 1
+
+            if 0 <= best_idx < len(right):
+                result.append({**record, **right[best_idx]})
+            else:
+                result.append({**record})
+
+        return result

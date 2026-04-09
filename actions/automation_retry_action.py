@@ -1,356 +1,217 @@
-"""Automation Retry Action Module.
+"""Automation Retry and Backoff.
 
-Provides retry logic utilities: backoff strategies, retry policies,
-circuit breaker integration, and timeout handling.
+This module provides retry logic with backoff:
+- Exponential backoff
+- Jitter support
+- Retry conditions
+- Max attempt tracking
 
 Example:
-    result = execute(context, {"action": "retry_with_backoff", "fn": my_func})
+    >>> from actions.automation_retry_action import RetryHandler
+    >>> handler = RetryHandler(max_attempts=3, backoff_base=2)
+    >>> result = handler.execute_with_retry(failing_function)
 """
-from typing import Any, Callable, Optional, TypeVar, Union
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+
+from __future__ import annotations
+
 import time
 import random
+import logging
+import threading
+from typing import Any, Callable, Optional
+from dataclasses import dataclass, field
 
-
-T = TypeVar("T")
-
-
-class BackoffStrategy:
-    """Base class for backoff strategies."""
-    
-    def get_delay(self, attempt: int) -> float:
-        """Get delay in seconds for given attempt.
-        
-        Args:
-            attempt: Zero-based attempt number
-            
-        Returns:
-            Delay in seconds
-        """
-        raise NotImplementedError
-
-
-class ConstantBackoff(BackoffStrategy):
-    """Constant backoff - same delay between attempts."""
-    
-    def __init__(self, delay: float = 1.0) -> None:
-        """Initialize constant backoff.
-        
-        Args:
-            delay: Fixed delay in seconds
-        """
-        self.delay = delay
-    
-    def get_delay(self, attempt: int) -> float:
-        """Get constant delay."""
-        return self.delay
-
-
-class LinearBackoff(BackoffStrategy):
-    """Linear backoff - delay increases linearly."""
-    
-    def __init__(self, base_delay: float = 1.0, increment: float = 1.0) -> None:
-        """Initialize linear backoff.
-        
-        Args:
-            base_delay: Initial delay in seconds
-            increment: Delay increment per attempt
-        """
-        self.base_delay = base_delay
-        self.increment = increment
-    
-    def get_delay(self, attempt: int) -> float:
-        """Get linearly increasing delay."""
-        return self.base_delay + attempt * self.increment
-
-
-class ExponentialBackoff(BackoffStrategy):
-    """Exponential backoff - delay doubles each attempt."""
-    
-    def __init__(
-        self,
-        base_delay: float = 1.0,
-        multiplier: float = 2.0,
-        max_delay: float = 60.0,
-    ) -> None:
-        """Initialize exponential backoff.
-        
-        Args:
-            base_delay: Initial delay in seconds
-            multiplier: Multiplier per attempt
-            max_delay: Maximum delay cap
-        """
-        self.base_delay = base_delay
-        self.multiplier = multiplier
-        self.max_delay = max_delay
-    
-    def get_delay(self, attempt: int) -> float:
-        """Get exponentially increasing delay."""
-        delay = self.base_delay * (self.multiplier ** attempt)
-        return min(delay, self.max_delay)
-
-
-class JitteredBackoff(BackoffStrategy):
-    """Exponential backoff with jitter for distributed systems."""
-    
-    def __init__(
-        self,
-        base_delay: float = 1.0,
-        multiplier: float = 2.0,
-        max_delay: float = 60.0,
-        jitter_factor: float = 0.5,
-    ) -> None:
-        """Initialize jittered backoff.
-        
-        Args:
-            base_delay: Initial delay in seconds
-            multiplier: Multiplier per attempt
-            max_delay: Maximum delay cap
-            jitter_factor: Random factor (0.0 to 1.0)
-        """
-        self.base_delay = base_delay
-        self.multiplier = multiplier
-        self.max_delay = max_delay
-        self.jitter_factor = jitter_factor
-    
-    def get_delay(self, attempt: int) -> float:
-        """Get exponentially increasing delay with jitter."""
-        base = self.base_delay * (self.multiplier ** attempt)
-        capped = min(base, self.max_delay)
-        
-        jitter_range = capped * self.jitter_factor
-        jitter = random.uniform(-jitter_range, jitter_range)
-        
-        return max(0, capped + jitter)
-
-
-class RetryPolicy:
-    """Retry policy with configurable behavior."""
-    
-    def __init__(
-        self,
-        max_attempts: int = 3,
-        backoff: Optional[BackoffStrategy] = None,
-        retry_on: Optional[tuple[type[Exception], ...]] = None,
-        timeout: float = 30.0,
-    ) -> None:
-        """Initialize retry policy.
-        
-        Args:
-            max_attempts: Maximum retry attempts
-            backoff: Backoff strategy
-            retry_on: Tuple of exception types to retry
-            timeout: Overall timeout in seconds
-        """
-        self.max_attempts = max_attempts
-        self.backoff = backoff or ExponentialBackoff()
-        self.retry_on = retry_on or (Exception,)
-        self.timeout = timeout
-    
-    def should_retry(self, attempt: int, exception: Exception) -> bool:
-        """Check if should retry after exception.
-        
-        Args:
-            attempt: Current attempt number
-            exception: Exception that occurred
-            
-        Returns:
-            True if should retry
-        """
-        if attempt >= self.max_attempts:
-            return False
-        
-        return isinstance(exception, self.retry_on)
-    
-    def get_delay(self, attempt: int) -> float:
-        """Get delay before next attempt."""
-        return self.backoff.get_delay(attempt)
-
-
-class RetryExecutor:
-    """Executes functions with retry logic."""
-    
-    def __init__(self, policy: Optional[RetryPolicy] = None) -> None:
-        """Initialize retry executor.
-        
-        Args:
-            policy: Retry policy to use
-        """
-        self.policy = policy or RetryPolicy()
-        self._attempts: list[dict[str, Any]] = []
-    
-    def execute(self, fn: Callable[[], T]) -> T:
-        """Execute function with retry logic.
-        
-        Args:
-            fn: Function to execute
-            
-        Returns:
-            Function result
-            
-        Raises:
-            Exception: If all retries exhausted
-        """
-        start_time = time.time()
-        last_exception: Optional[Exception] = None
-        
-        for attempt in range(self.policy.max_attempts):
-            elapsed = time.time() - start_time
-            if elapsed >= self.policy.timeout:
-                raise TimeoutError(f"Retry timeout after {elapsed:.2f}s")
-            
-            try:
-                result = fn()
-                self._attempts.append({
-                    "attempt": attempt,
-                    "status": "success",
-                    "elapsed_ms": (time.time() - start_time) * 1000,
-                })
-                return result
-            
-            except Exception as e:
-                last_exception = e
-                
-                self._attempts.append({
-                    "attempt": attempt,
-                    "status": "failed",
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                    "elapsed_ms": (time.time() - start_time) * 1000,
-                })
-                
-                if not self.policy.should_retry(attempt, e):
-                    raise
-                
-                delay = self.policy.get_delay(attempt)
-                time.sleep(delay)
-        
-        if last_exception is not None:
-            raise last_exception
-        
-        raise RuntimeError("Retry exhausted")
-    
-    def get_attempts(self) -> list[dict[str, Any]]:
-        """Get retry attempt history."""
-        return self._attempts.copy()
-    
-    def clear_attempts(self) -> None:
-        """Clear attempt history."""
-        self._attempts.clear()
+logger = logging.getLogger(__name__)
 
 
 @dataclass
-class RetryConfig:
-    """Retry configuration for actions."""
-    
-    max_attempts: int = 3
-    initial_delay: float = 1.0
-    backoff_type: str = "exponential"
-    retry_on: list[str] = None
-    
-    def __post_init__(self) -> None:
-        """Initialize defaults."""
-        if self.retry_on is None:
-            self.retry_on = ["Exception"]
-    
-    def get_backoff(self) -> BackoffStrategy:
-        """Get backoff strategy."""
-        if self.backoff_type == "constant":
-            return ConstantBackoff(self.initial_delay)
-        elif self.backoff_type == "linear":
-            return LinearBackoff(self.initial_delay)
-        elif self.backoff_type == "jitter":
-            return JitteredBackoff(self.initial_delay)
-        else:
-            return ExponentialBackoff(self.initial_delay)
+class RetryAttempt:
+    """A single retry attempt."""
+    attempt_number: int
+    timestamp: float
+    duration_ms: float
+    success: bool
+    error: Optional[str] = None
 
 
-def execute(context: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
-    """Execute automation retry action.
-    
-    Args:
-        context: Execution context
-        params: Parameters including action type
-        
-    Returns:
-        Result dictionary with status and data
-    """
-    action = params.get("action", "status")
-    result: dict[str, Any] = {"status": "success"}
-    
-    if action == "backoff_delay":
-        strategy_name = params.get("strategy", "exponential")
-        attempt = params.get("attempt", 0)
-        
-        if strategy_name == "constant":
-            strategy = ConstantBackoff(params.get("delay", 1.0))
-        elif strategy_name == "linear":
-            strategy = LinearBackoff(params.get("base_delay", 1.0))
-        elif strategy_name == "jitter":
-            strategy = JitteredBackoff(params.get("base_delay", 1.0))
-        else:
-            strategy = ExponentialBackoff(params.get("base_delay", 1.0))
-        
-        delay = strategy.get_delay(attempt)
-        result["data"] = {"delay_seconds": delay}
-    
-    elif action == "create_policy":
-        config = RetryConfig(
-            max_attempts=params.get("max_attempts", 3),
-            initial_delay=params.get("initial_delay", 1.0),
-            backoff_type=params.get("backoff_type", "exponential"),
+@dataclass
+class RetryResult:
+    """Result of a retry operation."""
+    success: bool
+    result: Any
+    attempts: list[RetryAttempt]
+    total_duration_ms: float
+    final_error: Optional[str] = None
+
+
+class RetryHandler:
+    """Handles retry logic with backoff strategies."""
+
+    def __init__(
+        self,
+        max_attempts: int = 3,
+        backoff_base: float = 2.0,
+        backoff_factor: float = 1.0,
+        jitter: bool = True,
+        max_backoff: float = 60.0,
+    ) -> None:
+        """Initialize the retry handler.
+
+        Args:
+            max_attempts: Maximum retry attempts.
+            backoff_base: Base for exponential backoff.
+            backoff_factor: Multiplier for backoff.
+            jitter: Whether to add random jitter.
+            max_backoff: Maximum backoff seconds.
+        """
+        self._max_attempts = max_attempts
+        self._backoff_base = backoff_base
+        self._backoff_factor = backoff_factor
+        self._jitter = jitter
+        self._max_backoff = max_backoff
+        self._lock = threading.Lock()
+        self._stats = {"retries": 0, "successes": 0, "failures": 0}
+
+    def execute_with_retry(
+        self,
+        func: Callable[[], Any],
+        should_retry: Optional[Callable[[Exception], bool]] = None,
+        on_retry: Optional[Callable[[int, Exception], None]] = None,
+    ) -> RetryResult:
+        """Execute a function with retry logic.
+
+        Args:
+            func: Function to execute.
+            should_retry: Function to determine if retry should happen. None = retry all.
+            on_retry: Callback called before each retry.
+
+        Returns:
+            RetryResult with outcome and attempt history.
+        """
+        start_time = time.time()
+        attempts = []
+        last_error = None
+
+        for attempt_num in range(1, self._max_attempts + 1):
+            attempt_start = time.time()
+
+            try:
+                result = func()
+                duration_ms = (time.time() - attempt_start) * 1000
+
+                attempts.append(RetryAttempt(
+                    attempt_number=attempt_num,
+                    timestamp=attempt_start,
+                    duration_ms=duration_ms,
+                    success=True,
+                ))
+
+                with self._lock:
+                    self._stats["successes"] += 1
+
+                total_duration = (time.time() - start_time) * 1000
+                return RetryResult(
+                    success=True,
+                    result=result,
+                    attempts=attempts,
+                    total_duration_ms=total_duration,
+                )
+
+            except Exception as e:
+                duration_ms = (time.time() - attempt_start) * 1000
+                last_error = str(e)
+
+                attempts.append(RetryAttempt(
+                    attempt_number=attempt_num,
+                    timestamp=attempt_start,
+                    duration_ms=duration_ms,
+                    success=False,
+                    error=last_error,
+                ))
+
+                if attempt_num >= self._max_attempts:
+                    break
+
+                if should_retry and not should_retry(e):
+                    break
+
+                backoff = self._calculate_backoff(attempt_num)
+
+                if on_retry:
+                    on_retry(attempt_num, e)
+
+                logger.info("Retry %d/%d after %.1fs: %s", attempt_num, self._max_attempts, backoff, last_error)
+                time.sleep(backoff)
+
+        with self._lock:
+            self._stats["retries"] += len(attempts) - 1
+            self._stats["failures"] += 1
+
+        total_duration = (time.time() - start_time) * 1000
+        return RetryResult(
+            success=False,
+            result=None,
+            attempts=attempts,
+            total_duration_ms=total_duration,
+            final_error=last_error,
         )
-        policy = RetryPolicy(
-            max_attempts=config.max_attempts,
-            backoff=config.get_backoff(),
-        )
-        result["data"] = {
-            "max_attempts": policy.max_attempts,
-            "backoff_type": config.backoff_type,
-        }
-    
-    elif action == "should_retry":
-        config = RetryConfig(
-            max_attempts=params.get("max_attempts", 3),
-        )
-        policy = RetryPolicy(max_attempts=config.max_attempts)
-        should_retry = policy.should_retry(
-            params.get("attempt", 0),
-            ValueError(params.get("error", "")),
-        )
-        result["data"] = {"should_retry": should_retry}
-    
-    elif action == "retry_status":
-        executor = RetryExecutor()
-        result["data"] = {"policy": "configured"}
-    
-    elif action == "attempt_history":
-        executor = RetryExecutor()
-        result["data"] = {"attempts": executor.get_attempts()}
-    
-    elif action == "validate_config":
-        config = RetryConfig(
-            max_attempts=params.get("max_attempts", 3),
-            initial_delay=params.get("initial_delay", 1.0),
-            backoff_type=params.get("backoff_type", "exponential"),
-        )
-        errors = []
-        
-        if config.max_attempts < 1:
-            errors.append("max_attempts must be >= 1")
-        if config.initial_delay < 0:
-            errors.append("initial_delay must be >= 0")
-        if config.backoff_type not in ("constant", "linear", "exponential", "jitter"):
-            errors.append(f"Unknown backoff_type: {config.backoff_type}")
-        
-        result["data"] = {
-            "valid": len(errors) == 0,
-            "errors": errors,
-        }
-    
-    else:
-        result["status"] = "error"
-        result["error"] = f"Unknown action: {action}"
-    
-    return result
+
+    def _calculate_backoff(self, attempt_num: int) -> float:
+        """Calculate backoff delay.
+
+        Args:
+            attempt_num: Current attempt number.
+
+        Returns:
+            Backoff delay in seconds.
+        """
+        backoff = self._backoff_factor * (self._backoff_base ** (attempt_num - 1))
+        backoff = min(backoff, self._max_backoff)
+
+        if self._jitter:
+            backoff = backoff * (0.5 + random.random())
+
+        return backoff
+
+    def retry_decorator(
+        self,
+        func: Optional[Callable] = None,
+        max_attempts: Optional[int] = None,
+        should_retry: Optional[Callable[[Exception], bool]] = None,
+    ) -> Callable:
+        """Decorator for adding retry logic to functions.
+
+        Args:
+            func: Function to decorate.
+            max_attempts: Override max attempts.
+            should_retry: Custom retry condition.
+
+        Returns:
+            Decorated function.
+        """
+        def decorator(fn: Callable) -> Callable:
+            def wrapper(*args, **kwargs) -> Any:
+                handler = RetryHandler(
+                    max_attempts=max_attempts or self._max_attempts,
+                    backoff_base=self._backoff_base,
+                    backoff_factor=self._backoff_factor,
+                    jitter=self._jitter,
+                    max_backoff=self._max_backoff,
+                )
+                result = handler.execute_with_retry(
+                    lambda: fn(*args, **kwargs),
+                    should_retry=should_retry,
+                )
+                if not result.success:
+                    raise result.final_error
+                return result.result
+            return wrapper
+
+        if func:
+            return decorator(func)
+        return decorator
+
+    def get_stats(self) -> dict[str, int]:
+        """Get retry statistics."""
+        with self._lock:
+            return dict(self._stats)

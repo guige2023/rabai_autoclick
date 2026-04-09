@@ -1,272 +1,538 @@
-"""Data matching and fuzzy lookup utilities.
+"""
+Data Matcher Action Module.
 
-This module provides fuzzy matching capabilities:
-- String similarity (Levenshtein, Jaro-Winkler)
-- Record linkage and deduplication
-- Approximate matching
-- Threshold-based matching
+Provides fuzzy matching, record linkage, deduplication,
+and similarity search capabilities.
 
-Example:
-    >>> from actions.data_matcher_action import fuzzy_match, deduplicate
-    >>> matches = fuzzy_match(names, threshold=0.8)
+Author: rabai_autoclick team
 """
 
-from __future__ import annotations
-
 import logging
+from typing import (
+    Optional, Dict, Any, List, Tuple, Callable,
+    Set, Union
+)
+from dataclasses import dataclass, field
+from enum import Enum
 import re
-from typing import Any, Optional, Callable
-from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
 
-def levenshtein_distance(s1: str, s2: str) -> int:
-    """Calculate Levenshtein distance between two strings.
+class MatchType(Enum):
+    """Types of matching."""
+    EXACT = "exact"
+    FUZZY = "fuzzy"
+    SIMILARITY = "similarity"
+    SEMANTIC = "semantic"
+    PHONETIC = "phonetic"
 
-    Args:
-        s1: First string.
-        s2: Second string.
 
-    Returns:
-        Edit distance.
+@dataclass
+class MatchResult:
+    """Result of a matching operation."""
+    record_id: str
+    matched_id: Optional[str]
+    score: float
+    match_type: MatchType
+    confidence: float
+
+    @property
+    def is_match(self) -> bool:
+        """Check if result is a confident match."""
+        return self.matched_id is not None and self.confidence >= 0.8
+
+
+@dataclass
+class DedupeConfig:
+    """Configuration for deduplication."""
+    match_type: MatchType = MatchType.FUZZY
+    threshold: float = 0.8
+    blocking_fields: List[str] = field(default_factory=list)
+    compare_fields: List[str] = field(default_factory=list)
+    score_weights: Dict[str, float] = field(default_factory=dict)
+
+
+class DataMatcherAction:
     """
-    if len(s1) < len(s2):
-        return levenshtein_distance(s2, s1)
-    if len(s2) == 0:
-        return len(s1)
-    previous_row = range(len(s2) + 1)
-    for i, c1 in enumerate(s1):
-        current_row = [i + 1]
-        for j, c2 in enumerate(s2):
-            insertions = previous_row[j + 1] + 1
-            deletions = current_row[j] + 1
-            substitutions = previous_row[j] + (c1 != c2)
-            current_row.append(min(insertions, deletions, substitutions))
-        previous_row = current_row
-    return previous_row[-1]
+    Fuzzy Matching and Deduplication Engine.
 
+    Provides multiple matching strategies including exact,
+    fuzzy string matching, phonetic matching, and more.
 
-def jaro_similarity(s1: str, s2: str) -> float:
-    """Calculate Jaro similarity between two strings.
-
-    Args:
-        s1: First string.
-        s2: Second string.
-
-    Returns:
-        Similarity score between 0 and 1.
+    Example:
+        >>> matcher = DataMatcherAction()
+        >>> result = matcher.find_similar("John Smith", candidates)
     """
-    if s1 == s2:
-        return 1.0
-    len1, len2 = len(s1), len(s2)
-    if len1 == 0 or len2 == 0:
-        return 0.0
-    match_distance = max(len1, len2) // 2 - 1
-    match_distance = max(0, match_distance)
-    s1_matches = [False] * len1
-    s2_matches = [False] * len2
-    matches = 0
-    transpositions = 0
-    for i in range(len1):
-        start = max(0, i - match_distance)
-        end = min(i + match_distance + 1, len2)
-        for j in range(start, end):
-            if s2_matches[j] or s1[i] != s2[j]:
+
+    def __init__(self, config: Optional[DedupeConfig] = None):
+        self.config = config or DedupeConfig()
+
+    # String Similarity Metrics
+
+    def levenshtein_distance(self, s1: str, s2: str) -> int:
+        """
+        Calculate Levenshtein distance between two strings.
+
+        Args:
+            s1: First string
+            s2: Second string
+
+        Returns:
+            Edit distance
+        """
+        if len(s1) < len(s2):
+            return self.levenshtein_distance(s2, s1)
+
+        if len(s2) == 0:
+            return len(s1)
+
+        previous_row = range(len(s2) + 1)
+
+        for i, c1 in enumerate(s1):
+            current_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                insertions = previous_row[j + 1] + 1
+                deletions = current_row[j] + 1
+                substitutions = previous_row[j] + (c1 != c2)
+                current_row.append(min(insertions, deletions, substitutions))
+            previous_row = current_row
+
+        return previous_row[-1]
+
+    def jaro_similarity(self, s1: str, s2: str) -> float:
+        """
+        Calculate Jaro similarity between two strings.
+
+        Args:
+            s1: First string
+            s2: Second string
+
+        Returns:
+            Similarity score (0-1)
+        """
+        if s1 == s2:
+            return 1.0
+
+        len1, len2 = len(s1), len(s2)
+        if len1 == 0 or len2 == 0:
+            return 0.0
+
+        match_distance = max(len1, len2) // 2 - 1
+        match_distance = max(0, match_distance)
+
+        s1_matches = [False] * len1
+        s2_matches = [False] * len2
+
+        matches = 0
+        transpositions = 0
+
+        for i in range(len1):
+            start = max(0, i - match_distance)
+            end = min(i + match_distance + 1, len2)
+
+            for j in range(start, end):
+                if s2_matches[j] or s1[i] != s2[j]:
+                    continue
+                s1_matches[i] = True
+                s2_matches[j] = True
+                matches += 1
+                break
+
+        if matches == 0:
+            return 0.0
+
+        k = 0
+        for i in range(len1):
+            if not s1_matches[i]:
                 continue
-            s1_matches[i] = True
-            s2_matches[j] = True
-            matches += 1
-            break
-    if matches == 0:
-        return 0.0
-    k = 0
-    for i in range(len1):
-        if not s1_matches[i]:
-            continue
-        while not s2_matches[k]:
+            while not s2_matches[k]:
+                k += 1
+            if s1[i] != s2[k]:
+                transpositions += 1
             k += 1
-        if s1[i] != s2[k]:
-            transpositions += 1
-        k += 1
-    return (matches / len1 + matches / len2 +
-            (matches - transpositions / 2) / matches) / 3
 
+        return (
+            matches / len1
+            + matches / len2
+            + (matches - transpositions / 2) / matches
+        ) / 3
 
-def jaro_winkler_similarity(s1: str, s2: str, p: float = 0.1) -> float:
-    """Calculate Jaro-Winkler similarity.
+    def jaro_winkler_similarity(
+        self,
+        s1: str,
+        s2: str,
+        prefix_weight: float = 0.1,
+    ) -> float:
+        """
+        Calculate Jaro-Winkler similarity.
 
-    Args:
-        s1: First string.
-        s2: Second string.
-        p: Scaling factor (default 0.1).
+        Args:
+            s1: First string
+            s2: Second string
+            prefix_weight: Weight for common prefix (default 0.1)
 
-    Returns:
-        Similarity score between 0 and 1.
-    """
-    jaro = jaro_similarity(s1, s2)
-    prefix_len = 0
-    for i in range(min(len(s1), len(s2), 4)):
-        if s1[i] == s2[i]:
-            prefix_len += 1
-        else:
-            break
-    return jaro + prefix_len * p * (1 - jaro)
+        Returns:
+            Similarity score (0-1)
+        """
+        jaro = self.jaro_similarity(s1, s2)
 
+        prefix_len = 0
+        for i in range(min(len(s1), len(s2), 4)):
+            if s1[i] == s2[i]:
+                prefix_len += 1
+            else:
+                break
 
-def cosine_similarity(s1: str, s2: str) -> float:
-    """Calculate cosine similarity between two strings.
+        return jaro + prefix_len * prefix_weight * (1 - jaro)
 
-    Args:
-        s1: First string.
-        s2: Second string.
+    def cosine_similarity(self, s1: str, s2: str) -> float:
+        """
+        Calculate cosine similarity between two strings.
 
-    Returns:
-        Similarity score between 0 and 1.
-    """
-    def tokenize(text: str) -> set[str]:
+        Args:
+            s1: First string
+            s2: Second string
+
+        Returns:
+            Similarity score (0-1)
+        """
+        tokens1 = self._tokenize(s1)
+        tokens2 = self._tokenize(s2)
+
+        all_tokens = set(tokens1) | set(tokens2)
+        vector1 = [1 if t in tokens1 else 0 for t in all_tokens]
+        vector2 = [1 if t in tokens2 else 0 for t in all_tokens]
+
+        dot_product = sum(a * b for a, b in zip(vector1, vector2))
+        norm1 = sum(a * a for a in vector1) ** 0.5
+        norm2 = sum(b * b for b in vector2) ** 0.5
+
+        if norm1 == 0 or norm2 == 0:
+            return 0.0
+
+        return dot_product / (norm1 * norm2)
+
+    def _tokenize(self, text: str) -> Set[str]:
+        """Tokenize text into words."""
         return set(re.findall(r"\w+", text.lower()))
-    tokens1 = tokenize(s1)
-    tokens2 = tokenize(s2)
-    if not tokens1 or not tokens2:
+
+    def dice_coefficient(self, s1: str, s2: str) -> float:
+        """
+        Calculate Dice coefficient (bigram similarity).
+
+        Args:
+            s1: First string
+            s2: Second string
+
+        Returns:
+            Similarity score (0-1)
+        """
+        bigrams1 = self._get_bigrams(s1)
+        bigrams2 = self._get_bigrams(s2)
+
+        intersection = bigrams1 & bigrams2
+
+        if not bigrams1 or not bigrams2:
+            return 0.0
+
+        return 2 * len(intersection) / (len(bigrams1) + len(bigrams2))
+
+    def _get_bigrams(self, text: str) -> Set[str]:
+        """Get bigrams from text."""
+        text = text.lower()
+        return {text[i : i + 2] for i in range(len(text) - 1)}
+
+    def _phonetic_hash(self, text: str) -> str:
+        """Generate phonetic hash (simplified Soundex)."""
+        text = text.upper()
+        soundex = text[0]
+
+        mapping = {
+            "BFPV": "1",
+            "CGJKQSXZ": "2",
+            "DT": "3",
+            "L": "4",
+            "MN": "5",
+            "R": "6",
+        }
+
+        prev_code = ""
+        for char in text[1:]:
+            for chars, code in mapping.items():
+                if char in chars:
+                    if code != prev_code:
+                        soundex += code
+                        prev_code = code
+                    break
+
+        soundex = soundex[:4].ljust(4, "0")
+        return soundex
+
+    def compare_strings(
+        self,
+        s1: str,
+        s2: str,
+        method: MatchType = MatchType.SIMILARITY,
+    ) -> float:
+        """
+        Compare two strings and return similarity score.
+
+        Args:
+            s1: First string
+            s2: Second string
+            method: Matching method
+
+        Returns:
+            Similarity score (0-1)
+        """
+        s1_lower = s1.lower().strip()
+        s2_lower = s2.lower().strip()
+
+        if s1_lower == s2_lower:
+            return 1.0
+
+        if method == MatchType.EXACT:
+            return 1.0 if s1_lower == s2_lower else 0.0
+
+        if method == MatchType.FUZZY:
+            jw = self.jaro_winkler_similarity(s1_lower, s2_lower)
+            dice = self.dice_coefficient(s1_lower, s2_lower)
+            return (jw + dice) / 2
+
+        if method == MatchType.SIMILARITY:
+            jw = self.jaro_winkler_similarity(s1_lower, s2_lower)
+            lev_dist = self.levenshtein_distance(s1_lower, s2_lower)
+            max_len = max(len(s1_lower), len(s2_lower))
+            lev_sim = 1 - (lev_dist / max_len) if max_len > 0 else 1.0
+            return (jw + lev_sim) / 2
+
+        if method == MatchType.PHONETIC:
+            return 1.0 if self._phonetic_hash(s1) == self._phonetic_hash(s2) else 0.0
+
         return 0.0
-    intersection = tokens1 & tokens2
-    numerator = sum(1 for _ in intersection)
-    denominator = (len(tokens1) * len(tokens2)) ** 0.5
-    return numerator / denominator if denominator else 0.0
 
+    # Record Matching
 
-def fuzzy_match(
-    source: list[str],
-    target: list[str],
-    threshold: float = 0.8,
-    algorithm: str = "jaro_winkler",
-) -> list[tuple[int, int, float]]:
-    """Find fuzzy matches between source and target strings.
+    def find_similar(
+        self,
+        record: Dict[str, Any],
+        candidates: List[Dict[str, Any]],
+        fields: Optional[List[str]] = None,
+        threshold: float = 0.8,
+    ) -> List[MatchResult]:
+        """
+        Find similar records in candidate list.
 
-    Args:
-        source: Source strings.
-        target: Target strings.
-        threshold: Minimum similarity score.
-        algorithm: Similarity algorithm (levenshtein, jaro_winkler, cosine).
+        Args:
+            record: Reference record
+            candidates: List of candidate records
+            fields: Fields to compare
+            threshold: Match threshold
 
-    Returns:
-        List of (source_idx, target_idx, score) tuples.
-    """
-    algorithms = {
-        "levenshtein": lambda s, t: 1 - levenshtein_distance(s, t) / max(len(s), len(t), 1),
-        "jaro_winkler": jaro_winkler_similarity,
-        "cosine": cosine_similarity,
-    }
-    if algorithm not in algorithms:
-        algorithm = "jaro_winkler"
-    sim_func = algorithms[algorithm]
-    matches = []
-    for i, s in enumerate(source):
-        for j, t in enumerate(target):
-            score = sim_func(s, t)
+        Returns:
+            List of match results
+        """
+        if not fields:
+            fields = list(record.keys())
+
+        results = []
+
+        for candidate in candidates:
+            score = self._compare_records(record, candidate, fields)
+            confidence = score
+
             if score >= threshold:
-                matches.append((i, j, score))
-    return matches
+                results.append(
+                    MatchResult(
+                        record_id=str(record.get("id", id(record))),
+                        matched_id=str(candidate.get("id", id(candidate))),
+                        score=score,
+                        match_type=MatchType.FUZZY,
+                        confidence=confidence,
+                    )
+                )
 
+        return sorted(results, key=lambda r: r.score, reverse=True)
 
-def deduplicate(
-    items: list[dict[str, Any]],
-    fields: list[str],
-    threshold: float = 0.85,
-    algorithm: str = "jaro_winkler",
-) -> list[list[int]]:
-    """Find duplicate groups in a collection.
+    def _compare_records(
+        self,
+        record1: Dict[str, Any],
+        record2: Dict[str, Any],
+        fields: List[str],
+    ) -> float:
+        """Compare two records across specified fields."""
+        scores = []
+        weights = []
 
-    Args:
-        items: Items to check for duplicates.
-        fields: Fields to compare.
-        threshold: Minimum similarity.
-        algorithm: Similarity algorithm.
+        for field in fields:
+            if field in record1 and field in record2:
+                val1 = str(record1[field])
+                val2 = str(record2[field])
 
-    Returns:
-        List of duplicate groups (each group is list of item indices).
-    """
-    def get_comparable(item: dict[str, Any]) -> str:
-        return " ".join(str(item.get(f, "")) for f in fields)
-    comparables = [get_comparable(item) for item in items]
-    matches = fuzzy_match(comparables, comparables, threshold=threshold, algorithm=algorithm)
-    groups: list[list[int]] = []
-    uf = UnionFind(len(items))
-    for i, j, score in matches:
-        if i != j:
-            uf.union(i, j)
-    for root in uf.roots:
-        group = uf.get_group(root)
-        if len(group) > 1:
-            groups.append(sorted(group))
-    return groups
+                if val1 and val2:
+                    score = self.jaro_winkler_similarity(val1, val2)
+                    scores.append(score)
+                    weights.append(self.config.score_weights.get(field, 1.0))
 
+        if not scores:
+            return 0.0
 
-class UnionFind:
-    """Union-Find data structure for grouping."""
+        total_weight = sum(weights)
+        if total_weight == 0:
+            return sum(scores) / len(scores)
 
-    def __init__(self, n: int) -> None:
-        self.parent = list(range(n))
-        self.rank = [0] * n
-        self.roots = set(range(n))
+        return sum(s * w for s, w in zip(scores, weights)) / total_weight
 
-    def find(self, x: int) -> int:
-        """Find root with path compression."""
-        if self.parent[x] != x:
-            self.parent[x] = self.find(self.parent[x])
-        return self.parent[x]
+    # Deduplication
 
-    def union(self, x: int, y: int) -> None:
-        """Union two sets."""
-        rx, ry = self.find(x), self.find(y)
-        if rx == ry:
-            return
-        if self.rank[rx] < self.rank[ry]:
-            rx, ry = ry, rx
-        self.parent[ry] = rx
-        if self.rank[rx] == self.rank[ry]:
-            self.rank[rx] += 1
-        self.roots.discard(ry)
+    def deduplicate(
+        self,
+        records: List[Dict[str, Any]],
+        config: Optional[DedupeConfig] = None,
+    ) -> List[List[Dict[str, Any]]]:
+        """
+        Find duplicate record groups.
 
-    def get_group(self, x: int) -> list[int]:
-        """Get all elements in the same set as x."""
-        root = self.find(x)
-        return [i for i in range(len(self.parent)) if self.find(i) == root]
+        Args:
+            records: List of records to deduplicate
+            config: Deduplication configuration
 
+        Returns:
+            List of duplicate groups (each group is a list of records)
+        """
+        cfg = config or self.config
+        groups: List[List[Dict[str, Any]]] = []
+        processed: Set[int] = set()
 
-def match_score(
-    record1: dict[str, Any],
-    record2: dict[str, Any],
-    field_weights: Optional[dict[str, float]] = None,
-    threshold: float = 0.8,
-) -> float:
-    """Calculate weighted match score between two records.
+        if cfg.blocking_fields:
+            blocks = self._create_blocks(records, cfg.blocking_fields)
 
-    Args:
-        record1: First record.
-        record2: Second record.
-        field_weights: Optional weights per field.
-        threshold: Minimum score for a match.
+            for block_records in blocks.values():
+                for i, record in enumerate(block_records):
+                    if id(record) in processed:
+                        continue
 
-    Returns:
-        Match score between 0 and 1.
-    """
-    if not field_weights:
-        all_fields = set(record1.keys()) & set(record2.keys())
-        field_weights = {f: 1.0 / len(all_fields) for f in all_fields} if all_fields else {}
-    total_weight = 0.0
-    weighted_sum = 0.0
-    for field, weight in field_weights.items():
-        v1, v2 = record1.get(field), record2.get(field)
-        if v1 is None or v2 is None:
-            continue
-        if v1 == v2:
-            similarity = 1.0
-        elif isinstance(v1, str) and isinstance(v2, str):
-            similarity = jaro_winkler_similarity(v1, v2)
+                    group = [record]
+                    processed.add(id(record))
+
+                    for j, other in enumerate(block_records[i + 1 :], i + 1):
+                        if id(other) in processed:
+                            continue
+
+                        score = self._compare_records(
+                            record, other, cfg.compare_fields
+                        )
+
+                        if score >= cfg.threshold:
+                            group.append(other)
+                            processed.add(id(other))
+
+                    if len(group) > 1:
+                        groups.append(group)
+
         else:
-            similarity = 1.0 if v1 == v2 else 0.0
-        weighted_sum += similarity * weight
-        total_weight += weight
-    return weighted_sum / total_weight if total_weight else 0.0
+            for i, record in enumerate(records):
+                if id(record) in processed:
+                    continue
+
+                group = [record]
+                processed.add(id(record))
+
+                for j, other in enumerate(records[i + 1 :], i + 1):
+                    if id(other) in processed:
+                        continue
+
+                    score = self._compare_records(
+                        record, other, cfg.compare_fields
+                    )
+
+                    if score >= cfg.threshold:
+                        group.append(other)
+                        processed.add(id(other))
+
+                if len(group) > 1:
+                    groups.append(group)
+
+        return groups
+
+    def _create_blocks(
+        self,
+        records: List[Dict[str, Any]],
+        blocking_fields: List[str],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Create blocking keys for records."""
+        blocks: Dict[str, List[Dict[str, Any]]] = {}
+
+        for record in records:
+            for field in blocking_fields:
+                value = str(record.get(field, "")).lower()[:3]
+                if value:
+                    blocks.setdefault(value, []).append(record)
+
+        return blocks
+
+    def deduplicate_best(
+        self,
+        records: List[Dict[str, Any]],
+        config: Optional[DedupeConfig] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Deduplicate and return only the best record from each group.
+
+        Args:
+            records: List of records
+            config: Deduplication configuration
+
+        Returns:
+            List of deduplicated records
+        """
+        groups = self.deduplicate(records, config)
+        duplicates = set()
+
+        for group in groups:
+            for record in group[1:]:
+                duplicates.add(id(record))
+
+        return [r for r in records if id(r) not in duplicates]
+
+    # Record Linkage
+
+    def link_records(
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        left_keys: List[str],
+        right_keys: List[str],
+        threshold: float = 0.8,
+    ) -> List[Tuple[Dict[str, Any], Dict[str, Any], float]]:
+        """
+        Link records between two datasets.
+
+        Args:
+            left: Left dataset
+            right: Right dataset
+            left_keys: Keys to match on left
+            right_keys: Keys to match on right
+            threshold: Match threshold
+
+        Returns:
+            List of (left_record, right_record, score) tuples
+        """
+        links = []
+
+        for l_record in left:
+            best_match = None
+            best_score = 0.0
+
+            for r_record in right:
+                score = self._compare_records(l_record, r_record, left_keys + right_keys)
+
+                if score >= threshold and score > best_score:
+                    best_score = score
+                    best_match = r_record
+
+            if best_match:
+                links.append((l_record, best_match, best_score))
+
+        return links
