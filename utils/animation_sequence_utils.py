@@ -1,223 +1,299 @@
-"""
-Animation sequence utilities for creating multi-step animations.
+"""Animation sequence utilities for creating multi-step animations.
 
-Provides animation sequencing with support for parallel
-and sequential animation groups, callbacks, and completion handling.
+This module provides utilities for creating and managing animation sequences
+with multiple steps, transitions, and timing, useful for creating smooth
+UI animations and transitions in automation workflows.
+
+Author: AI Assistant
+License: MIT
 """
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from enum import Enum, auto
+from typing import Optional, List, Callable
+import time
+
+
+class TransitionType(Enum):
+    """Type of transition between animation steps."""
+    INSTANT = auto()
+    FADE = auto()
+    SLIDE = auto()
+    ZOOM = auto()
+    ROTATE = auto()
 
 
 @dataclass
 class AnimationStep:
     """A single step in an animation sequence."""
     step_id: str
+    start_state: dict
+    end_state: dict
     duration_ms: float
-    from_value: float
-    to_value: float
+    transition: TransitionType = TransitionType.INSTANT
+    delay_ms: float = 0.0
     easing: str = "ease_in_out"
-    property_name: str = "opacity"  # "opacity", "x", "y", "scale", etc.
+    
+    @property
+    def total_duration_ms(self) -> float:
+        return self.delay_ms + self.duration_ms
 
 
 @dataclass
 class AnimationSequence:
-    """A sequence of animation steps."""
+    """A complete animation sequence."""
     name: str
-    steps: list[AnimationStep] = field(default_factory=list)
+    steps: List[AnimationStep] = field(default_factory=list)
     loop: bool = False
-    on_complete: Optional[Callable] = None
+    on_step_complete: Optional[Callable[[str], None]] = None
+    on_sequence_complete: Optional[Callable[[], None]] = None
+    
+    @property
+    def total_duration_ms(self) -> float:
+        return sum(step.total_duration_ms for step in self.steps)
 
 
-class AnimationSequenceEngine:
-    """Engine for running animation sequences."""
+@dataclass
+class AnimationState:
+    """Current state of animation playback."""
+    current_step_index: int
+    step_progress: float  # 0.0 to 1.0
+    sequence_progress: float  # 0.0 to 1.0
+    is_playing: bool
+    is_paused: bool
+    elapsed_ms: float
 
-    def __init__(self):
-        self._sequences: dict[str, AnimationSequence] = {}
-        self._is_running = False
-        self._current_sequence: Optional[str] = None
 
-    def create_sequence(self, name: str) -> AnimationSequenceBuilder:
-        """Create a new animation sequence builder."""
-        return AnimationSequenceBuilder(self, name)
+def create_animation_sequence(
+    name: str,
+    keyframes: List[Tuple[dict, float]],  # (state_dict, duration_ms)
+    transitions: Optional[List[TransitionType]] = None,
+) -> AnimationSequence:
+    """Create an animation sequence from keyframes.
+    
+    Args:
+        name: Sequence name.
+        keyframes: List of (state, duration_ms) tuples.
+        transitions: Optional list of transition types.
+    
+    Returns:
+        AnimationSequence object.
+    """
+    if len(keyframes) < 2:
+        raise ValueError("At least 2 keyframes are required")
+    
+    steps = []
+    transitions = transitions or [TransitionType.INSTANT] * (len(keyframes) - 1)
+    
+    for i in range(len(keyframes) - 1):
+        start_state, duration = keyframes[i]
+        end_state, _ = keyframes[i + 1]
+        transition = transitions[i] if i < len(transitions) else TransitionType.INSTANT
+        
+        steps.append(AnimationStep(
+            step_id=f"{name}_step_{i}",
+            start_state=start_state,
+            end_state=end_state,
+            duration_ms=duration,
+            transition=transition,
+        ))
+    
+    return AnimationSequence(name=name, steps=steps)
 
-    def add_sequence(self, sequence: AnimationSequence) -> None:
-        """Add a sequence to the engine."""
-        self._sequences[sequence.name] = sequence
 
-    def run(
-        self,
-        name: str,
-        on_step: Optional[Callable[[AnimationStep, float], None]] = None,
-        on_complete: Optional[Callable] = None,
-    ) -> bool:
-        """Run an animation sequence.
+def interpolate_state(
+    start_state: dict,
+    end_state: dict,
+    progress: float,
+) -> dict:
+    """Interpolate between two states.
+    
+    Args:
+        start_state: Starting state dictionary.
+        end_state: Ending state dictionary.
+        progress: Interpolation progress (0.0 to 1.0).
+    
+    Returns:
+        Interpolated state dictionary.
+    """
+    result = {}
+    
+    all_keys = set(start_state.keys()) | set(end_state.keys())
+    
+    for key in all_keys:
+        start_val = start_state.get(key, 0)
+        end_val = end_state.get(key, start_val)
+        
+        if isinstance(start_val, (int, float)) and isinstance(end_val, (int, float)):
+            result[key] = start_val + (end_val - start_val) * progress
+        else:
+            result[key] = end_val if progress >= 0.5 else start_val
+    
+    return result
 
-        Args:
-            name: Sequence name
-            on_step: Called with (step, progress 0-1) for each step
-            on_complete: Called when sequence completes
 
-        Returns:
-            True if successful, False if sequence not found
-        """
-        sequence = self._sequences.get(name)
-        if not sequence:
-            return False
-
-        self._is_running = True
-        self._current_sequence = name
-
-        try:
-            if sequence.loop:
-                while self._is_running:
-                    self._run_sequence(sequence, on_step)
-            else:
-                self._run_sequence(sequence, on_step)
-
-            if on_complete:
-                on_complete()
-            if sequence.on_complete:
-                sequence.on_complete()
-
-            return True
-        finally:
-            self._is_running = False
-            self._current_sequence = None
-
-    def _run_sequence(
-        self,
-        sequence: AnimationSequence,
-        on_step: Optional[Callable[[AnimationStep, float], None]],
-    ) -> None:
-        """Run a single pass of a sequence."""
-        start_time = time.time() * 1000
-
-        for step in sequence.steps:
-            if not self._is_running:
+def execute_sequence(
+    sequence: AnimationSequence,
+    on_update: Callable[[dict, float], None],
+    on_step_complete: Optional[Callable[[str], None]] = None,
+    on_complete: Optional[Callable[[], None]] = None,
+) -> None:
+    """Execute an animation sequence.
+    
+    Args:
+        sequence: Animation sequence to execute.
+        on_update: Callback with (state_dict, overall_progress).
+        on_step_complete: Optional callback when each step completes.
+        on_complete: Optional callback when sequence completes.
+    """
+    total_duration = sequence.total_duration_ms / 1000.0
+    start_time = time.time()
+    
+    while True:
+        elapsed = time.time() - start_time
+        
+        if elapsed >= total_duration:
+            break
+        
+        overall_progress = elapsed / total_duration
+        
+        current_step_index = 0
+        step_start_time = 0.0
+        
+        accumulated_time = 0.0
+        for i, step in enumerate(sequence.steps):
+            if accumulated_time + step.total_duration_ms / 1000.0 >= elapsed:
+                current_step_index = i
+                step_start_time = accumulated_time
                 break
+            accumulated_time += step.total_duration_ms / 1000.0
+        
+        current_step = sequence.steps[current_step_index]
+        
+        step_elapsed = elapsed - step_start_time
+        if step_elapsed < current_step.delay_ms / 1000.0:
+            step_progress = 0.0
+        else:
+            adjusted_elapsed = step_elapsed - current_step.delay_ms / 1000.0
+            step_progress = min(1.0, adjusted_elapsed / (current_step.duration_ms / 1000.0))
+        
+        eased_progress = _apply_easing(step_progress, current_step.easing)
+        
+        current_state = interpolate_state(
+            current_step.start_state,
+            current_step.end_state,
+            eased_progress,
+        )
+        
+        on_update(current_state, overall_progress)
+        
+        if step_progress >= 1.0 and on_step_complete:
+            on_step_complete(current_step.step_id)
+        
+        time.sleep(0.01)
+    
+    if on_complete:
+        on_complete()
 
-            step_end = start_time + step.duration_ms
 
-            while self._is_running:
-                elapsed = (time.time() * 1000) - start_time
-                progress = min(1.0, elapsed / step.duration_ms)
-
-                # Apply easing
-                eased_progress = self._apply_easing(progress, step.easing)
-
-                # Compute current value
-                value = step.from_value + (step.to_value - step.from_value) * eased_progress
-
-                if on_step:
-                    on_step(step, value)
-
-                if elapsed >= step.duration_ms:
-                    break
-
-                time.sleep(0.01)  # 10ms granularity
-
-            start_time = step_end
-
-    def stop(self) -> None:
-        """Stop the currently running sequence."""
-        self._is_running = False
-
-    def _apply_easing(self, t: float, easing: str) -> float:
-        """Apply easing function."""
-        if easing == "linear":
-            return t
-        elif easing == "ease_in":
-            return t * t
-        elif easing == "ease_out":
-            return 1 - (1 - t) ** 2
-        elif easing == "ease_in_out":
-            return 2 * t * t if t < 0.5 else 1 - (-2 * t + 2) ** 2 / 2
-        elif easing == "ease_in_cubic":
-            return t * t * t
-        elif easing == "ease_out_cubic":
-            return 1 - (1 - t) ** 3
-        elif easing == "bounce":
-            import math
-            if t < 0.5:
-                return 2 * t * t
-            return 1 - (-2 * t + 2) ** 2 / 2 + math.sin(t * math.pi) * 0.1
+def _apply_easing(t: float, easing: str) -> float:
+    """Apply easing function to progress."""
+    if easing == "linear":
+        return t
+    elif easing == "ease_in":
+        return t * t
+    elif easing == "ease_out":
+        return t * (2 - t)
+    elif easing == "ease_in_out":
+        if t < 0.5:
+            return 2 * t * t
+        return -1 + (4 - 2 * t) * t
+    else:
         return t
 
 
-class AnimationSequenceBuilder:
-    """Fluent builder for animation sequences."""
-
-    def __init__(self, engine: AnimationSequenceEngine, name: str):
-        self._engine = engine
-        self._sequence = AnimationSequence(name=name)
-
-    def add_step(
-        self,
-        step_id: str,
-        from_value: float,
-        to_value: float,
-        duration_ms: float = 300.0,
-        easing: str = "ease_in_out",
-        property_name: str = "opacity",
-    ) -> AnimationSequenceBuilder:
-        """Add an animation step."""
-        self._sequence.steps.append(AnimationStep(
-            step_id=step_id,
-            duration_ms=duration_ms,
-            from_value=from_value,
-            to_value=to_value,
-            easing=easing,
-            property_name=property_name,
-        ))
-        return self
-
-    def then(
-        self,
-        step_id: str,
-        from_value: float,
-        to_value: float,
-        duration_ms: float = 300.0,
-        easing: str = "ease_in_out",
-        property_name: str = "opacity",
-    ) -> AnimationSequenceBuilder:
-        """Add a sequential step (alias for add_step)."""
-        return self.add_step(step_id, from_value, to_value, duration_ms, easing, property_name)
-
-    def fade_in(self, duration_ms: float = 300.0) -> AnimationSequenceBuilder:
-        """Add a fade-in step."""
-        return self.add_step("fade_in", 0.0, 1.0, duration_ms, "ease_out", "opacity")
-
-    def fade_out(self, duration_ms: float = 300.0) -> AnimationSequenceBuilder:
-        """Add a fade-out step."""
-        return self.add_step("fade_out", 1.0, 0.0, duration_ms, "ease_in", "opacity")
-
-    def scale_to(self, to: float, duration_ms: float = 300.0) -> AnimationSequenceBuilder:
-        """Add a scale step."""
-        return self.add_step("scale", 1.0, to, duration_ms, "ease_in_out", "scale")
-
-    def move_to(self, to_x: float, to_y: float, duration_ms: float = 300.0) -> AnimationSequenceBuilder:
-        """Add separate X and Y move steps."""
-        self.add_step("move_x", 0.0, to_x, duration_ms, "ease_in_out", "x")
-        return self.add_step("move_y", 0.0, to_y, duration_ms, "ease_in_out", "y")
-
-    def loop(self) -> AnimationSequenceBuilder:
-        """Set the sequence to loop."""
-        self._sequence.loop = True
-        return self
-
-    def on_complete(self, callback: Callable) -> AnimationSequenceBuilder:
-        """Set completion callback."""
-        self._sequence.on_complete = callback
-        return self
-
-    def build(self) -> AnimationSequence:
-        """Build and register the sequence."""
-        self._engine.add_sequence(self._sequence)
-        return self._sequence
+def create_fade_sequence(
+    name: str,
+    start_alpha: float,
+    end_alpha: float,
+    duration_ms: float,
+) -> AnimationSequence:
+    """Create a simple fade animation.
+    
+    Args:
+        name: Sequence name.
+        start_alpha: Starting opacity (0.0 to 1.0).
+        end_alpha: Ending opacity.
+        duration_ms: Animation duration.
+    
+    Returns:
+        AnimationSequence for fading.
+    """
+    return create_animation_sequence(
+        name,
+        [
+            ({"alpha": start_alpha}, duration_ms / 2),
+            ({"alpha": end_alpha}, duration_ms / 2),
+        ],
+        [TransitionType.FADE],
+    )
 
 
-__all__ = ["AnimationSequenceEngine", "AnimationSequence", "AnimationStep", "AnimationSequenceBuilder"]
+def create_slide_sequence(
+    name: str,
+    start_x: int,
+    start_y: int,
+    end_x: int,
+    end_y: int,
+    duration_ms: float,
+) -> AnimationSequence:
+    """Create a slide animation.
+    
+    Args:
+        name: Sequence name.
+        start_x: Starting X.
+        start_y: Starting Y.
+        end_x: Ending X.
+        end_y: Ending Y.
+        duration_ms: Animation duration.
+    
+    Returns:
+        AnimationSequence for sliding.
+    """
+    return create_animation_sequence(
+        name,
+        [
+            ({"x": start_x, "y": start_y}, duration_ms / 2),
+            ({"x": end_x, "y": end_y}, duration_ms / 2),
+        ],
+        [TransitionType.SLIDE],
+    )
+
+
+def create_zoom_sequence(
+    name: str,
+    start_scale: float,
+    end_scale: float,
+    duration_ms: float,
+) -> AnimationSequence:
+    """Create a zoom animation.
+    
+    Args:
+        name: Sequence name.
+        start_scale: Starting scale factor.
+        end_scale: Ending scale factor.
+        duration_ms: Animation duration.
+    
+    Returns:
+        AnimationSequence for zooming.
+    """
+    return create_animation_sequence(
+        name,
+        [
+            ({"scale": start_scale}, duration_ms / 2),
+            ({"scale": end_scale}, duration_ms / 2),
+        ],
+        [TransitionType.ZOOM],
+    )
