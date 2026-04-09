@@ -1,229 +1,262 @@
-"""
-Data Imputer Action Module.
-
-Handles missing data imputation using various strategies including
-mean, median, mode, forward fill, backward fill, interpolation, and ML-based.
-
-Author: RabAi Team
-"""
+"""Data imputation for handling missing values."""
 
 from __future__ import annotations
 
-import statistics
+from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-
-import numpy as np
-import pandas as pd
+from typing import Any, Callable, Optional, Sequence
 
 
-class ImputeStrategy(Enum):
-    """Imputation strategies."""
+class ImputationStrategy(str, Enum):
+    """Strategy for imputing missing values."""
+
     MEAN = "mean"
     MEDIAN = "median"
     MODE = "mode"
+    FORWARD_FILL = "forward_fill"
+    BACKWARD_FILL = "backward_fill"
     CONSTANT = "constant"
-    FORWARD_FILL = "ffill"
-    BACKWARD_FILL = "bfill"
-    INTERPOLATE_LINEAR = "interpolate_linear"
-    INTERPOLATE_TIME = "interpolate_time"
+    INTERPOLATE = "interpolate"
     KNN = "knn"
-    REGRESSOR = "regressor"
+    CUSTOM = "custom"
 
 
 @dataclass
-class ImputeConfig:
+class ImputationConfig:
     """Configuration for imputation."""
-    strategy: ImputeStrategy
-    columns: List[str] = field(default_factory=list)
+
+    field_name: str
+    strategy: ImputationStrategy
     constant_value: Any = None
-    fill_value: Any = None
-    limit: Optional[int] = None
-    knn_neighbors: int = 5
-    regressor_fn: Optional[Callable] = None
-    group_by: Optional[List[str]] = None
+    custom_func: Optional[Callable[[list], Any]] = None
+    limit: Optional[int] = None  # For forward/backward fill
 
 
 @dataclass
-class ImputeReport:
-    """Report of imputation operations."""
-    strategy: ImputeStrategy
-    total_missing_before: int
-    total_missing_after: int
-    columns_imputed: List[str]
-    values_filled: Dict[str, Any] = field(default_factory=dict)
-    timestamp: datetime = field(default_factory=datetime.now)
+class ImputationResult:
+    """Result of imputation operation."""
 
-    @property
-    def fill_count(self) -> int:
-        return self.total_missing_before - self.total_missing_after
+    field_name: str
+    total_records: int
+    missing_count: int
+    imputed_count: int
+    strategy: ImputationStrategy
+    imputed_value: Any = None
 
 
-class DataImputer:
-    """
-    Handles missing data imputation with multiple strategies.
-
-    Supports column-wise and row-wise imputation using statistical methods,
-    time-aware methods, and ML-based approaches.
-
-    Example:
-        >>> imputer = DataImputer()
-        >>> imputer.configure(strategy=ImputeStrategy.MEAN, columns=["age", "income"])
-        >>> result = imputer.impute(df)
-    """
+class DataImputerAction:
+    """Imputes missing values in datasets."""
 
     def __init__(self):
-        self._configs: Dict[str, ImputeConfig] = {}
+        """Initialize imputer."""
+        self._configs: list[ImputationConfig] = []
 
-    def configure(
+    def add_config(self, config: ImputationConfig) -> None:
+        """Add an imputation configuration."""
+        self._configs.append(config)
+
+    def _calculate_mean(self, values: list[float]) -> float:
+        """Calculate mean of values."""
+        valid = [v for v in values if v is not None]
+        return sum(valid) / len(valid) if valid else 0.0
+
+    def _calculate_median(self, values: list[float]) -> float:
+        """Calculate median of values."""
+        valid = sorted([v for v in values if v is not None])
+        if not valid:
+            return 0.0
+        n = len(valid)
+        if n % 2 == 0:
+            return (valid[n // 2 - 1] + valid[n // 2]) / 2
+        return valid[n // 2]
+
+    def _calculate_mode(self, values: list[Any]) -> Any:
+        """Calculate mode of values."""
+        valid = [v for v in values if v is not None]
+        if not valid:
+            return None
+        counter = Counter(valid)
+        return counter.most_common(1)[0][0]
+
+    def _forward_fill(
         self,
-        strategy: ImputeStrategy,
-        columns: Optional[List[str]] = None,
-        **kwargs,
-    ) -> "DataImputer":
-        """Configure imputation strategy for specific columns."""
-        col_key = ",".join(sorted(columns or ["__all__"]))
-        self._configs[col_key] = ImputeConfig(
-            strategy=strategy,
-            columns=columns or [],
-            **kwargs,
-        )
-        return self
+        values: list[Any],
+        limit: Optional[int] = None,
+    ) -> list[Any]:
+        """Forward fill missing values."""
+        result = []
+        last_valid = None
+        fill_count = 0
 
-    def impute(
-        self,
-        df: pd.DataFrame,
-        global_strategy: Optional[ImputeStrategy] = None,
-        global_columns: Optional[List[str]] = None,
-    ) -> Tuple[pd.DataFrame, ImputeReport]:
-        """Impute missing values in DataFrame."""
-        df = df.copy()
-        reports = []
-        total_missing_before = int(df.isnull().sum().sum())
-
-        # Apply global strategy if specified
-        if global_strategy and global_columns:
-            report = self._impute_columns(df, global_strategy, global_columns)
-            reports.append(report)
-
-        # Apply configured strategies
-        for col_key, config in self._configs.items():
-            if config.columns:
-                report = self._impute_columns(df, config.strategy, config.columns, config)
-                reports.append(report)
-
-        total_missing_after = int(df.isnull().sum().sum())
-
-        # Merge reports
-        combined_report = ImputeReport(
-            strategy=global_strategy or reports[0].strategy if reports else ImputeStrategy.MEAN,
-            total_missing_before=total_missing_before,
-            total_missing_after=total_missing_after,
-            columns_imputed=[],
-        )
-        for r in reports:
-            combined_report.columns_imputed.extend(r.columns_imputed)
-            combined_report.values_filled.update(r.values_filled)
-
-        return df, combined_report
-
-    def _impute_columns(
-        self,
-        df: pd.DataFrame,
-        strategy: ImputeStrategy,
-        columns: List[str],
-        config: Optional[ImputeConfig] = None,
-    ) -> ImputeReport:
-        """Impute specific columns."""
-        report = ImputeReport(
-            strategy=strategy,
-            total_missing_before=int(df[columns].isnull().sum().sum()),
-            total_missing_after=0,
-            columns_imputed=columns,
-        )
-
-        for col in columns:
-            if col not in df.columns:
-                continue
-            missing_before = df[col].isnull().sum()
-            if missing_before == 0:
-                continue
-
-            if strategy == ImputeStrategy.MEAN:
-                fill_val = df[col].mean()
-            elif strategy == ImputeStrategy.MEDIAN:
-                fill_val = df[col].median()
-            elif strategy == ImputeStrategy.MODE:
-                fill_val = df[col].mode().iloc[0] if len(df[col].mode()) > 0 else None
-            elif strategy == ImputeStrategy.CONSTANT:
-                fill_val = config.constant_value if config else None
-            elif strategy == ImputeStrategy.FORWARD_FILL:
-                df[col] = df[col].ffill(limit=config.limit if config else None)
-                report.values_filled[col] = "ffill"
-                continue
-            elif strategy == ImputeStrategy.BACKWARD_FILL:
-                df[col] = df[col].bfill(limit=config.limit if config else None)
-                report.values_filled[col] = "bfill"
-                continue
-            elif strategy == ImputeStrategy.INTERPOLATE_LINEAR:
-                df[col] = df[col].interpolate(method="linear", limit=config.limit if config else None)
-                report.values_filled[col] = "interpolate"
-                continue
-            elif strategy == ImputeStrategy.INTERPOLATE_TIME:
-                df[col] = df[col].interpolate(method="time", limit=config.limit if config else None)
-                report.values_filled[col] = "interpolate_time"
-                continue
+        for value in values:
+            if value is not None:
+                last_valid = value
+                fill_count = 0
+                result.append(value)
+            elif last_valid is not None:
+                if limit is None or fill_count < limit:
+                    result.append(last_valid)
+                    fill_count += 1
+                else:
+                    result.append(None)
             else:
-                fill_val = None
+                result.append(None)
 
-            if fill_val is not None and not pd.isna(fill_val):
-                df[col] = df[col].fillna(fill_val)
-                report.values_filled[col] = fill_val
+        return result
 
-        report.total_missing_after = int(df[columns].isnull().sum().sum())
-        return report
-
-    def impute_row_wise(
+    def _backward_fill(
         self,
-        df: pd.DataFrame,
-        strategy: ImputeStrategy = ImputeStrategy.MEAN,
-        threshold: float = 0.5,
-    ) -> pd.DataFrame:
-        """
-        Impute missing values row-wise (for rows with few missing values).
+        values: list[Any],
+        limit: Optional[int] = None,
+    ) -> list[Any]:
+        """Backward fill missing values."""
+        result = [None] * len(values)
+        next_valid = None
+        fill_count = 0
+
+        for i in range(len(values) - 1, -1, -1):
+            value = values[i]
+            if value is not None:
+                next_valid = value
+                fill_count = 0
+                result[i] = value
+            elif next_valid is not None:
+                if limit is None or fill_count < limit:
+                    result[i] = next_valid
+                    fill_count += 1
+
+        return result
+
+    def _interpolate_linear(self, values: list[float]) -> list[float]:
+        """Linear interpolation."""
+        result = list(values)
+        n = len(values)
+
+        start_idx = 0
+        while start_idx < n and values[start_idx] is None:
+            start_idx += 1
+
+        if start_idx == n:
+            return result
+
+        for i in range(start_idx + 1, n):
+            if values[i] is None:
+                end_idx = i + 1
+                while end_idx < n and values[end_idx] is None:
+                    end_idx += 1
+
+                if end_idx < n:
+                    start_val = values[start_idx]
+                    end_val = values[end_idx]
+                    step = (end_val - start_val) / (end_idx - start_idx)
+                    for j in range(start_idx + 1, end_idx):
+                        result[j] = start_val + step * (j - start_idx)
+                else:
+                    for j in range(start_idx + 1, end_idx):
+                        result[j] = values[start_idx]
+
+                start_idx = end_idx
+            else:
+                start_idx = i
+
+        return result
+
+    def impute_field(
+        self,
+        records: Sequence[dict[str, Any]],
+        config: ImputationConfig,
+    ) -> ImputationResult:
+        """Impute missing values for a single field.
 
         Args:
-            df: Input DataFrame
-            strategy: Strategy to use
-            threshold: Maximum fraction of missing values to impute (0.5 = 50%)
+            records: Input records.
+            config: Imputation configuration.
+
+        Returns:
+            ImputationResult with statistics.
         """
-        df = df.copy()
-        for idx, row in df.iterrows():
-            missing_count = row.isnull().sum()
-            missing_ratio = missing_count / len(row)
-            if missing_ratio > threshold:
-                continue
-            for col in df.columns:
-                if pd.isnull(row[col]):
-                    fill_val = None
-                    if strategy == ImputeStrategy.MEAN:
-                        fill_val = df[col].mean()
-                    elif strategy == ImputeStrategy.MEDIAN:
-                        fill_val = df[col].median()
-                    elif strategy == ImputeStrategy.MODE:
-                        fill_val = df[col].mode().iloc[0] if len(df[col].mode()) > 0 else None
-                    if fill_val is not None:
-                        df.at[idx, col] = fill_val
-        return df
+        values = [record.get(config.field_name) for record in records]
+        missing_count = sum(1 for v in values if v is None)
 
+        if missing_count == 0:
+            return ImputationResult(
+                field_name=config.field_name,
+                total_records=len(records),
+                missing_count=0,
+                imputed_count=0,
+                strategy=config.strategy,
+            )
 
-def create_imputer(
-    strategy: str = "mean",
-    columns: Optional[List[str]] = None,
-) -> DataImputer:
-    """Factory to create a configured data imputer."""
-    imputer = DataImputer()
-    imputer.configure(ImputeStrategy(strategy), columns)
-    return imputer
+        imputed_value = None
+
+        if config.strategy == ImputationStrategy.MEAN:
+            imputed_value = self._calculate_mean([v for v in values if v is not None])
+            values = [imputed_value if v is None else v for v in values]
+
+        elif config.strategy == ImputationStrategy.MEDIAN:
+            imputed_value = self._calculate_median([v for v in values if v is not None])
+            values = [imputed_value if v is None else v for v in values]
+
+        elif config.strategy == ImputationStrategy.MODE:
+            imputed_value = self._calculate_mode(values)
+            values = [imputed_value if v is None else v for v in values]
+
+        elif config.strategy == ImputationStrategy.CONSTANT:
+            imputed_value = config.constant_value
+            values = [imputed_value if v is None else v for v in values]
+
+        elif config.strategy == ImputationStrategy.FORWARD_FILL:
+            values = self._forward_fill(values, config.limit)
+
+        elif config.strategy == ImputationStrategy.BACKWARD_FILL:
+            values = self._backward_fill(values, config.limit)
+
+        elif config.strategy == ImputationStrategy.INTERPOLATE:
+            float_values = [float(v) if v is not None else None for v in values]
+            float_values = self._interpolate_linear(float_values)
+            values = float_values
+
+        elif config.strategy == ImputationStrategy.CUSTOM and config.custom_func:
+            valid_values = [v for v in values if v is not None]
+            imputed_value = config.custom_func(valid_values)
+            values = [imputed_value if v is None else v for v in values]
+
+        for record, value in zip(records, values):
+            record[config.field_name] = value
+
+        return ImputationResult(
+            field_name=config.field_name,
+            total_records=len(records),
+            missing_count=missing_count,
+            imputed_count=missing_count,
+            strategy=config.strategy,
+            imputed_value=imputed_value,
+        )
+
+    def impute_batch(
+        self,
+        records: Sequence[dict[str, Any]],
+        configs: Optional[list[ImputationConfig]] = None,
+    ) -> list[ImputationResult]:
+        """Impute missing values for multiple fields.
+
+        Args:
+            records: Input records.
+            configs: List of imputation configurations.
+
+        Returns:
+            List of ImputationResult for each field.
+        """
+        configs = configs or self._configs
+        results = []
+
+        for config in configs:
+            records_copy = [r.copy() for r in records]
+            result = self.impute_field(records_copy, config)
+            results.append(result)
+
+            for r, r_copy in zip(records, records_copy):
+                r[config.field_name] = r_copy[config.field_name]
+
+        return results
