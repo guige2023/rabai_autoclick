@@ -1,304 +1,326 @@
+"""Batch processing utilities.
+
+Provides batching, chunking, and bulk operation
+support for efficient data processing.
 """
-Batch Processing Utilities
 
-Provides utilities for efficient batch processing,
-including batching, chunking, and parallel batch execution.
-"""
-
-from __future__ import annotations
-
-import asyncio
-import copy
 import time
-from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-from dataclasses import dataclass, field
-from typing import Any, Generic, TypeVar
+from collections import deque
+from dataclasses import dataclass
+from typing import Any, Callable, Deque, Generic, List, Optional, TypeVar, Iterator
+
 
 T = TypeVar("T")
-TResult = TypeVar("TResult")
+R = TypeVar("R")
 
 
 @dataclass
-class BatchResult(Generic[TResult]):
-    """Result of a batch operation."""
-    success: bool
-    results: list[TResult] = field(default_factory=list)
-    errors: list[tuple[int, str]] = field(default_factory=list)  # (index, error)
-    total_time_ms: float = 0.0
-    processed_count: int = 0
-
-    @property
-    def failed_count(self) -> int:
-        return len(self.errors)
-
-    @property
-    def success_count(self) -> int:
-        return len(self.results)
+class BatchResult(Generic[R]):
+    """Result of batch processing."""
+    results: List[R]
+    failed: List[tuple[int, Exception]]
+    total_processed: int
+    elapsed_seconds: float
 
 
-@dataclass
-class BatchConfig:
-    """Configuration for batch processing."""
-    batch_size: int = 100
-    max_workers: int = 4
-    max_retries: int = 0
-    retry_delay_ms: float = 100.0
-    timeout_seconds: float | None = None
-    stop_on_error: bool = False
+class BatchProcessor(Generic[T, R]):
+    """Process items in batches.
 
+    Example:
+        def process_item(item):
+            return heavy_computation(item)
 
-def chunk(iterable: Sequence[T], chunk_size: int) -> list[list[T]]:
-    """
-    Split an iterable into chunks of specified size.
-
-    Args:
-        iterable: The input sequence.
-        chunk_size: Size of each chunk.
-
-    Returns:
-        List of chunks.
-    """
-    result = []
-    for i in range(0, len(iterable), chunk_size):
-        result.append(list(iterable[i:i + chunk_size]))
-    return result
-
-
-def batch_process(
-    items: Sequence[T],
-    func: Callable[[T], TResult],
-    config: BatchConfig | None = None,
-) -> BatchResult[TResult]:
-    """
-    Process items in batches.
-
-    Args:
-        items: Items to process.
-        func: Function to apply to each item.
-        config: Batch processing configuration.
-
-    Returns:
-        BatchResult with all results and errors.
-    """
-    config = config or BatchConfig()
-    start_time = time.time()
-    results: list[TResult] = []
-    errors: list[tuple[int, str]] = []
-
-    batches = chunk(items, config.batch_size)
-
-    for batch_idx, batch in enumerate(batches):
-        for item_idx, item in enumerate(batch):
-            global_idx = batch_idx * config.batch_size + item_idx
-
-            try:
-                result = func(item)
-                results.append(result)
-            except Exception as e:
-                error = (global_idx, str(e))
-                errors.append(error)
-
-                if config.stop_on_error:
-                    return BatchResult(
-                        success=False,
-                        results=results,
-                        errors=errors,
-                        total_time_ms=(time.time() - start_time) * 1000,
-                        processed_count=len(results) + len(errors),
-                    )
-
-    return BatchResult(
-        success=len(errors) == 0,
-        results=results,
-        errors=errors,
-        total_time_ms=(time.time() - start_time) * 1000,
-        processed_count=len(items),
-    )
-
-
-def batch_process_parallel(
-    items: Sequence[T],
-    func: Callable[[T], TResult],
-    config: BatchConfig | None = None,
-) -> BatchResult[TResult]:
-    """
-    Process items in parallel batches.
-
-    Args:
-        items: Items to process.
-        func: Function to apply to each item.
-        config: Batch processing configuration.
-
-    Returns:
-        BatchResult with all results and errors.
-    """
-    config = config or BatchConfig()
-    start_time = time.time()
-    results: list[TResult | None] = [None] * len(items)
-    errors: list[tuple[int, str]] = []
-
-    def process_item(idx: int, item: T) -> tuple[int, TResult | None, str | None]:
-        try:
-            return (idx, func(item), None)
-        except Exception as e:
-            return (idx, None, str(e))
-
-    with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
-        futures = [
-            executor.submit(process_item, idx, item)
-            for idx, item in enumerate(items)
-        ]
-
-        for future in futures:
-            idx, result, error = future.result()
-            if error:
-                errors.append((idx, error))
-            else:
-                results[idx] = result  # type: ignore
-
-    final_results = [r for r in results if r is not None]  # type: ignore
-
-    return BatchResult(
-        success=len(errors) == 0,
-        results=final_results,  # type: ignore
-        errors=errors,
-        total_time_ms=(time.time() - start_time) * 1000,
-        processed_count=len(items),
-    )
-
-
-async def batch_process_async(
-    items: Sequence[T],
-    func: Callable[[T], TResult],
-    config: BatchConfig | None = None,
-) -> BatchResult[TResult]:
-    """
-    Async batch processing with concurrency control.
-
-    Args:
-        items: Items to process.
-        func: Async function to apply to each item.
-        config: Batch processing configuration.
-
-    Returns:
-        BatchResult with all results and errors.
-    """
-    config = config or BatchConfig()
-    start_time = time.time()
-    results: list[TResult] = []
-    errors: list[tuple[int, str]] = []
-
-    semaphore = asyncio.Semaphore(config.max_workers)
-
-    async def process_with_semaphore(idx: int, item: T) -> tuple[int, TResult | None, str | None]:
-        async with semaphore:
-            try:
-                result = await func(item)
-                return (idx, result, None)
-            except Exception as e:
-                return (idx, None, str(e))
-
-    tasks = [
-        process_with_semaphore(idx, item)
-        for idx, item in enumerate(items)
-    ]
-
-    completed = await asyncio.gather(*tasks, return_exceptions=True)
-
-    for item in completed:
-        if isinstance(item, Exception):
-            errors.append((-1, str(item)))
-        else:
-            idx, result, error = item
-            if error:
-                errors.append((idx, error))
-            else:
-                results.append(result)  # type: ignore
-
-    return BatchResult(
-        success=len(errors) == 0,
-        results=results,
-        errors=errors,
-        total_time_ms=(time.time() - start_time) * 1000,
-        processed_count=len(items),
-    )
-
-
-class BatchProcessor(Generic[T]):
-    """
-    Configurable batch processor.
-    """
-
-    def __init__(self, func: Callable[[T], TResult], config: BatchConfig | None = None):
-        self._func = func
-        self._config = config or BatchConfig()
-
-    def process(self, items: Sequence[T]) -> BatchResult[TResult]:
-        """Process items synchronously."""
-        return batch_process(items, self._func, self._config)
-
-    def process_parallel(self, items: Sequence[T]) -> BatchResult[TResult]:
-        """Process items in parallel."""
-        return batch_process_parallel(items, self._func, self._config)
-
-    async def process_async(self, items: Sequence[T]) -> BatchResult[TResult]:
-        """Process items asynchronously."""
-        return await batch_process_async(items, self._func, self._config)
-
-
-@dataclass
-class StreamingBatchConfig:
-    """Configuration for streaming batch processing."""
-    batch_size: int = 100
-    max_buffer_size: int = 1000
-    flush_interval_seconds: float = 1.0
-
-
-class StreamingBatchProcessor(Generic[T, TResult]):
-    """
-    Processor that accumulates items and processes them in batches.
+        processor = BatchProcessor(batch_size=100)
+        results = processor.process(items, process_item)
     """
 
     def __init__(
         self,
-        func: Callable[[T], TResult],
-        config: StreamingBatchConfig | None = None,
-    ):
-        self._func = func
-        self._config = config or StreamingBatchConfig()
-        self._buffer: list[T] = []
-        self._results: list[TResult] = []
+        batch_size: int = 50,
+        max_workers: int = 4,
+        on_error: Optional[Callable[[int, Exception], None]] = None,
+    ) -> None:
+        self.batch_size = batch_size
+        self.max_workers = max_workers
+        self.on_error = on_error
 
-    def add(self, item: T) -> list[TResult] | None:
+    def process(
+        self,
+        items: List[T],
+        processor: Callable[[T], R],
+        stop_on_error: bool = False,
+    ) -> BatchResult[R]:
+        """Process items in batches.
+
+        Args:
+            items: Items to process.
+            processor: Function to apply to each item.
+            stop_on_error: Stop processing on first error.
+
+        Returns:
+            BatchResult with all results and errors.
         """
-        Add an item to the buffer.
-        Returns results if batch was processed.
+        results: List[R] = []
+        failed: List[tuple[int, Exception]] = []
+        total = 0
+        start = time.time()
+
+        for i, item in enumerate(items):
+            try:
+                result = processor(item)
+                results.append(result)
+                total += 1
+            except Exception as e:
+                failed.append((i, e))
+                if self.on_error:
+                    self.on_error(i, e)
+                if stop_on_error:
+                    break
+
+        return BatchResult(
+            results=results,
+            failed=failed,
+            total_processed=total,
+            elapsed_seconds=time.time() - start,
+        )
+
+    def process_batches(
+        self,
+        items: List[T],
+        batch_processor: Callable[[List[T]], List[R]],
+    ) -> BatchResult[R]:
+        """Process items as batches.
+
+        Args:
+            items: Items to process.
+            batch_processor: Function that processes a batch.
+
+        Returns:
+            BatchResult with combined results.
         """
+        results: List[R] = []
+        failed: List[tuple[int, Exception]] = []
+        total = 0
+        start = time.time()
+
+        for i in range(0, len(items), self.batch_size):
+            batch = items[i:i + self.batch_size]
+            batch_idx = i // self.batch_size
+            try:
+                batch_results = batch_processor(batch)
+                results.extend(batch_results)
+                total += len(batch)
+            except Exception as e:
+                failed.append((batch_idx, e))
+
+        return BatchResult(
+            results=results,
+            failed=failed,
+            total_processed=total,
+            elapsed_seconds=time.time() - start,
+        )
+
+
+class ChunkBuffer(Generic[T]):
+    """Buffer items and yield in chunks.
+
+    Example:
+        buffer = ChunkBuffer(max_size=1000, flush_interval=5.0)
+        for item in generate_items():
+            buffer.add(item)
+            for chunk in buffer.flush():
+                send_to_server(chunk)
+    """
+
+    def __init__(
+        self,
+        max_size: int = 1000,
+        flush_interval: float = 0.0,
+    ) -> None:
+        self.max_size = max_size
+        self.flush_interval = flush_interval
+        self._buffer: Deque[T] = deque()
+        self._last_flush = time.time()
+
+    def add(self, item: T) -> None:
+        """Add item to buffer."""
         self._buffer.append(item)
+        if len(self._buffer) >= self.max_size:
+            self.flush()
 
-        if len(self._buffer) >= self._config.batch_size:
-            return self._flush()
+    def add_many(self, items: List[T]) -> None:
+        """Add multiple items to buffer."""
+        self._buffer.extend(items)
+        while len(self._buffer) >= self.max_size:
+            self.flush()
 
-        return None
+    def flush(self) -> Iterator[List[T]]:
+        """Yield chunks if buffer needs flushing.
 
-    def _flush(self) -> list[TResult]:
-        """Flush the buffer and process."""
-        if not self._buffer:
-            return []
+        Yields:
+            Chunks of buffered items.
+        """
+        should_flush = (
+            len(self._buffer) >= self.max_size or
+            (self.flush_interval > 0 and
+             time.time() - self._last_flush >= self.flush_interval)
+        )
 
-        results = batch_process(self._buffer, self._func).results
-        self._results.extend(results)
+        if should_flush and self._buffer:
+            chunk = list(self._buffer)
+            self._buffer.clear()
+            self._last_flush = time.time()
+            yield chunk
+
+    def get_all(self) -> List[T]:
+        """Get all buffered items and clear buffer."""
+        items = list(self._buffer)
         self._buffer.clear()
-        return results
+        self._last_flush = time.time()
+        return items
 
-    def finalize(self) -> list[TResult]:
-        """Process any remaining items in the buffer."""
-        results = self._flush()
-        self._results.extend(results)
-        return results
+    def size(self) -> int:
+        """Current buffer size."""
+        return len(self._buffer)
 
-    @property
-    def total_processed(self) -> int:
-        """Total number of items processed."""
-        return len(self._results)
+
+class SlidingWindowBatch(Generic[T]):
+    """Batch items based on count or time window.
+
+    Example:
+        batcher = SlidingWindowBatch(batch_size=10, window_seconds=1.0)
+        for item in stream:
+            batcher.add(item)
+            for batch in batcher.get_ready():
+                process(batch)
+    """
+
+    def __init__(
+        self,
+        batch_size: int = 10,
+        window_seconds: float = 1.0,
+    ) -> None:
+        self.batch_size = batch_size
+        self.window_seconds = window_seconds
+        self._buffer: Deque[tuple[float, T]] = deque()
+
+    def add(self, item: T) -> None:
+        """Add item to window."""
+        self._buffer.append((time.time(), item))
+
+    def get_ready(self) -> Iterator[List[T]]:
+        """Yield batches that are ready.
+
+        Yields:
+            Batches that meet size or time criteria.
+        """
+        cutoff = time.time() - self.window_seconds
+
+        while len(self._buffer) >= self.batch_size:
+            batch = [item for _, item in list(self._buffer)[:self.batch_size]]
+            for _ in range(min(self.batch_size, len(self._buffer))):
+                self._buffer.popleft()
+            yield batch
+
+        while self._buffer and self._buffer[0][0] < cutoff:
+            self._buffer.popleft()
+
+    def size(self) -> int:
+        """Current window size."""
+        return len(self._buffer)
+
+    def clear(self) -> None:
+        """Clear all buffered items."""
+        self._buffer.clear()
+
+
+class Deduplicator(Generic[T]):
+    """Deduplicate items based on key function.
+
+    Example:
+        dedup = Deduplicator(key=lambda x: x["id"])
+        unique_items = dedup.process(all_items)
+    """
+
+    def __init__(
+        self,
+        key: Optional[Callable[[T], Any]] = None,
+        max_size: int = 10000,
+    ) -> None:
+        self.key = key or (lambda x: x)
+        self.max_size = max_size
+        self._seen: set = set()
+        self._order: List = deque(maxlen=max_size)
+
+    def process(self, items: List[T]) -> List[T]:
+        """Remove duplicates from items.
+
+        Args:
+            items: Items to deduplicate.
+
+        Returns:
+            Unique items preserving order.
+        """
+        unique: List[T] = []
+        for item in items:
+            k = self.key(item)
+            if k not in self._seen:
+                self._seen.add(k)
+                self._order.append(k)
+                unique.append(item)
+
+            if len(self._seen) >= self.max_size:
+                oldest = self._order.popleft()
+                self._seen.discard(oldest)
+
+        return unique
+
+    def is_unique(self, item: T) -> bool:
+        """Check if item is unique (not seen before).
+
+        Args:
+            item: Item to check.
+
+        Returns:
+            True if item has not been seen.
+        """
+        k = self.key(item)
+        if k in self._seen:
+            return False
+        self._seen.add(k)
+        self._order.append(k)
+        return True
+
+    def reset(self) -> None:
+        """Reset seen items."""
+        self._seen.clear()
+        self._order.clear()
+
+
+def chunk_list(items: List[T], chunk_size: int) -> Iterator[List[T]]:
+    """Split list into chunks.
+
+    Example:
+        for chunk in chunk_list(items, 100):
+            process(chunk)
+    """
+    for i in range(0, len(items), chunk_size):
+        yield items[i:i + chunk_size]
+
+
+def batch_items(
+    items: List[T],
+    batch_size: int,
+    processor: Callable[[List[T]], List[R]],
+) -> List[List[R]]:
+    """Process items in batches.
+
+    Example:
+        def process_batch(batch):
+            return [transform(item) for item in batch]
+        results = batch_items(items, 50, process_batch)
+    """
+    results: List[List[R]] = []
+    for chunk in chunk_list(items, batch_size):
+        results.append(processor(chunk))
+    return results
