@@ -1,217 +1,395 @@
-"""Data Dedupe Action.
+"""Data Deduplication Action Module.
 
-Deduplicates data based on key fields with configurable strategies
-(exact match, fuzzy match, similarity threshold) and merge policies.
+Provides data deduplication using various strategies including
+exact match, fuzzy match, and content-defined chunking.
 """
 
-import sys
-import os
-from typing import Any, Dict, List, Optional, Callable
+from __future__ import annotations
+
+import hashlib
+import logging
+import simhash
 from collections import defaultdict
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class DataDedupeAction(BaseAction):
-    """Deduplicate data with various matching strategies.
-    
-    Supports exact match, fuzzy match, and similarity-based
-    deduplication with configurable merge policies.
-    """
-    action_type = "data_dedupe"
-    display_name = "数据去重"
-    description = "数据去重，支持精确匹配、模糊匹配和相似度阈值"
+class DedupStrategy(Enum):
+    """Deduplication strategies."""
+    EXACT = "exact"
+    SIMHASH = "simhash"
+    FINGERPRINT = "fingerprint"
+    CONTENT_DEFINED = "content_defined"
+    SAMPLING = "sampling"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Deduplicate data.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - data: List of records to deduplicate.
-                - key_fields: Field(s) to use for deduplication.
-                - strategy: 'exact', 'fuzzy', 'similarity' (default: exact).
-                - similarity_threshold: 0-1 threshold for fuzzy matching.
-                - merge_policy: 'keep_first', 'keep_last', 'merge', 'custom'.
-                - custom_merge_fn: Lambda for custom merge logic.
-                - save_to_var: Variable name for result.
-        
-        Returns:
-            ActionResult with deduplicated data.
-        """
-        try:
-            data = params.get('data')
-            key_fields = params.get('key_fields')
-            strategy = params.get('strategy', 'exact').lower()
-            similarity_threshold = params.get('similarity_threshold', 0.8)
-            merge_policy = params.get('merge_policy', 'keep_first')
-            custom_merge_fn = params.get('custom_merge_fn')
-            save_to_var = params.get('save_to_var', 'deduped_data')
 
-            if data is None:
-                data = context.get_variable(params.get('use_var', 'input_data'))
+@dataclass
+class DedupResult:
+    """Result of a deduplication operation."""
+    is_duplicate: bool
+    duplicate_of: Optional[str] = None
+    similarity: float = 1.0
+    method: DedupStrategy = DedupStrategy.EXACT
 
-            if not data:
-                return ActionResult(success=False, message="No data provided")
 
-            if not isinstance(data, list):
-                return ActionResult(success=False, message="Data must be a list")
+@dataclass
+class DedupStats:
+    """Deduplication statistics."""
+    total_items: int = 0
+    unique_items: int = 0
+    duplicate_count: int = 0
+    dedup_rate: float = 0.0
 
-            if key_fields is None:
-                return ActionResult(success=False, message="key_fields is required")
 
-            if isinstance(key_fields, str):
-                key_fields = [key_fields]
+class ExactDeduplicator:
+    """Exact match deduplication using hashes."""
 
-            if strategy == 'exact':
-                result = self._exact_dedupe(data, key_fields, merge_policy, custom_merge_fn)
-            elif strategy == 'fuzzy':
-                result = self._fuzzy_dedupe(data, key_fields, similarity_threshold, merge_policy)
-            elif strategy == 'similarity':
-                result = self._similarity_dedupe(data, key_fields, similarity_threshold, merge_policy)
+    def __init__(self):
+        self._hashes: Dict[str, str] = {}  # hash -> item_id
+        self._reverse: Dict[str, str] = {}  # item_id -> hash
+
+    def add(self, item_id: str, data: bytes) -> bool:
+        """Add an item, return True if not duplicate."""
+        h = hashlib.sha256(data).hexdigest()
+        if h in self._hashes:
+            return False
+        self._hashes[h] = item_id
+        self._reverse[item_id] = h
+        return True
+
+    def check(self, data: bytes) -> Tuple[bool, Optional[str]]:
+        """Check if data is duplicate, return (is_dup, original_id)."""
+        h = hashlib.sha256(data).hexdigest()
+        original_id = self._hashes.get(h)
+        return original_id is not None, original_id
+
+    def get_hash(self, item_id: str) -> Optional[str]:
+        """Get hash for an item ID."""
+        return self._reverse.get(item_id)
+
+    def remove(self, item_id: str) -> bool:
+        """Remove an item."""
+        h = self._reverse.pop(item_id, None)
+        if h:
+            self._hashes.pop(h, None)
+            return True
+        return False
+
+    def count(self) -> int:
+        """Return number of unique items."""
+        return len(self._hashes)
+
+
+class SimhashDeduplicator:
+    """Fuzzy deduplication using SimHash for near-duplicate detection."""
+
+    def __init__(self, threshold: float = 0.9):
+        self._hashes: Dict[str, int] = {}  # item_id -> simhash value
+        self._threshold = threshold
+        self._bits = 64
+
+    def add(self, item_id: str, text: str) -> bool:
+        """Add an item, return True if not near-duplicate."""
+        h = self._compute_simhash(text)
+        for existing_id, existing_hash in self._hashes.items():
+            similarity = self._compute_similarity(h, existing_hash)
+            if similarity >= self._threshold:
+                return False
+        self._hashes[item_id] = h
+        return True
+
+    def check(self, text: str) -> Tuple[bool, Optional[str], float]:
+        """Check if text is near-duplicate, return (is_dup, original_id, similarity)."""
+        h = self._compute_simhash(text)
+        best_similarity = 0.0
+        best_id = None
+
+        for existing_id, existing_hash in self._hashes.items():
+            similarity = self._compute_similarity(h, existing_hash)
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_id = existing_id
+
+        if best_similarity >= self._threshold:
+            return True, best_id, best_similarity
+        return False, None, best_similarity
+
+    def _compute_simhash(self, text: str) -> int:
+        """Compute SimHash for text."""
+        return simhash.simhash64(text)
+
+    def _compute_similarity(self, h1: int, h2: int) -> float:
+        """Compute Hamming similarity between two hashes."""
+        xor = h1 ^ h2
+        distance = bin(xor).count("1")
+        return 1.0 - (distance / self._bits)
+
+    def count(self) -> int:
+        """Return number of unique items."""
+        return len(self._hashes)
+
+
+class FingerprintDeduplicator:
+    """Deduplication using MinHash fingerprints."""
+
+    def __init__(self, num_hashes: int = 128, threshold: float = 0.5):
+        self._num_hashes = num_hashes
+        self._threshold = threshold
+        self._fingerprints: Dict[str, List[int]] = {}
+        self._minhashes = simhash.MinHash(num_hashes=self._num_hashes)
+
+    def add(self, item_id: str, text: str) -> bool:
+        """Add an item using MinHash fingerprint."""
+        minhash = simhash.MinHash(self._num_hashes)
+        for word in text.split():
+            minhash.update(word.encode("utf-8"))
+
+        # Store fingerprint
+        self._fingerprints[item_id] = minhash.digest()
+
+        return True
+
+    def check(self, text: str) -> Tuple[bool, Optional[str], float]:
+        """Check if text is near-duplicate using MinHash."""
+        minhash = simhash.MinHash(num_hashes=self._num_hashes)
+        for word in text.split():
+            minhash.update(word.encode("utf-8"))
+
+        best_similarity = 0.0
+        best_id = None
+
+        for item_id, stored_fp in self._fingerprints.items():
+            # Compute Jaccard similarity between minhashes
+            similarity = minhash.jaccard(simhash.MinHash(stored_fp))
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_id = item_id
+
+        if best_similarity >= self._threshold:
+            return True, best_id, best_similarity
+        return False, None, best_similarity
+
+    def count(self) -> int:
+        """Return number of unique items."""
+        return len(self._fingerprints)
+
+
+class ContentDefinedChunker:
+    """Content-defined chunking for deduplication at sub-document level."""
+
+    def __init__(self, chunk_size: int = 1024, min_chunk: int = 256):
+        self._chunk_size = chunk_size
+        self._min_chunk = min_chunk
+        self._chunk_hashes: Dict[str, Set[str]] = defaultdict(set)  # item_id -> chunk_hashes
+
+    def _compute_chunks(self, data: bytes) -> List[bytes]:
+        """Split data into content-defined chunks."""
+        chunks = []
+        i = 0
+        while i < len(data):
+            end = min(i + self._chunk_size, len(data))
+            if end - i < self._min_chunk and chunks:
+                chunks[-1] += data[i:end]
             else:
-                return ActionResult(success=False, message=f"Unknown strategy: {strategy}")
+                chunks.append(data[i:end])
+            i = end
+        return chunks
 
-            summary = {
-                'original_count': len(data),
-                'deduped_count': len(result),
-                'removed_count': len(data) - len(result),
-                'strategy': strategy,
-                'key_fields': key_fields
+    def add(self, item_id: str, data: bytes) -> Tuple[int, int]:
+        """Add an item, return (total_chunks, new_unique_chunks)."""
+        chunks = self._compute_chunks(data)
+        chunk_hashes = set()
+        new_count = 0
+
+        for chunk in chunks:
+            h = hashlib.sha256(chunk).hexdigest()
+            chunk_hashes.add(h)
+
+        for h in chunk_hashes:
+            is_new = True
+            for existing_hashes in self._chunk_hashes.values():
+                if h in existing_hashes:
+                    is_new = False
+                    break
+            if is_new:
+                new_count += 1
+
+        self._chunk_hashes[item_id] = chunk_hashes
+        return len(chunks), new_count
+
+    def get_shared_chunks(self, item_id: str) -> Set[str]:
+        """Get chunk hashes shared with other items."""
+        if item_id not in self._chunk_hashes:
+            return set()
+        my_chunks = self._chunk_hashes[item_id]
+        shared = set()
+        for existing_id, existing_chunks in self._chunk_hashes.items():
+            if existing_id != item_id:
+                shared.update(my_chunks & existing_chunks)
+        return shared
+
+    def count(self) -> int:
+        """Return number of items."""
+        return len(self._chunk_hashes)
+
+
+class DataDedupeAction:
+    """Main action class for data deduplication."""
+
+    def __init__(self):
+        self._exact = ExactDeduplicator()
+        self._simhash = SimhashDeduplicator()
+        self._fingerprint = FingerprintDeduplicator()
+        self._chunker = ContentDefinedChunker()
+        self._stats = DedupStats()
+        self._default_strategy = DedupStrategy.EXACT
+
+    def set_strategy(self, strategy: DedupStrategy) -> None:
+        """Set the default deduplication strategy."""
+        self._default_strategy = strategy
+
+    def add_item(
+        self,
+        item_id: str,
+        data: Any,
+        strategy: Optional[DedupStrategy] = None
+    ) -> bool:
+        """Add an item, return True if not duplicate."""
+        strat = strategy or self._default_strategy
+
+        if isinstance(data, str):
+            data_bytes = data.encode("utf-8")
+        elif isinstance(data, bytes):
+            data_bytes = data
+        else:
+            data_bytes = str(data).encode("utf-8")
+
+        if strat == DedupStrategy.EXACT:
+            result = self._exact.add(item_id, data_bytes)
+        elif strat == DedupStrategy.SIMHASH:
+            result = self._simhash.add(item_id, data_bytes.decode("utf-8", errors="ignore"))
+        elif strat == DedupStrategy.CONTENT_DEFINED:
+            _, new_count = self._chunker.add(item_id, data_bytes)
+            result = new_count > 0
+        else:
+            result = self._fingerprint.add(item_id, data_bytes.decode("utf-8", errors="ignore"))
+
+        self._stats.total_items += 1
+        if result:
+            self._stats.unique_items += 1
+        else:
+            self._stats.duplicate_count += 1
+
+        if self._stats.total_items > 0:
+            self._stats.dedup_rate = (self._stats.duplicate_count / self._stats.total_items) * 100
+
+        return result
+
+    def check_duplicate(
+        self,
+        data: Any,
+        strategy: Optional[DedupStrategy] = None
+    ) -> DedupResult:
+        """Check if data is duplicate."""
+        strat = strategy or self._default_strategy
+
+        if isinstance(data, str):
+            data_bytes = data.encode("utf-8")
+            data_text = data
+        elif isinstance(data, bytes):
+            data_bytes = data
+            data_text = data.decode("utf-8", errors="ignore")
+        else:
+            data_bytes = str(data).encode("utf-8")
+            data_text = str(data)
+
+        if strat == DedupStrategy.EXACT:
+            is_dup, original_id = self._exact.check(data_bytes)
+            return DedupResult(is_duplicate=is_dup, duplicate_of=original_id, method=strat)
+        elif strat == DedupStrategy.SIMHASH:
+            is_dup, original_id, similarity = self._simhash.check(data_text)
+            return DedupResult(is_duplicate=is_dup, duplicate_of=original_id, similarity=similarity, method=strat)
+        elif strat == DedupStrategy.CONTENT_DEFINED:
+            is_dup = False
+            # Content-defined chunking doesn't support single-item check
+            return DedupResult(is_duplicate=False, method=strat)
+        else:
+            is_dup, original_id, similarity = self._fingerprint.check(data_text)
+            return DedupResult(is_duplicate=is_dup, duplicate_of=original_id, similarity=similarity, method=strat)
+
+    def get_stats(self) -> DedupStats:
+        """Return deduplication statistics."""
+        return self._stats
+
+    async def execute(
+        self,
+        context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Execute the data deduplication action.
+
+        Args:
+            context: Dictionary containing:
+                - operation: Operation to perform (add, check, stats)
+                - data: Data to process
+                - item_id: Item identifier
+                - strategy: DedupStrategy value
+
+        Returns:
+            Dictionary with deduplication results.
+        """
+        operation = context.get("operation", "add")
+
+        if operation == "add":
+            item_id = context.get("item_id", "")
+            data = context.get("data", "")
+            strat_str = context.get("strategy", "exact")
+            try:
+                strat = DedupStrategy(strat_str)
+            except ValueError:
+                strat = self._default_strategy
+
+            result = self.add_item(item_id, data, strat)
+            return {
+                "success": True,
+                "is_unique": result,
+                "stats": {
+                    "total_items": self._stats.total_items,
+                    "unique_items": self._stats.unique_items,
+                    "duplicate_count": self._stats.duplicate_count,
+                    "dedup_rate": round(self._stats.dedup_rate, 2)
+                }
             }
 
-            context.set_variable(save_to_var, result)
-            return ActionResult(success=True, data=result, message=f"Deduped: {len(result)}/{len(data)} kept")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Dedupe error: {e}")
-
-    def _exact_dedupe(self, data: List[Dict], key_fields: List[str],
-                    merge_policy: str, custom_merge_fn: Optional[str]) -> List[Dict]:
-        """Exact match deduplication."""
-        seen = {}
-        result = []
-
-        for item in data:
-            key = tuple(item.get(f) for f in key_fields)
-            key_str = str(key)
-
-            if key_str not in seen:
-                seen[key_str] = len(result)
-                result.append(item.copy())
-            else:
-                # Handle merge
-                existing = result[seen[key_str]]
-                result[seen[key_str]] = self._merge_items(existing, item, merge_policy, custom_merge_fn)
-
-        return result
-
-    def _fuzzy_dedupe(self, data: List[Dict], key_fields: List[str],
-                      threshold: float, merge_policy: str) -> List[Dict]:
-        """Fuzzy deduplication based on string similarity."""
-        result = []
-        
-        for item in data:
-            key_value = ' '.join(str(item.get(f, '')) for f in key_fields)
-            is_duplicate = False
-
-            for existing in result:
-                existing_key = ' '.join(str(existing.get(f, '')) for f in key_fields)
-                similarity = self._string_similarity(key_value, existing_key)
-
-                if similarity >= threshold:
-                    idx = result.index(existing)
-                    result[idx] = self._merge_items(existing, item, merge_policy, None)
-                    is_duplicate = True
-                    break
-
-            if not is_duplicate:
-                result.append(item.copy())
-
-        return result
-
-    def _similarity_dedupe(self, data: List[Dict], key_fields: List[str],
-                          threshold: float, merge_policy: str) -> List[Dict]:
-        """Similarity-based deduplication using multiple fields."""
-        result = []
-        
-        for item in data:
-            is_duplicate = False
-            key_value = [str(item.get(f, '')) for f in key_fields]
-
-            for i, existing in enumerate(result):
-                existing_key = [str(existing.get(f, '')) for f in key_fields]
-                similarity = self._jaccard_similarity(set(' '.join(key_value).split()),
-                                                      set(' '.join(existing_key).split()))
-
-                if similarity >= threshold:
-                    result[i] = self._merge_items(existing, item, merge_policy, None)
-                    is_duplicate = True
-                    break
-
-            if not is_duplicate:
-                result.append(item.copy())
-
-        return result
-
-    def _merge_items(self, existing: Dict, new: Dict, policy: str, 
-                    custom_fn: Optional[str]) -> Dict:
-        """Merge two items based on policy."""
-        if policy == 'keep_first':
-            return existing
-        elif policy == 'keep_last':
-            return new
-        elif policy == 'merge':
-            merged = existing.copy()
-            for k, v in new.items():
-                if k not in merged:
-                    merged[k] = v
-                elif merged[k] != v:
-                    # Handle conflict - keep existing or newest
-                    if isinstance(merged[k], (int, float)) and isinstance(v, (int, float)):
-                        merged[k] = merged[k] + v
-                    else:
-                        merged[k] = merged[k] if len(str(merged[k])) >= len(str(v)) else v
-            return merged
-        elif policy == 'custom' and custom_fn:
+        elif operation == "check":
+            data = context.get("data", "")
+            strat_str = context.get("strategy", "exact")
             try:
-                return eval(custom_fn)(existing, new)
-            except Exception:
-                return existing
-        return existing
+                strat = DedupStrategy(strat_str)
+            except ValueError:
+                strat = self._default_strategy
 
-    def _string_similarity(self, s1: str, s2: str) -> float:
-        """Calculate string similarity (Levenshtein-based)."""
-        if s1 == s2:
-            return 1.0
-        if not s1 or not s2:
-            return 0.0
+            result = self.check_duplicate(data, strat)
+            return {
+                "success": True,
+                "is_duplicate": result.is_duplicate,
+                "duplicate_of": result.duplicate_of,
+                "similarity": round(result.similarity, 4),
+                "method": result.method.value
+            }
 
-        len1, len2 = len(s1), len(s2)
-        if len1 > len2:
-            s1, s2 = s2, s1
-            len1, len2 = len2, len1
+        elif operation == "stats":
+            return {
+                "success": True,
+                "stats": {
+                    "total_items": self._stats.total_items,
+                    "unique_items": self._stats.unique_items,
+                    "duplicate_count": self._stats.duplicate_count,
+                    "dedup_rate": round(self._stats.dedup_rate, 2)
+                }
+            }
 
-        current_row = range(len1 + 1)
-        for i in range(1, len2 + 1):
-            previous_row, current_row = current_row, [i] + [0] * len1
-            for j in range(1, len1 + 1):
-                add = previous_row[j] + 1
-                delete = current_row[j - 1] + 1
-                change = previous_row[j - 1]
-                if s1[j - 1] != s2[i - 1]:
-                    change += 1
-                current_row[j] = min(add, delete, change)
-
-        distance = current_row[len1]
-        max_len = max(len1, len2)
-        return 1.0 - (distance / max_len)
-
-    def _jaccard_similarity(self, set1: set, set2: set) -> float:
-        """Calculate Jaccard similarity between two sets."""
-        if not set1 or not set2:
-            return 0.0
-        intersection = len(set1 & set2)
-        union = len(set1 | set2)
-        return intersection / union if union > 0 else 0.0
+        else:
+            return {"success": False, "error": f"Unknown operation: {operation}"}
