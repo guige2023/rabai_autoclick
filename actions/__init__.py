@@ -5,6 +5,10 @@ from .ocr import OCRAction
 from .mouse import ScrollAction, MouseMoveAction, DragAction
 from .script import ScriptAction, DelayAction, ConditionAction, LoopAction, SetVariableAction
 from .system import ScreenshotAction, GetMousePosAction, AlertAction
+from .wait_for import WaitForImageAction, WaitForTextAction, WaitForElementAction
+from .loop_while import LoopWhileAction, LoopWhileBreakAction, LoopWhileContinueAction, ForEachAction
+from .try_catch import TryCatchAction, ThrowAction, RethrowAction, AssertAction
+from .comment import CommentAction, LabelAction, GotoAction, LogAction
 
 __all__ = [
     'ClickAction',
@@ -24,4 +28,19 @@ __all__ = [
     'ScreenshotAction',
     'GetMousePosAction',
     'AlertAction',
+    'WaitForImageAction',
+    'WaitForTextAction',
+    'WaitForElementAction',
+    'LoopWhileAction',
+    'LoopWhileBreakAction',
+    'LoopWhileContinueAction',
+    'ForEachAction',
+    'TryCatchAction',
+    'ThrowAction',
+    'RethrowAction',
+    'AssertAction',
+    'CommentAction',
+    'LabelAction',
+    'GotoAction',
+    'LogAction',
 ]

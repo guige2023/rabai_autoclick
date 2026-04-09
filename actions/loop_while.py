@@ -3,7 +3,6 @@
 Provides loop actions that iterate based on condition expressions.
 """
 
-import re
 from typing import Any, Dict, List
 
 from rabai_autoclick.core.base_action import BaseAction, ActionResult

@@ -9,7 +9,7 @@ Provides system-level automation actions:
 import pyautogui
 import io
 import base64
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 from rabai_autoclick.core.base_action import BaseAction, ActionResult
 

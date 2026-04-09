@@ -10,7 +10,7 @@ Provides mouse-related automation actions including:
 
 import pyautogui
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional
 
 from rabai_autoclick.core.base_action import BaseAction, ActionResult
 

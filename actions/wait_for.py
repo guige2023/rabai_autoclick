@@ -4,7 +4,6 @@ Provides actions that wait for conditions before proceeding.
 """
 
 import time
-import re
 from typing import Any, Dict, List, Optional
 
 from rabai_autoclick.core.base_action import BaseAction, ActionResult
@@ -62,7 +61,6 @@ class WaitForImageAction(BaseAction):
                     return ActionResult(
                         success=True,
                         message=f"在置信度 {max_val:.2f} 找到图像",
-                        output_var=params.get("output_var"),
                         data={"confidence": float(max_val)}
                     )
                 
@@ -146,7 +144,6 @@ class WaitForTextAction(BaseAction):
                                     return ActionResult(
                                         success=True,
                                         message=f"找到文本: {text}",
-                                        output_var=params.get("output_var"),
                                         data={"text": item[1], "position": [item[0][0], item[0][1]]}
                                     )
                     except:
@@ -154,8 +151,7 @@ class WaitForTextAction(BaseAction):
                     
                     return ActionResult(
                         success=True,
-                        message=f"找到文本: {text}",
-                        output_var=params.get("output_var")
+                        message=f"找到文本: {text}"
                     )
                 
                 time.sleep(check_interval)
@@ -216,7 +212,6 @@ class WaitForElementAction(BaseAction):
                     return ActionResult(
                         success=True,
                         message=f"元素 {element_id} 状态为 {state}",
-                        output_var=params.get("output_var"),
                         data=element_state
                     )
                 
