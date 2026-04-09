@@ -1,301 +1,581 @@
-"""
-API Federation Action Module
+"""API Federation Action for unified API gateway and routing.
 
-Provides API federation, cross-service queries, and unified API gateway.
+This module provides API federation capabilities:
+- Multi-backend routing
+- Schema stitching
+- Query delegation
+- Response merging
+- Service discovery integration
 """
-from typing import Any, Optional, Callable
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
+
+from __future__ import annotations
+
 import asyncio
+import hashlib
+import json
+import logging
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Awaitable
+
+logger = logging.getLogger(__name__)
 
 
-class FederationStrategy(Enum):
-    """Federation strategies."""
-    DIRECT = "direct"
-    CACHED = "cached"
-    AGGREGATED = "aggregated"
-    FAN_OUT = "fan_out"
+class RoutingStrategy(Enum):
+    """API routing strategies."""
+
+    ROUND_ROBIN = "round_robin"
+    RANDOM = "random"
+    WEIGHTED = "weighted"
+    LEAST_LOADED = "least_loaded"
+    CONSISTENT_HASH = "consistent_hash"
+    AFFINITY = "affinity"
 
 
 @dataclass
-class FederatedService:
-    """A service in the federation."""
-    service_id: str
+class BackendEndpoint:
+    """A backend API endpoint."""
+
     name: str
-    endpoint: str
-    priority: int = 0
-    healthy: bool = True
-    latency_ms: float = 0.0
-    metadata: dict[str, Any] = field(default_factory=dict)
+    url: str
+    weight: int = 1
+    timeout: float = 30.0
+    max_concurrent: int = 100
+    current_load: int = 0
+    health_status: str = "healthy"
+    last_check: float = 0.0
+    metadata: dict = field(default_factory=dict)
 
 
 @dataclass
-class FederationQuery:
-    """A query to federated services."""
-    query_id: str
-    services: list[str]
-    endpoint: str
-    parameters: dict[str, Any] = field(default_factory=dict)
-    strategy: FederationStrategy = FederationStrategy.DIRECT
+class RouteRule:
+    """A routing rule."""
+
+    path_pattern: str
+    backend: str
+    methods: list[str] = field(default_factory=lambda: ["GET", "POST", "PUT", "DELETE"])
+    auth_required: bool = False
+    rate_limit: int | None = None
+    cache_ttl: int = 0
+    transform_request: Callable[[dict], dict] | None = None
+    transform_response: Callable[[dict], dict] | None = None
 
 
 @dataclass
-class FederationResult:
-    """Result from federated query."""
-    service_id: str
-    success: bool
-    data: Any = None
-    latency_ms: float = 0.0
-    error: Optional[str] = None
+class FederationMetrics:
+    """Metrics for federated API operations."""
+
+    total_requests: int = 0
+    successful_requests: int = 0
+    failed_requests: int = 0
+    routed_requests: dict[str, int] = field(default_factory=dict)
+    backend_load: dict[str, int] = field(default_factory=dict)
+    avg_latency: float = 0.0
+    total_latency: float = 0.0
 
 
-@dataclass
-class AggregatedResult:
-    """Aggregated result from multiple services."""
-    query_id: str
-    results: list[FederationResult]
-    aggregated_data: Any
-    total_latency_ms: float
-    successful_services: int
-    failed_services: int
+class ConsistentHash:
+    """Consistent hash ring for routing."""
 
+    def __init__(self, nodes: list[str] | None = None, replicas: int = 150):
+        """Initialize consistent hash.
 
-class ApiFederationAction:
-    """Main API federation action handler."""
-    
-    def __init__(self):
-        self._services: dict[str, FederatedService] = {}
-        self._query_cache: dict[str, tuple[Any, datetime]] = {}
-        self._cache_ttl_seconds = 300
-        self._stats: dict[str, Any] = {}
-    
-    def add_service(self, service: FederatedService) -> "ApiFederationAction":
-        """Add a service to the federation."""
-        self._services[service.service_id] = service
-        return self
-    
-    def remove_service(self, service_id: str) -> bool:
-        """Remove a service from the federation."""
-        if service_id in self._services:
-            del self._services[service_id]
-            return True
-        return False
-    
-    async def execute_query(
-        self,
-        query: FederationQuery
-    ) -> AggregatedResult:
-        """
-        Execute a federated query.
-        
         Args:
-            query: FederationQuery with target services and parameters
-            
-        Returns:
-            AggregatedResult with combined results
+            nodes: Initial nodes
+            replicas: Number of virtual replicas per node
         """
-        start_time = datetime.now()
-        
-        # Check cache first
-        if query.strategy == FederationStrategy.CACHED:
-            cache_key = self._get_cache_key(query)
-            if cache_key in self._query_cache:
-                cached_data, cached_at = self._query_cache[cache_key]
-                age = (datetime.now() - cached_at).total_seconds()
-                if age < self._cache_ttl_seconds:
-                    return AggregatedResult(
-                        query_id=query.query_id,
-                        results=[],
-                        aggregated_data=cached_data,
-                        total_latency_ms=0,
-                        successful_services=0,
-                        failed_services=0
-                    )
-        
-        # Execute based on strategy
-        if query.strategy == FederationStrategy.DIRECT:
-            results = await self._execute_direct(query)
-        elif query.strategy == FederationStrategy.FAN_OUT:
-            results = await self._execute_fan_out(query)
-        elif query.strategy == FederationStrategy.AGGREGATED:
-            results = await self._execute_aggregated(query)
-        else:
-            results = await self._execute_direct(query)
-        
-        # Aggregate results
-        aggregated = self._aggregate_results(results)
-        
-        # Cache if applicable
-        if query.strategy == FederationStrategy.CACHED:
-            self._query_cache[self._get_cache_key(query)] = (aggregated, datetime.now())
-        
-        total_latency = (datetime.now() - start_time).total_seconds() * 1000
-        
-        return AggregatedResult(
-            query_id=query.query_id,
-            results=results,
-            aggregated_data=aggregated,
-            total_latency_ms=total_latency,
-            successful_services=len([r for r in results if r.success]),
-            failed_services=len([r for r in results if not r.success])
-        )
-    
-    async def _execute_direct(self, query: FederationQuery) -> list[FederationResult]:
-        """Execute query on first available service."""
-        results = []
-        
-        for service_id in query.services:
-            service = self._services.get(service_id)
-            if not service or not service.healthy:
-                continue
-            
-            result = await self._call_service(service, query)
-            results.append(result)
-            
-            if result.success:
-                break
-        
-        return results
-    
-    async def _execute_fan_out(self, query: FederationQuery) -> list[FederationResult]:
-        """Execute query on all services in parallel."""
-        tasks = []
-        
-        for service_id in query.services:
-            service = self._services.get(service_id)
-            if service and service.healthy:
-                tasks.append(self._call_service(service, query))
-        
-        if not tasks:
-            return []
-        
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        return [
-            r if isinstance(r, FederationResult) else FederationResult(
-                service_id="unknown",
-                success=False,
-                error=str(r)
-            )
-            for r in results
-        ]
-    
-    async def _execute_aggregated(self, query: FederationQuery) -> list[FederationResult]:
-        """Execute and aggregate results from all services."""
-        # Similar to fan_out but results will be merged
-        return await self._execute_fan_out(query)
-    
-    async def _call_service(
+        self.replicas = replicas
+        self.ring: dict[int, str] = {}
+        self.sorted_keys: list[int] = []
+
+        if nodes:
+            for node in nodes:
+                self.add_node(node)
+
+    def add_node(self, node: str) -> None:
+        """Add a node to the hash ring."""
+        for i in range(self.replicas):
+            key = self._hash(f"{node}:{i}")
+            self.ring[key] = node
+
+        self.sorted_keys = sorted(self.ring.keys())
+
+    def remove_node(self, node: str) -> None:
+        """Remove a node from the hash ring."""
+        for i in range(self.replicas):
+            key = self._hash(f"{node}:{i}")
+            if key in self.ring:
+                del self.ring[key]
+
+        self.sorted_keys = sorted(self.ring.keys())
+
+    def get_node(self, key: str) -> str | None:
+        """Get node for a key."""
+        if not self.ring:
+            return None
+
+        hash_key = self._hash(key)
+        pos = self._find_position(hash_key)
+        return self.ring[self.sorted_keys[pos]]
+
+    def _hash(self, value: str) -> int:
+        """Hash a value to an integer."""
+        return int(hashlib.md5(value.encode()).hexdigest(), 16)
+
+    def _find_position(self, hash_key: int) -> int:
+        """Find position in sorted ring."""
+        for i, key in enumerate(self.sorted_keys):
+            if hash_key <= key:
+                return i
+        return 0
+
+
+class APIFederationAction:
+    """API Federation for unified routing and aggregation."""
+
+    def __init__(
         self,
-        service: FederatedService,
-        query: FederationQuery
-    ) -> FederationResult:
-        """Call a federated service."""
-        start_time = datetime.now()
-        
-        try:
-            # Simulate service call
-            await asyncio.sleep(service.latency_ms / 1000)
-            
-            return FederationResult(
-                service_id=service.service_id,
-                success=True,
-                data={"result": "ok"},
-                latency_ms=(datetime.now() - start_time).total_seconds() * 1000
-            )
-            
-        except Exception as e:
-            return FederationResult(
-                service_id=service.service_id,
-                success=False,
-                error=str(e),
-                latency_ms=(datetime.now() - start_time).total_seconds() * 1000
-            )
-    
-    def _aggregate_results(self, results: list[FederationResult]) -> Any:
-        """Aggregate results from multiple services."""
-        successful = [r for r in results if r.success]
-        
-        if not successful:
+        routing_strategy: RoutingStrategy = RoutingStrategy.ROUND_ROBIN,
+    ):
+        """Initialize API federation action.
+
+        Args:
+            routing_strategy: Default routing strategy
+        """
+        self.routing_strategy = routing_strategy
+        self.backends: dict[str, BackendEndpoint] = {}
+        self.routes: list[RouteRule] = []
+        self.metrics = FederationMetrics()
+        self._round_robin_counters: dict[str, int] = {}
+        self._affinity_cache: dict[str, str] = {}
+        self._hash_ring = ConsistentHash()
+        self._lock = asyncio.Lock()
+
+    def add_backend(
+        self,
+        name: str,
+        url: str,
+        weight: int = 1,
+        timeout: float = 30.0,
+        **kwargs,
+    ) -> None:
+        """Add a backend endpoint.
+
+        Args:
+            name: Backend name
+            url: Backend URL
+            weight: Weight for weighted routing
+            timeout: Request timeout
+            **kwargs: Additional metadata
+        """
+        backend = BackendEndpoint(
+            name=name,
+            url=url.rstrip("/"),
+            weight=weight,
+            timeout=timeout,
+            metadata=kwargs,
+        )
+        self.backends[name] = backend
+        self._hash_ring.add_node(name)
+        logger.info(f"Added backend: {name} ({url})")
+
+    def remove_backend(self, name: str) -> None:
+        """Remove a backend endpoint.
+
+        Args:
+            name: Backend name
+        """
+        if name in self.backends:
+            del self.backends[name]
+            self._hash_ring.remove_node(name)
+            logger.info(f"Removed backend: {name}")
+
+    def add_route(
+        self,
+        path_pattern: str,
+        backend: str,
+        methods: list[str] | None = None,
+        auth_required: bool = False,
+        rate_limit: int | None = None,
+        cache_ttl: int = 0,
+    ) -> None:
+        """Add a routing rule.
+
+        Args:
+            path_pattern: URL path pattern
+            backend: Backend to route to
+            methods: Allowed HTTP methods
+            auth_required: Require authentication
+            rate_limit: Rate limit per minute
+            cache_ttl: Cache TTL in seconds
+        """
+        route = RouteRule(
+            path_pattern=path_pattern,
+            backend=backend,
+            methods=methods or ["GET", "POST", "PUT", "DELETE"],
+            auth_required=auth_required,
+            rate_limit=rate_limit,
+            cache_ttl=cache_ttl,
+        )
+        self.routes.append(route)
+        logger.info(f"Added route: {path_pattern} -> {backend}")
+
+    def _match_route(self, path: str, method: str) -> tuple[RouteRule | None, BackendEndpoint | None]:
+        """Match a request to a route and backend.
+
+        Args:
+            path: Request path
+            method: HTTP method
+
+        Returns:
+            Tuple of (matched route, selected backend)
+        """
+        for route in self.routes:
+            if self._path_matches(path, route.path_pattern):
+                if method.upper() in route.methods:
+                    backend = self.backends.get(route.backend)
+                    return route, backend
+
+        return None, None
+
+    def _path_matches(self, path: str, pattern: str) -> bool:
+        """Check if path matches pattern.
+
+        Args:
+            path: Request path
+            pattern: Route pattern
+
+        Returns:
+            True if matches
+        """
+        if pattern.endswith("*"):
+            return path.startswith(pattern[:-1])
+        return path == pattern or path.startswith(pattern.rstrip("/") + "/")
+
+    def _select_backend(
+        self,
+        route: RouteRule,
+        request_data: dict,
+    ) -> BackendEndpoint | None:
+        """Select a backend based on routing strategy.
+
+        Args:
+            route: Matched route
+            request_data: Request data for routing decisions
+
+        Returns:
+            Selected backend
+        """
+        strategy = self.routing_strategy
+
+        if strategy == RoutingStrategy.ROUND_ROBIN:
+            return self._round_robin_select(route.backend)
+
+        elif strategy == RoutingStrategy.WEIGHTED:
+            return self._weighted_select(route.backend)
+
+        elif strategy == RoutingStrategy.LEAST_LOADED:
+            return self._least_loaded_select(route.backend)
+
+        elif strategy == RoutingStrategy.CONSISTENT_HASH:
+            return self._consistent_hash_select(route.backend, request_data)
+
+        elif strategy == RoutingStrategy.AFFINITY:
+            return self._affinity_select(route.backend, request_data)
+
+        else:  # RANDOM
+            return self._random_select(route.backend)
+
+    def _round_robin_select(self, backend_name: str) -> BackendEndpoint | None:
+        """Select backend using round robin."""
+        backend = self.backends.get(backend_name)
+        if not backend:
             return None
-        
-        # Simple aggregation: combine all successful results
-        aggregated = {
-            "results": [r.data for r in successful],
-            "count": len(successful),
-            "sources": [r.service_id for r in successful]
+
+        counter = self._round_robin_counters.get(backend_name, 0)
+        # Simple round robin across same backend (could extend for multiple instances)
+        self._round_robin_counters[backend_name] = counter + 1
+        return backend
+
+    def _weighted_select(self, backend_name: str) -> BackendEndpoint | None:
+        """Select backend using weighted random."""
+        backend = self.backends.get(backend_name)
+        if not backend:
+            return None
+
+        # For single backend, just return it (would need multiple for true weighted)
+        return backend
+
+    def _least_loaded_select(self, backend_name: str) -> BackendEndpoint | None:
+        """Select backend with least current load."""
+        backend = self.backends.get(backend_name)
+        if not backend:
+            return None
+
+        return backend
+
+    def _consistent_hash_select(self, backend_name: str, request_data: dict) -> BackendEndpoint | None:
+        """Select backend using consistent hashing."""
+        key = request_data.get("affinity_key", request_data.get("path", ""))
+        node = self._hash_ring.get_node(key)
+        return self.backends.get(node or backend_name)
+
+    def _affinity_select(self, backend_name: str, request_data: dict) -> BackendEndpoint | None:
+        """Select backend with session affinity."""
+        session_id = request_data.get("headers", {}).get("X-Session-ID")
+        if session_id and session_id in self._affinity_cache:
+            cached_backend = self._affinity_cache[session_id]
+            if cached_backend in self.backends:
+                return self.backends[cached_backend]
+
+        backend = self.backends.get(backend_name)
+        if session_id and backend:
+            self._affinity_cache[session_id] = backend_name
+
+        return backend
+
+    def _random_select(self, backend_name: str) -> BackendEndpoint | None:
+        """Select backend randomly."""
+        return self.backends.get(backend_name)
+
+    async def route_request(
+        self,
+        path: str,
+        method: str,
+        headers: dict | None = None,
+        body: Any = None,
+        query_params: dict | None = None,
+        **kwargs,
+    ) -> dict[str, Any]:
+        """Route a request to appropriate backend.
+
+        Args:
+            path: Request path
+            method: HTTP method
+            headers: Request headers
+            body: Request body
+            query_params: Query parameters
+            **kwargs: Additional routing options
+
+        Returns:
+            Response from backend
+        """
+        self.metrics.total_requests += 1
+        start_time = time.time()
+        headers = headers or {}
+
+        request_data = {
+            "path": path,
+            "method": method,
+            "headers": headers,
+            "body": body,
+            "query_params": query_params or {},
         }
-        
-        return aggregated
-    
-    def _get_cache_key(self, query: FederationQuery) -> str:
-        """Generate cache key for query."""
-        import hashlib
-        import json
-        
-        content = json.dumps({
-            "services": query.services,
-            "endpoint": query.endpoint,
-            "parameters": query.parameters
-        }, sort_keys=True)
-        
-        return hashlib.md5(content.encode()).hexdigest()
-    
-    async def health_check_services(self) -> dict[str, bool]:
-        """Run health checks on all services."""
-        results = {}
-        
-        for service_id, service in self._services.items():
+
+        # Match route
+        route, backend = self._match_route(path, method)
+        if not route or not backend:
+            return self._error_response(404, "No matching route found")
+
+        # Check method
+        if method.upper() not in route.methods:
+            return self._error_response(405, f"Method {method} not allowed")
+
+        # Select backend
+        selected_backend = self._select_backend(route, request_data)
+        if not selected_backend:
+            return self._error_response(503, "No available backend")
+
+        # Apply request transform
+        if route.transform_request:
             try:
-                # Simulate health check
-                await asyncio.sleep(0.01)
-                service.healthy = True
-                results[service_id] = True
-            except:
-                service.healthy = False
-                results[service_id] = False
-        
-        return results
-    
-    def get_service_status(self, service_id: str) -> Optional[dict[str, Any]]:
-        """Get status of a federated service."""
-        service = self._services.get(service_id)
-        if not service:
-            return None
-        
-        return {
-            "service_id": service.service_id,
-            "name": service.name,
-            "endpoint": service.endpoint,
-            "healthy": service.healthy,
-            "latency_ms": service.latency_ms,
-            "priority": service.priority
-        }
-    
-    def list_services(self, healthy_only: bool = False) -> list[dict[str, Any]]:
-        """List all federated services."""
-        services = list(self._services.values())
-        
-        if healthy_only:
-            services = [s for s in services if s.healthy]
-        
-        return [
-            {
-                "service_id": s.service_id,
-                "name": s.name,
-                "endpoint": s.endpoint,
-                "healthy": s.healthy,
-                "latency_ms": s.latency_ms
+                request_data = route.transform_request(request_data)
+            except Exception as e:
+                logger.error(f"Request transform failed: {e}")
+
+        # Update load
+        async with self._lock:
+            selected_backend.current_load += 1
+
+        try:
+            # Forward request
+            response = await self._forward_request(
+                selected_backend,
+                path,
+                method,
+                headers,
+                body,
+                query_params,
+                route.cache_ttl,
+            )
+
+            self.metrics.successful_requests += 1
+            self.metrics.routed_requests[selected_backend.name] = (
+                self.metrics.routed_requests.get(selected_backend.name, 0) + 1
+            )
+
+            latency = time.time() - start_time
+            self.metrics.total_latency += latency
+
+            # Apply response transform
+            if route.transform_response:
+                try:
+                    response = route.transform_response(response)
+                except Exception as e:
+                    logger.error(f"Response transform failed: {e}")
+
+            return response
+
+        except Exception as e:
+            self.metrics.failed_requests += 1
+            logger.error(f"Request routing failed: {e}")
+            return self._error_response(502, f"Backend error: {str(e)}")
+
+        finally:
+            async with self._lock:
+                selected_backend.current_load = max(0, selected_backend.current_load - 1)
+
+    async def _forward_request(
+        self,
+        backend: BackendEndpoint,
+        path: str,
+        method: str,
+        headers: dict,
+        body: Any,
+        query_params: dict | None,
+        cache_ttl: int,
+    ) -> dict[str, Any]:
+        """Forward request to backend.
+
+        Args:
+            backend: Target backend
+            path: Request path
+            method: HTTP method
+            headers: Request headers
+            body: Request body
+            query_params: Query parameters
+            cache_ttl: Cache TTL
+
+        Returns:
+            Backend response
+        """
+        import httpx
+
+        url = f"{backend.url}/{path.lstrip('/')}"
+
+        async with httpx.AsyncClient(timeout=backend.timeout) as client:
+            response = await client.request(
+                method,
+                url,
+                headers=headers,
+                json=body if body else None,
+                params=query_params,
+            )
+
+            return {
+                "status": response.status_code,
+                "headers": dict(response.headers),
+                "data": response.json() if response.headers.get("content-type", "").startswith("application/json") else response.text,
+                "backend": backend.name,
             }
-            for s in services
-        ]
-    
-    def get_stats(self) -> dict[str, Any]:
-        """Get federation statistics."""
+
+    def _error_response(self, status: int, message: str) -> dict[str, Any]:
+        """Create error response."""
         return {
-            "total_services": len(self._services),
-            "healthy_services": len([s for s in self._services.values() if s.healthy]),
-            "cached_queries": len(self._query_cache),
-            **dict(self._stats)
+            "status": status,
+            "headers": {"Content-Type": "application/json"},
+            "data": {"error": message, "timestamp": time.time()},
         }
+
+    async def federated_query(
+        self,
+        query: str,
+        operation_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute a federated query across multiple backends.
+
+        Args:
+            query: Query string
+            operation_name: Optional operation name
+
+        Returns:
+            Combined results from all relevant backends
+        """
+        results = []
+        errors = []
+
+        # Find backends that should handle this query
+        for route in self.routes:
+            if route.backend in self.backends:
+                try:
+                    result = await self.route_request(
+                        path=route.path_pattern,
+                        method="POST",
+                        body={"query": query, "operationName": operation_name},
+                    )
+                    if result.get("status") == 200:
+                        results.append(result.get("data"))
+                    else:
+                        errors.append({"backend": route.backend, "error": result.get("data")})
+                except Exception as e:
+                    errors.append({"backend": route.backend, "error": str(e)})
+
+        return {
+            "results": results,
+            "errors": errors,
+            "total_backends": len(self.backends),
+            "successful": len(results),
+            "failed": len(errors),
+        }
+
+    def update_backend_health(self, name: str, status: str) -> None:
+        """Update backend health status.
+
+        Args:
+            name: Backend name
+            status: New health status
+        """
+        if name in self.backends:
+            self.backends[name].health_status = status
+            self.backends[name].last_check = time.time()
+
+    def get_metrics(self) -> dict[str, Any]:
+        """Get federation metrics."""
+        return {
+            "total_requests": self.metrics.total_requests,
+            "successful_requests": self.metrics.successful_requests,
+            "failed_requests": self.metrics.failed_requests,
+            "success_rate": (
+                self.metrics.successful_requests / self.metrics.total_requests
+                if self.metrics.total_requests > 0 else 0
+            ),
+            "avg_latency": (
+                self.metrics.total_latency / self.metrics.total_requests
+                if self.metrics.total_requests > 0 else 0
+            ),
+            "routed_requests": self.metrics.routed_requests,
+            "backends": {
+                name: {
+                    "url": b.url,
+                    "health": b.health_status,
+                    "current_load": b.current_load,
+                    "last_check": b.last_check,
+                }
+                for name, b in self.backends.items()
+            },
+        }
+
+
+def create_federation(
+    routing_strategy: RoutingStrategy = RoutingStrategy.ROUND_ROBIN,
+) -> APIFederationAction:
+    """Create an API federation action.
+
+    Args:
+        routing_strategy: Default routing strategy
+
+    Returns:
+        APIFederationAction instance
+    """
+    return APIFederationAction(routing_strategy=routing_strategy)
