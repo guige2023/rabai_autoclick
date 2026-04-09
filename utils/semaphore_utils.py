@@ -1,15 +1,14 @@
 """
-Semaphore and lock primitives utilities.
+Semaphore utilities for concurrency control.
 
-Provides specialized semaphore implementations including
-weighted semaphores, read-write locks, and timed locks
-for advanced concurrency control.
+Provides specialized semaphore implementations for UI automation workflows,
+including weighted, adaptive, and fairness-aware semaphore variants.
 
 Example:
-    >>> from utils.semaphore_utils import ReadWriteLock
-    >>> lock = ReadWriteLock()
-    >>> with lock.read_lock():
-    ...     data = read_data()
+    >>> from semaphore_utils import WeightedSemaphore, AdaptiveSemaphore
+    >>> sem = WeightedSemaphore(weight=5)
+    >>> with sem.acquire(weight=2):
+    ...     perform_action()
 """
 
 from __future__ import annotations
@@ -17,389 +16,385 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from typing import Any, Callable, Optional
+from collections import deque
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from typing import Any, Callable, Deque, Dict, Optional
 
 
+# =============================================================================
+# Exceptions
+# =============================================================================
+
+
+class SemaphoreError(Exception):
+    """Base exception for semaphore-related errors."""
+    pass
+
+
+class SemaphoreTimeoutError(SemaphoreError):
+    """Raised when semaphore acquisition times out."""
+
+    def __init__(self, weight: int, timeout: float):
+        self.weight = weight
+        self.timeout = timeout
+        super().__init__(
+            f"Failed to acquire semaphore weight={weight} within {timeout}s"
+        )
+
+
+# =============================================================================
+# Weighted Semaphore
+# =============================================================================
+
+
+@dataclass
 class WeightedSemaphore:
     """
-    Weighted semaphore for resource management.
+    A semaphore that tracks weighted resources.
 
-    Allows acquiring and releasing weighted permits,
-    useful for managing limited resources like connection pools.
+    Unlike a standard semaphore that counts individual slots, a weighted
+    semaphore tracks resource weight, allowing acquisition of variable-sized
+    resource blocks.
 
     Attributes:
-        value: Current number of available permits.
+        weight: Total weight of the semaphore.
+        _lock: Internal lock for thread safety.
+        _condition: Condition variable for waiting.
+        _current_weight: Currently consumed weight.
+        _waiters: Queue of waiting threads with their weights.
+
+    Example:
+        >>> sem = WeightedSemaphore(weight=10)
+        >>> with sem.acquire(weight=3):
+        ...     # 3 weight consumed, 7 remaining
+        ...     pass
     """
 
-    def __init__(
-        self,
-        value: int,
-        max_value: Optional[int] = None,
-    ) -> None:
+    weight: int
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+    _condition: threading.Condition = field(default_factory=lambda: threading.Condition(threading.Lock()))
+    _current_weight: int = field(default=0)
+    _waiters: Deque = field(default_factory=deque)
+
+    def acquire(self, weight: int = 1, timeout: Optional[float] = None) -> bool:
         """
-        Initialize the weighted semaphore.
+        Acquire the specified weight from the semaphore.
 
         Args:
-            value: Initial number of permits.
-            max_value: Maximum number of permits.
-        """
-        self._value = value
-        self._max_value = max_value or value
-        self._lock = threading.Lock()
-        self._condition = threading.Condition(self._lock)
-        self._waiters = 0
-
-    def acquire(self, weight: int = 1, blocking: bool = True, timeout: Optional[float] = None) -> bool:
-        """
-        Acquire permits from the semaphore.
-
-        Args:
-            weight: Number of permits to acquire.
-            blocking: If True, wait until permits are available.
-            timeout: Maximum wait time in seconds.
+            weight: The weight to acquire (must be > 0 and <= total weight).
+            timeout: Maximum seconds to wait. None means wait indefinitely.
 
         Returns:
-            True if permits were acquired, False otherwise.
+            True if acquisition succeeded.
+
+        Raises:
+            SemaphoreTimeoutError: If timeout expires before acquisition.
+            ValueError: If weight is invalid.
         """
+        if weight <= 0:
+            raise ValueError(f"Weight must be positive, got {weight}")
+        if weight > self.weight:
+            raise ValueError(
+                f"Weight {weight} exceeds semaphore capacity {self.weight}"
+            )
+
+        deadline = None if timeout is None else time.monotonic() + timeout
+
         with self._condition:
-            if not blocking:
-                if self._value >= weight:
-                    self._value -= weight
-                    return True
-                return False
+            while self._current_weight + weight > self.weight:
+                remaining = deadline - time.monotonic() if deadline else None
+                if remaining is not None and remaining <= 0:
+                    raise SemaphoreTimeoutError(weight, timeout)
+                self._condition.wait(timeout=remaining if remaining else None)
 
-            if timeout is not None:
-                end_time = time.monotonic() + timeout
-            else:
-                end_time = None
-
-            while self._value < weight:
-                if timeout is not None:
-                    remaining = end_time - time.monotonic()
-                    if remaining <= 0:
-                        return False
-                    self._condition.wait(remaining)
-                else:
-                    self._condition.wait()
-
-            self._value -= weight
+            self._current_weight += weight
             return True
 
     def release(self, weight: int = 1) -> None:
         """
-        Release permits back to the semaphore.
+        Release the specified weight back to the semaphore.
 
         Args:
-            weight: Number of permits to release.
+            weight: The weight to release (must be <= acquired weight).
         """
         with self._condition:
-            self._value = min(self._max_value, self._value + weight)
+            self._current_weight = max(0, self._current_weight - weight)
             self._condition.notify_all()
+
+    @contextmanager
+    def acquire_context(self, weight: int = 1, timeout: Optional[float] = None):
+        """
+        Context manager for acquiring and releasing semaphore weight.
+
+        Args:
+            weight: The weight to acquire.
+            timeout: Maximum seconds to wait.
+
+        Yields:
+            None
+
+        Example:
+            >>> sem = WeightedSemaphore(weight=10)
+            >>> with sem.acquire_context(weight=3):
+            ...     # do work
+            ...     pass
+        """
+        self.acquire(weight=weight, timeout=timeout)
+        try:
+            yield
+        finally:
+            self.release(weight=weight)
 
     @property
     def available(self) -> int:
-        """Get the number of available permits."""
+        """Return the currently available weight."""
         with self._lock:
-            return self._value
+            return self.weight - self._current_weight
 
     def __enter__(self) -> "WeightedSemaphore":
-        """Context manager entry."""
         self.acquire()
         return self
 
     def __exit__(self, *args: Any) -> None:
-        """Context manager exit."""
         self.release()
 
 
-class AsyncWeightedSemaphore:
-    """
-    Async-weighted semaphore for resource management.
+# =============================================================================
+# Async Adaptive Semaphore
+# =============================================================================
 
-    Async-compatible version of WeightedSemaphore.
+
+@dataclass
+class AsyncAdaptiveSemaphore:
+    """
+    An async semaphore that adapts its capacity based on demand.
+
+    Monitors wait times and can dynamically adjust the effective capacity
+    to prevent starvation of low-weight requests.
+
+    Attributes:
+        initial_capacity: Starting capacity of the semaphore.
+        min_capacity: Minimum allowed capacity.
+        max_capacity: Maximum allowed capacity.
+        adaptation_threshold: Wait time (seconds) before increasing capacity.
+        adaptation_factor: Multiplier for capacity adjustment.
     """
 
-    def __init__(
-        self,
-        value: int,
-        max_value: Optional[int] = None,
-    ) -> None:
+    initial_capacity: int = 10
+    min_capacity: int = 1
+    max_capacity: int = 100
+    adaptation_threshold: float = 1.0
+    adaptation_factor: float = 1.5
+    _lock: asyncio.Lock = field(default_factory=asyncio.create_task)
+    _semaphore: asyncio.Semaphore = field(init=False)
+    _current_capacity: int = field(init=False)
+    _wait_times: Deque[float] = field(default_factory=deque)
+    _total_wait_time: float = field(default=0.0, init=False)
+
+    def __post_init__(self):
+        # Use factory to avoid mutable default
+        object.__setattr__(self, '_semaphore', asyncio.Semaphore(self.initial_capacity))
+        object.__setattr__(self, '_current_capacity', self.initial_capacity)
+
+    async def acquire(self, timeout: Optional[float] = None) -> bool:
         """
-        Initialize the async weighted semaphore.
+        Acquire a slot from the semaphore.
 
         Args:
-            value: Initial number of permits.
-            max_value: Maximum number of permits.
+            timeout: Maximum seconds to wait.
+
+        Returns:
+            True if acquisition succeeded.
         """
-        self._value = value
-        self._max_value = max_value or value
-        self._lock = asyncio.Lock()
-        self._condition = asyncio.Condition(self._lock)
+        start = time.monotonic()
+        try:
+            result = await asyncio.wait_for(
+                self._semaphore.acquire(), timeout=timeout
+            )
+            return result is None or result is True
+        except asyncio.TimeoutError:
+            wait_time = time.monotonic() - start
+            await self._record_wait(wait_time)
+            raise
 
-    async def acquire(self, weight: int = 1, blocking: bool = True, timeout: Optional[float] = None) -> bool:
-        """Acquire permits asynchronously."""
-        async with self._condition:
-            if not blocking:
-                if self._value >= weight:
-                    self._value -= weight
-                    return True
-                return False
+    async def _record_wait(self, wait_time: float) -> None:
+        """Record wait time and potentially adapt capacity."""
+        async with self._lock:
+            self._wait_times.append(wait_time)
+            self._total_wait_time += wait_time
+            if len(self._wait_times) > 100:
+                old = self._wait_times.popleft()
+                self._total_wait_time -= old
 
-            try:
-                if timeout is not None:
-                    await asyncio.wait_for(self._condition.wait(), timeout)
-                else:
-                    await self._condition.wait()
+            avg_wait = self._total_wait_time / len(self._wait_times)
+            if avg_wait > self.adaptation_threshold:
+                new_capacity = min(
+                    int(self._current_capacity * self.adaptation_factor),
+                    self.max_capacity
+                )
+                if new_capacity > self._current_capacity:
+                    await self._resize(new_capacity)
 
-                self._value -= weight
-                return True
-            except asyncio.TimeoutError:
-                return False
+    async def _resize(self, new_capacity: int) -> None:
+        """Resize the semaphore to a new capacity."""
+        old_sem = self._semaphore
+        object.__setattr__(self, '_semaphore', asyncio.Semaphore(new_capacity))
+        object.__setattr__(self, '_current_capacity', new_capacity)
+        old_sem.close()
 
-    async def release(self, weight: int = 1) -> None:
-        """Release permits asynchronously."""
-        async with self._condition:
-            self._value = min(self._max_value, self._value + weight)
+    async def release(self) -> None:
+        """Release a slot back to the semaphore."""
+        self._semaphore.release()
+
+    @contextmanager
+    async def acquire_context(self, timeout: Optional[float] = None):
+        """Context manager for async semaphore acquisition."""
+        await self.acquire(timeout=timeout)
+        try:
+            yield
+        finally:
+            await self.release()
+
+    @property
+    def available(self) -> int:
+        """Return number of available slots."""
+        return self._current_capacity
+
+
+# =============================================================================
+# Fair Semaphore
+# =============================================================================
+
+
+@dataclass
+class FairSemaphore:
+    """
+    A fair semaphore that guarantees FIFO ordering.
+
+    Uses a condition variable to ensure that threads are served in the exact
+    order they requested, preventing thread starvation.
+
+    Attributes:
+        capacity: Maximum number of concurrent holders.
+    """
+
+    capacity: int
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+    _condition: threading.Condition = field(
+        default_factory=lambda: threading.Condition(threading.Lock())
+    )
+    _held: bool = field(default=False)
+    _queue: Deque = field(default_factory=deque)
+
+    def acquire(self, timeout: Optional[float] = None) -> bool:
+        """
+        Acquire the semaphore fairly.
+
+        Args:
+            timeout: Maximum seconds to wait.
+
+        Returns:
+            True if acquisition succeeded.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._lock:
+            while self._held:
+                remaining = deadline - time.monotonic() if deadline else None
+                if remaining is not None and remaining <= 0:
+                    return False
+                notified = self._condition.wait(timeout=remaining if remaining else None)
+                if not notified and deadline and time.monotonic() >= deadline:
+                    return False
+            self._held = True
+            return True
+
+    def release(self) -> None:
+        """Release the semaphore."""
+        with self._condition:
+            self._held = False
             self._condition.notify_all()
 
-    @property
-    async def available(self) -> int:
-        """Get the number of available permits."""
-        async with self._lock:
-            return self._value
+    @contextmanager
+    def acquire_context(self, timeout: Optional[float] = None):
+        """Context manager for fair semaphore acquisition."""
+        if not self.acquire(timeout=timeout):
+            raise SemaphoreTimeoutError(1, timeout or 0)
+        try:
+            yield
+        finally:
+            self.release()
 
 
-class ReadWriteLock:
+# =============================================================================
+# Slot Pool
+# =============================================================================
+
+
+@dataclass
+class SlotPool:
     """
-    Read-write lock for concurrent read, exclusive write access.
+    A pool of named slots with acquire/release semantics.
 
-    Multiple readers can hold the lock simultaneously, but
-    writers get exclusive access.
-    """
+    Useful for managing a fixed set of named resources like windows,
+    tabs, or connections.
 
-    def __init__(self) -> None:
-        """Initialize the read-write lock."""
-        self._readers = 0
-        self._writers = 0
-        self._writer_waiting = 0
-        self._lock = threading.Lock()
-        self._read_ready = threading.Condition(self._lock)
-        self._write_ready = threading.Condition(self._lock)
-
-    def read_lock(self) -> "_ReadLockContext":
-        """
-        Get a context manager for read access.
-
-        Returns:
-            Read lock context manager.
-        """
-        return _ReadLockContext(self)
-
-    def write_lock(self) -> "_WriteLockContext":
-        """
-        Get a context manager for write access.
-
-        Returns:
-            Write lock context manager.
-        """
-        return _WriteLockContext(self)
-
-    def acquire_read(self) -> None:
-        """Acquire a read lock."""
-        with self._lock:
-            while self._writers > 0 or self._writer_waiting > 0:
-                self._read_ready.wait()
-            self._readers += 1
-
-    def release_read(self) -> None:
-        """Release a read lock."""
-        with self._lock:
-            self._readers -= 1
-            if self._readers == 0:
-                self._write_ready.notifyAll()
-
-    def acquire_write(self) -> None:
-        """Acquire a write lock."""
-        with self._lock:
-            self._writer_waiting += 1
-            while self._readers > 0 or self._writers > 0:
-                self._write_ready.wait()
-            self._writer_waiting -= 1
-            self._writers += 1
-
-    def release_write(self) -> None:
-        """Release a write lock."""
-        with self._lock:
-            self._writers -= 1
-            self._read_ready.notifyAll()
-            self._write_ready.notifyAll()
-
-
-class _ReadLockContext:
-    """Context manager for read lock."""
-
-    def __init__(self, lock: ReadWriteLock) -> None:
-        self._lock = lock
-
-    def __enter__(self) -> "_ReadLockContext":
-        self._lock.acquire_read()
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        self._lock.release_read()
-
-
-class _WriteLockContext:
-    """Context manager for write lock."""
-
-    def __init__(self, lock: ReadWriteLock) -> None:
-        self._lock = lock
-
-    def __enter__(self) -> "_WriteLockContext":
-        self._lock.acquire_write()
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        self._lock.release_write()
-
-
-class TimedLock:
-    """
-    Lock with acquisition timeout.
-
-    Provides a regular mutex that can be acquired with
-    a timeout to prevent deadlocks.
+    Example:
+        >>> pool = SlotPool(names=["win1", "win2", "win3"])
+        >>> slot = pool.acquire("win1")
+        >>> pool.release(slot)
     """
 
-    def __init__(self) -> None:
-        """Initialize the timed lock."""
-        self._lock = threading.Lock()
-        self._condition = threading.Condition(self._lock)
-        self._owner: Optional[int] = None
-        self._acquire_count = 0
+    names: list[str]
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+    _available: set = field(default_factory=set)
 
-    def acquire(self, blocking: bool = True, timeout: Optional[float] = None) -> bool:
+    def __post_init__(self):
+        object.__setattr__(self, '_available', set(self.names))
+
+    def acquire(self, name: str, timeout: Optional[float] = None) -> str:
         """
-        Acquire the lock.
+        Acquire a named slot.
 
         Args:
-            blocking: If True, wait for lock.
-            timeout: Maximum wait time in seconds.
+            name: Name of the slot to acquire.
+            timeout: Maximum seconds to wait.
 
         Returns:
-            True if lock was acquired, False otherwise.
+            The acquired slot name.
+
+        Raises:
+            SemaphoreTimeoutError: If slot is not available within timeout.
         """
-        thread_id = threading.get_ident()
-
-        if timeout is None:
-            if self._lock.acquire(blocking):
-                self._owner = thread_id
-                self._acquire_count += 1
-                return True
-            return False
-
-        end_time = time.monotonic() + timeout
-        while True:
-            remaining = end_time - time.monotonic()
-            if remaining <= 0:
-                return False
-
-            acquired = self._lock.acquire(timeout=remaining)
-            if acquired:
-                self._owner = thread_id
-                self._acquire_count += 1
-                return True
-
-    def release(self) -> None:
-        """Release the lock."""
+        deadline = None if timeout is None else time.monotonic() + timeout
         with self._lock:
-            if self._owner == threading.get_ident():
-                self._acquire_count -= 1
-                if self._acquire_count == 0:
-                    self._owner = None
-                    self._lock.release()
+            while name not in self._available:
+                remaining = deadline - time.monotonic() if deadline else None
+                if remaining is not None and remaining <= 0:
+                    raise SemaphoreTimeoutError(1, timeout)
+                self._lock.wait(timeout=remaining if remaining else None)
+            self._available.discard(name)
+            return name
 
-    @property
-    def is_locked(self) -> bool:
-        """Check if lock is held."""
-        with self._lock:
-            return self._owner is not None
-
-    def __enter__(self) -> "TimedLock":
-        """Context manager entry."""
-        self.acquire()
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        """Context manager exit."""
-        self.release()
-
-
-class SpinLock:
-    """
-    Simple spin lock for fine-grained concurrency.
-
-    Uses busy-waiting instead of kernel synchronization,
-    suitable for very short critical sections.
-    """
-
-    def __init__(self) -> None:
-        """Initialize the spin lock."""
-        self._locked = False
-        self._lock = threading.Lock()
-
-    def acquire(self, blocking: bool = True) -> bool:
+    def release(self, name: str) -> None:
         """
-        Acquire the spin lock.
+        Release a named slot.
 
         Args:
-            blocking: If True, spin until acquired.
-
-        Returns:
-            True if lock was acquired.
+            name: Name of the slot to release.
         """
-        if not blocking:
-            if self._lock.acquire(False):
-                self._locked = True
-                return True
-            return False
+        with self._lock:
+            if name in self.names:
+                self._available.add(name)
+                self._lock.notify_all()
 
-        while True:
-            if self._lock.acquire(False):
-                self._locked = True
-                return True
+    def is_available(self, name: str) -> bool:
+        """Check if a slot is available."""
+        with self._lock:
+            return name in self._available
 
-    def release(self) -> None:
-        """Release the spin lock."""
-        self._locked = False
-        self._lock.release()
-
-    def __enter__(self) -> "SpinLock":
-        """Context manager entry."""
-        self.acquire()
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        """Context manager exit."""
-        self.release()
-
-
-def create_semaphore(
-    value: int,
-    weighted: bool = False,
-    **kwargs
-) -> Any:
-    """
-    Factory function to create a semaphore.
-
-    Args:
-        value: Initial permit count.
-        weighted: Use weighted semaphore.
-        **kwargs: Additional arguments.
-
-    Returns:
-        Semaphore instance.
-    """
-    if weighted:
-        return WeightedSemaphore(value, **kwargs)
-    return threading.Semaphore(value)
+    @property
+    def available_slots(self) -> list[str]:
+        """Return list of available slot names."""
+        with self._lock:
+            return list(self._available)
