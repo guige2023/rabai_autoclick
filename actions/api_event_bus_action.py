@@ -1,405 +1,455 @@
-"""
-API Event Bus Action Module.
+"""API Event Bus Action Module.
 
-Provides event-driven architecture with pub/sub messaging,
-event routing, filtering, and delivery guarantees.
+Implements an event bus for API events with:
+- Publish/subscribe patterns
+- Event routing and filtering
+- Dead letter queues
+- Event replay capability
+- Monitoring and metrics
+
+Author: rabai_autoclick team
 """
 
-from typing import Any, Callable, Dict, List, Optional, Set, Union
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
-import uuid
-from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+import time
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum, auto
+from typing import Any, Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
 
-class EventDeliveryMode(Enum):
-    """Event delivery modes."""
-    AT_MOST_ONCE = "at_most_once"
-    AT_LEAST_ONCE = "at_least_once"
-    EXACTLY_ONCE = "exactly_once"
-
-
 class EventPriority(Enum):
     """Event priority levels."""
-    LOW = 1
-    NORMAL = 2
-    HIGH = 3
-    CRITICAL = 4
+    LOW = auto()
+    NORMAL = auto()
+    HIGH = auto()
+    CRITICAL = auto()
 
 
 @dataclass
 class Event:
-    """Represents an event in the system."""
-    event_id: str
-    event_type: str
-    topic: str
-    payload: Any
+    """Represents an event in the bus."""
+    id: str
+    type: str
+    payload: Dict[str, Any]
     priority: EventPriority = EventPriority.NORMAL
-    timestamp: datetime = field(default_factory=datetime.now)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    timestamp: float = field(default_factory=time.time)
+    source: Optional[str] = None
     correlation_id: Optional[str] = None
-    reply_to: Optional[str] = None
-
-    @classmethod
-    def create(
-        cls,
-        event_type: str,
-        topic: str,
-        payload: Any,
-        **kwargs
-    ) -> "Event":
-        """Create a new event."""
-        return cls(
-            event_id=str(uuid.uuid4()),
-            event_type=event_type,
-            topic=topic,
-            payload=payload,
-            **kwargs
-        )
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Serialize event to dictionary."""
-        return {
-            "event_id": self.event_id,
-            "event_type": self.event_type,
-            "topic": self.topic,
-            "payload": self.payload,
-            "priority": self.priority.value,
-            "timestamp": self.timestamp.isoformat(),
-            "metadata": self.metadata,
-            "correlation_id": self.correlation_id,
-            "reply_to": self.reply_to
-        }
+    headers: Dict[str, str] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    delivery_count: int = 0
 
 
 @dataclass
 class Subscription:
-    """Represents an event subscription."""
-    subscription_id: str
-    topic: str
-    handler: Callable
-    filter_func: Optional[Callable[[Event], bool]] = None
+    """Event subscription configuration."""
+    id: str
+    event_type: str
+    handler: Callable[[Event], Any]
+    filter_fn: Optional[Callable[[Event], bool]] = None
     priority: EventPriority = EventPriority.NORMAL
-    dead_letter_handler: Optional[Callable] = None
+    auto_ack: bool = True
     max_retries: int = 3
-    retry_delay: float = 1.0
-
-    def matches(self, event: Event) -> bool:
-        """Check if event matches this subscription."""
-        if event.topic != self.topic:
-            return False
-        if self.filter_func and not self.filter_func(event):
-            return False
-        return True
+    dead_letter_queue: Optional[str] = None
 
 
 @dataclass
-class DeliveryResult:
-    """Result of event delivery attempt."""
-    subscription_id: str
-    event_id: str
-    success: bool
-    delivery_time: datetime
-    error: Optional[str] = None
-    retry_count: int = 0
-
-
-@dataclass
-class EventBusMetrics:
-    """Metrics for event bus monitoring."""
+class EventMetrics:
+    """Event bus metrics."""
     events_published: int = 0
     events_delivered: int = 0
     events_failed: int = 0
-    events_dropped: int = 0
-    subscriptions_count: int = 0
-    topics_count: Set[str] = field(default_factory=set)
-
-    @property
-    def delivery_rate(self) -> float:
-        """Get delivery success rate."""
-        if self.events_published == 0:
-            return 0.0
-        return self.events_delivered / self.events_published
+    events_dead_lettered: int = 0
+    active_subscriptions: int = 0
+    queue_depth: Dict[str, int] = field(default_factory=dict)
 
 
-class EventFilter:
-    """Filter for event subscription matching."""
-
-    @staticmethod
-    def by_metadata(key: str, value: Any) -> Callable[[Event], bool]:
-        """Create metadata filter."""
-        return lambda e: e.metadata.get(key) == value
-
-    @staticmethod
-    def by_priority(min_priority: EventPriority) -> Callable[[Event], bool]:
-        """Create priority filter."""
-        return lambda e: e.priority.value >= min_priority.value
-
-    @staticmethod
-    def by_correlation(correlation_id: str) -> Callable[[Event], bool]:
-        """Create correlation ID filter."""
-        return lambda e: e.correlation_id == correlation_id
-
-    @staticmethod
-    def by_payload_path(path: str, expected: Any) -> Callable[[Event], bool]:
-        """Create payload path filter."""
-        def get_path(data: Any, path: str) -> Any:
-            keys = path.split(".")
-            result = data
-            for key in keys:
-                if isinstance(result, dict):
-                    result = result.get(key)
-                else:
-                    return None
-            return result
-        return lambda e: get_path(e.payload, path) == expected
-
-
-class DeadLetterQueue:
-    """Dead letter queue for failed event deliveries."""
-
-    def __init__(self, max_size: int = 1000):
-        self.max_size = max_size
-        self._queue: List[Event] = []
-        self._lock = asyncio.Lock()
-
-    async def put(self, event: Event, error: str):
-        """Add failed event to dead letter queue."""
-        async with self._lock:
-            event.metadata["dlq_error"] = error
-            event.metadata["dlq_timestamp"] = datetime.now().isoformat()
-            if len(self._queue) >= self.max_size:
-                self._queue.pop(0)
-            self._queue.append(event)
-
-    async def get(self) -> Optional[Event]:
-        """Get event from dead letter queue."""
-        async with self._lock:
-            if self._queue:
-                return self._queue.pop(0)
-            return None
-
-    async def size(self) -> int:
-        """Get queue size."""
-        async with self._lock:
-            return len(self._queue)
-
-
-class EventBus:
-    """Main event bus for pub/sub messaging."""
-
-    def __init__(
-        self,
-        delivery_mode: EventDeliveryMode = EventDeliveryMode.AT_LEAST_ONCE,
-        enable_metrics: bool = True
-    ):
-        self.delivery_mode = delivery_mode
-        self.enable_metrics = enable_metrics
+class APIEventBus:
+    """Event bus for asynchronous API event distribution.
+    
+    Features:
+    - Topic-based pub/sub
+    - Event filtering
+    - Priority queues
+    - Dead letter handling
+    - Event replay
+    - Monitoring
+    """
+    
+    def __init__(self, name: str = "default"):
+        self.name = name
         self._subscriptions: Dict[str, List[Subscription]] = defaultdict(list)
-        self._topicSubscriptions: Dict[str, Set[str]] = defaultdict(set)
-        self._subscription_index: Dict[str, Subscription] = {}
-        self._dead_letter_queue = DeadLetterQueue()
-        self._metrics = EventBusMetrics()
-        self._executor = ThreadPoolExecutor(max_workers=4)
+        self._queues: Dict[str, asyncio.PriorityQueue] = {}
+        self._dead_letter_queues: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
         self._running = False
-        self._event_queues: Dict[str, asyncio.Queue] = {}
-        self._worker_tasks: List[asyncio.Task] = []
-
-    def subscribe(
+        self._processors: Dict[str, asyncio.Task] = {}
+        self._metrics = EventMetrics()
+        self._lock = asyncio.Lock()
+        self._event_history: deque = deque(maxlen=10000)
+    
+    async def publish(
         self,
-        topic: str,
-        handler: Callable[[Event], Any],
-        filter_func: Optional[Callable[[Event], bool]] = None,
+        event_type: str,
+        payload: Dict[str, Any],
         priority: EventPriority = EventPriority.NORMAL,
-        subscription_id: Optional[str] = None
-    ) -> str:
-        """Subscribe to events on a topic."""
-        sub_id = subscription_id or str(uuid.uuid4())
-        subscription = Subscription(
-            subscription_id=sub_id,
-            topic=topic,
-            handler=handler,
-            filter_func=filter_func,
-            priority=priority
+        source: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> Event:
+        """Publish an event to the bus.
+        
+        Args:
+            event_type: Type of event
+            payload: Event payload
+            priority: Event priority
+            source: Event source
+            correlation_id: Correlation ID for tracing
+            headers: Event headers
+            metadata: Additional metadata
+            
+        Returns:
+            Published event
+        """
+        event = Event(
+            id=f"evt_{int(time.time() * 1000000)}",
+            type=event_type,
+            payload=payload,
+            priority=priority,
+            source=source,
+            correlation_id=correlation_id,
+            headers=headers or {},
+            metadata=metadata or {}
         )
-
-        self._subscriptions[sub_id] = subscription
-        self._topicSubscriptions[topic].add(sub_id)
-        self._subscription_index[sub_id] = subscription
-
-        if self.enable_metrics:
-            self._metrics.subscriptions_count += 1
-            self._metrics.topics_count.add(topic)
-
-        logger.info(f"Subscribed to topic '{topic}' with ID {sub_id}")
-        return sub_id
-
-    def unsubscribe(self, subscription_id: str):
-        """Unsubscribe from events."""
-        subscription = self._subscription_index.get(subscription_id)
-        if subscription:
-            topic = subscription.topic
-            self._subscriptions[subscription_id] = []
-            self._topicSubscriptions[topic].discard(subscription_id)
-            del self._subscription_index[subscription_id]
-
-            if self.enable_metrics:
-                self._metrics.subscriptions_count -= 1
-
-    async def publish(self, event: Event) -> List[DeliveryResult]:
-        """Publish an event to all matching subscriptions."""
-        if self.enable_metrics:
-            self._metrics.events_published += 1
-
-        results = []
-        matching_subs = self._get_matching_subscriptions(event)
-
-        if not matching_subs:
-            if self.enable_metrics:
-                self._metrics.events_dropped += 1
-            return results
-
-        delivery_tasks = [
-            self._deliver_with_retry(sub, event)
-            for sub in matching_subs
-        ]
-
-        results = await asyncio.gather(*delivery_tasks, return_exceptions=True)
-
-        return [r for r in results if isinstance(r, DeliveryResult)]
-
-    def _get_matching_subscriptions(self, event: Event) -> List[Subscription]:
-        """Get all subscriptions matching an event."""
-        matching = []
-        for sub_id in self._topicSubscriptions.get(event.topic, []):
-            sub = self._subscription_index.get(sub_id)
-            if sub and sub.matches(event):
-                matching.append(sub)
-
-        matching.sort(key=lambda s: s.priority.value, reverse=True)
-        return matching
-
-    async def _deliver_with_retry(
+        
+        async with self._lock:
+            self._event_history.append(event)
+        
+        self._metrics.events_published += 1
+        
+        subscriptions = self._subscriptions.get(event_type, [])
+        
+        for sub in subscriptions:
+            if sub.filter_fn and not sub.filter_fn(event):
+                continue
+            
+            await self._enqueue_event(sub, event)
+        
+        wildcard_subs = self._subscriptions.get("*", [])
+        for sub in wildcard_subs:
+            await self._enqueue_event(sub, event)
+        
+        return event
+    
+    async def subscribe(
         self,
-        subscription: Subscription,
-        event: Event
-    ) -> DeliveryResult:
-        """Deliver event to subscription with retry logic."""
-        result = DeliveryResult(
-            subscription_id=subscription.subscription_id,
-            event_id=event.event_id,
-            success=False,
-            delivery_time=datetime.now()
+        event_type: str,
+        handler: Callable[[Event], Any],
+        filter_fn: Optional[Callable[[Event], bool]] = None,
+        priority: EventPriority = EventPriority.NORMAL,
+        auto_ack: bool = True,
+        max_retries: int = 3,
+        dead_letter_queue: Optional[str] = None
+    ) -> str:
+        """Subscribe to an event type.
+        
+        Args:
+            event_type: Event type to subscribe to
+            handler: Async handler function
+            filter_fn: Optional event filter
+            priority: Subscription priority
+            auto_ack: Auto acknowledge events
+            max_retries: Max delivery retries
+            dead_letter_queue: DLQ name
+            
+        Returns:
+            Subscription ID
+        """
+        sub_id = f"sub_{event_type}_{int(time.time() * 1000000)}"
+        
+        subscription = Subscription(
+            id=sub_id,
+            event_type=event_type,
+            handler=handler,
+            filter_fn=filter_fn,
+            priority=priority,
+            auto_ack=auto_ack,
+            max_retries=max_retries,
+            dead_letter_queue=dead_letter_queue
         )
-
-        for attempt in range(subscription.max_retries + 1):
+        
+        async with self._lock:
+            self._subscriptions[event_type].append(subscription)
+            self._subscriptions[event_type].sort(
+                key=lambda s: s.priority.value, reverse=True
+            )
+            
+            if event_type not in self._queues:
+                self._queues[event_type] = asyncio.PriorityQueue()
+            
+            self._metrics.active_subscriptions = sum(
+                len(subs) for subs in self._subscriptions.values()
+            )
+        
+        if event_type not in self._processors:
+            self._processors[event_type] = asyncio.create_task(
+                self._process_events(event_type)
+            )
+        
+        logger.info(f"Subscribed to event type: {event_type}")
+        return sub_id
+    
+    async def unsubscribe(self, subscription_id: str) -> bool:
+        """Unsubscribe from an event type.
+        
+        Args:
+            subscription_id: Subscription ID to remove
+            
+        Returns:
+            True if unsubscribed
+        """
+        async with self._lock:
+            for event_type, subs in self._subscriptions.items():
+                for i, sub in enumerate(subs):
+                    if sub.id == subscription_id:
+                        subs.pop(i)
+                        self._metrics.active_subscriptions = sum(
+                            len(s) for s in self._subscriptions.values()
+                        )
+                        return True
+        return False
+    
+    async def _enqueue_event(self, subscription: Subscription, event: Event) -> None:
+        """Enqueue event for a subscription.
+        
+        Args:
+            subscription: Target subscription
+            event: Event to enqueue
+        """
+        event_type = subscription.event_type
+        queue = self._queues.get(event_type)
+        
+        if queue:
+            priority_value = 10 - subscription.priority.value
+            await queue.put((priority_value, event))
+            
+            self._metrics.queue_depth[event_type] = queue.qsize()
+    
+    async def _process_events(self, event_type: str) -> None:
+        """Process events for an event type.
+        
+        Args:
+            event_type: Event type to process
+        """
+        queue = self._queues.get(event_type)
+        if not queue:
+            return
+        
+        while self._running or not queue.empty():
             try:
-                if asyncio.iscoroutinefunction(subscription.handler):
-                    await asyncio.wait_for(
-                        subscription.handler(event),
-                        timeout=30.0
-                    )
-                else:
-                    loop = asyncio.get_event_loop()
-                    await loop.run_in_executor(
-                        self._executor,
-                        subscription.handler,
-                        event
-                    )
-
-                result.success = True
-                if self.enable_metrics:
-                    self._metrics.events_delivered += 1
-                return result
-
+                _, event = await asyncio.wait_for(queue.get(), timeout=1.0)
+                
+                subscriptions = self._subscriptions.get(event_type, [])
+                
+                for sub in subscriptions:
+                    if sub.filter_fn and not sub.filter_fn(event):
+                        continue
+                    
+                    try:
+                        if asyncio.iscoroutinefunction(sub.handler):
+                            await sub.handler(event)
+                        else:
+                            sub.handler(event)
+                        
+                        self._metrics.events_delivered += 1
+                        
+                    except Exception as e:
+                        logger.error(f"Event handler error: {e}")
+                        event.delivery_count += 1
+                        
+                        if event.delivery_count >= sub.max_retries:
+                            await self._dead_letter(sub, event, str(e))
+                        else:
+                            await queue.put((0, event))
+                        
+                        self._metrics.events_failed += 1
+                
+                self._metrics.queue_depth[event_type] = queue.qsize()
+                
             except asyncio.TimeoutError:
-                result.error = "Delivery timeout"
-                result.retry_count = attempt
-
+                continue
             except Exception as e:
-                result.error = str(e)
-                result.retry_count = attempt
-
-            if attempt < subscription.max_retries:
-                await asyncio.sleep(subscription.retry_delay * (attempt + 1))
-
-        if self.enable_metrics:
-            self._metrics.events_failed += 1
-
-        if subscription.dead_letter_handler:
-            await asyncio.to_thread(subscription.dead_letter_handler, event, result.error)
-        else:
-            await self._dead_letter_queue.put(event, result.error or "Unknown error")
-
-        return result
-
-    async def start(self):
+                logger.error(f"Event processing error: {e}")
+    
+    async def _dead_letter(self, subscription: Subscription, event: Event, error: str) -> None:
+        """Move event to dead letter queue.
+        
+        Args:
+            subscription: Subscription that failed
+            event: Failed event
+            error: Error message
+        """
+        dlq_name = subscription.dead_letter_queue or f"dlq_{subscription.event_type}"
+        
+        dlq = self._dead_letter_queues[dlq_name]
+        dlq.append({
+            "event": event,
+            "error": error,
+            "failed_at": datetime.now().isoformat(),
+            "subscription_id": subscription.id
+        })
+        
+        self._metrics.events_dead_lettered += 1
+        logger.warning(f"Event {event.id} dead-lettered: {error}")
+    
+    async def start(self) -> None:
         """Start the event bus."""
         self._running = True
-        logger.info("Event bus started")
-
-    async def stop(self):
+        
+        for event_type, queue in self._queues.items():
+            if event_type not in self._processors:
+                self._processors[event_type] = asyncio.create_task(
+                    self._process_events(event_type)
+                )
+        
+        logger.info(f"Event bus '{self.name}' started")
+    
+    async def stop(self) -> None:
         """Stop the event bus."""
         self._running = False
-        for task in self._worker_tasks:
+        
+        for task in self._processors.values():
             task.cancel()
-        self._executor.shutdown(wait=False)
-        logger.info("Event bus stopped")
-
-    def get_metrics(self) -> EventBusMetrics:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        
+        self._processors.clear()
+        logger.info(f"Event bus '{self.name}' stopped")
+    
+    async def replay_events(
+        self,
+        event_type: str,
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+        limit: int = 1000
+    ) -> List[Event]:
+        """Replay historical events.
+        
+        Args:
+            event_type: Event type to replay
+            from_timestamp: Start timestamp
+            to_timestamp: End timestamp
+            limit: Max events to replay
+            
+        Returns:
+            List of historical events
+        """
+        events = []
+        
+        async with self._lock:
+            for event in self._event_history:
+                if event.type != event_type:
+                    continue
+                
+                if from_timestamp and event.timestamp < from_timestamp:
+                    continue
+                
+                if to_timestamp and event.timestamp > to_timestamp:
+                    continue
+                
+                events.append(event)
+                
+                if len(events) >= limit:
+                    break
+        
+        return events
+    
+    def get_dead_letter_events(
+        self,
+        queue_name: Optional[str] = None,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Get events from dead letter queue.
+        
+        Args:
+            queue_name: Specific DLQ name
+            limit: Max events to return
+            
+        Returns:
+            List of dead-lettered events
+        """
+        if queue_name:
+            return list(self._dead_letter_queues.get(queue_name, []))[-limit:]
+        
+        all_dlq = []
+        for dlq in self._dead_letter_queues.values():
+            all_dlq.extend(dlq)
+        
+        return all_dlq[-limit:]
+    
+    def get_metrics(self) -> Dict[str, Any]:
         """Get event bus metrics."""
-        return self._metrics
-
-    def get_subscription_count(self, topic: Optional[str] = None) -> int:
-        """Get number of subscriptions."""
-        if topic:
-            return len(self._topicSubscriptions.get(topic, set()))
-        return len(self._subscription_index)
-
-
-async def handle_user_created(event: Event):
-    """Sample event handler."""
-    print(f"User created: {event.payload}")
-    await asyncio.sleep(0.01)
+        return {
+            "events_published": self._metrics.events_published,
+            "events_delivered": self._metrics.events_delivered,
+            "events_failed": self._metrics.events_failed,
+            "events_dead_lettered": self._metrics.events_dead_lettered,
+            "active_subscriptions": self._metrics.active_subscriptions,
+            "queue_depth": dict(self._metrics.queue_depth),
+            "history_size": len(self._event_history)
+        }
 
 
-async def handle_order_placed(event: Event):
-    """Sample event handler."""
-    print(f"Order placed: {event.payload}")
-
-
-def main():
-    """Synchronous main for basic demonstration."""
-    bus = EventBus(delivery_mode=EventDeliveryMode.AT_LEAST_ONCE)
-
-    bus.subscribe(
-        topic="user.created",
-        handler=handle_user_created,
-        filter_func=EventFilter.by_priority(EventPriority.NORMAL)
-    )
-
-    bus.subscribe(
-        topic="order.placed",
-        handler=handle_order_placed
-    )
-
-    event = Event.create(
-        event_type="user.created",
-        topic="user.created",
-        payload={"user_id": "123", "name": "John Doe"},
-        metadata={"source": "test"}
-    )
-
-    asyncio.run(bus.publish(event))
-    print(f"Metrics: {bus.get_metrics()}")
-
-
-if __name__ == "__main__":
-    main()
+class EventRouter:
+    """Routes events to multiple handlers based on rules."""
+    
+    def __init__(self, event_bus: APIEventBus):
+        self._bus = event_bus
+        self._routes: Dict[str, str] = {}
+        self._transformers: Dict[str, Callable] = {}
+    
+    def register_route(
+        self,
+        from_type: str,
+        to_type: str,
+        transformer: Optional[Callable[[Event], Event]] = None
+    ) -> None:
+        """Register a routing rule.
+        
+        Args:
+            from_type: Source event type
+            to_type: Target event type
+            transformer: Optional event transformer
+        """
+        self._routes[from_type] = to_type
+        
+        if transformer:
+            self._transformers[from_type] = transformer
+        
+        async def route_handler(event: Event) -> None:
+            to_type = self._routes[event.type]
+            transformed = event
+            
+            if event.type in self._transformers:
+                transformed = self._transformers[event.type](event)
+            
+            await self._bus.publish(
+                event_type=to_type,
+                payload=transformed.payload,
+                source=f"route:{event.type}->{to_type}",
+                correlation_id=event.correlation_id
+            )
+        
+        asyncio.create_task(
+            self._bus.subscribe(from_type, route_handler)
+        )
