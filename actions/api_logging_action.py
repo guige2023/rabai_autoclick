@@ -1,180 +1,226 @@
-# Copyright (c) 2024. coded by claude
-"""API Logging Action Module.
+"""API request/response logging utilities.
 
-Provides comprehensive API request/response logging with support for
-log levels, formatting, and external log aggregation.
+This module provides API logging:
+- Request/response logging
+- Log sanitization
+- Log formatting
+- Log levels by status code
+
+Example:
+    >>> from actions.api_logging_action import APILogger
+    >>> logger = APILogger()
+    >>> logger.log_request(request)
 """
-from typing import Optional, Dict, Any, List
+
+from __future__ import annotations
+
+import time
+import json
+import logging
+import re
+from typing import Any, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
-import logging
-import json
-import asyncio
 
 logger = logging.getLogger(__name__)
 
 
-class LogLevel(Enum):
-    DEBUG = "debug"
-    INFO = "info"
-    WARNING = "warning"
-    ERROR = "error"
-    CRITICAL = "critical"
-
-
 @dataclass
-class APILogEntry:
-    timestamp: datetime
-    level: LogLevel
-    request_id: str
+class LogEntry:
+    """A log entry for an API request/response."""
+    timestamp: str
     method: str
     path: str
-    status_code: Optional[int]
-    duration_ms: Optional[float]
+    status_code: Optional[int] = None
+    latency: Optional[float] = None
+    request_headers: dict[str, str] = field(default_factory=dict)
+    response_headers: dict[str, str] = field(default_factory=dict)
     request_body: Optional[Any] = None
     response_body: Optional[Any] = None
-    headers: Optional[Dict[str, str]] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    error: Optional[str] = None
+    client_ip: Optional[str] = None
+    user_agent: Optional[str] = None
 
 
-@dataclass
-class LoggingConfig:
-    level: LogLevel = LogLevel.INFO
-    include_request_body: bool = True
-    include_response_body: bool = False
-    max_body_size: int = 1024
-    log_to_console: bool = True
-    log_to_file: bool = False
-    file_path: Optional[str] = None
+class APILogger:
+    """Logger for API requests and responses.
 
+    Example:
+        >>> api_logger = APILogger(sanitize_keys=["password", "token"])
+        >>> api_logger.log_request(request)
+    """
 
-class APILogging:
-    def __init__(self, config: Optional[LoggingConfig] = None):
-        self.config = config or LoggingConfig()
-        self._logs: List[APILogEntry] = []
-        self._handlers: List[callable] = []
-        self._log_lock = asyncio.Lock()
+    SENSITIVE_KEYS = {
+        "password", "token", "secret", "api_key", "apikey",
+        "authorization", "access_token", "refresh_token",
+        "session", "cookie", "credit_card",
+    }
 
-    def add_handler(self, handler: callable) -> None:
-        self._handlers.append(handler)
-
-    async def log_request(
+    def __init__(
         self,
-        request_id: str,
+        sanitize_keys: Optional[set[str]] = None,
+        log_bodies: bool = True,
+        max_body_size: int = 10000,
+        log_levels_by_status: Optional[dict[int, str]] = None,
+    ) -> None:
+        self.sanitize_keys = sanitize_keys or self.SENSITIVE_KEYS
+        self.log_bodies = log_bodies
+        self.max_body_size = max_body_size
+        self.log_levels_by_status = log_levels_by_status or {
+            2: "INFO",
+            3: "INFO",
+            4: "WARNING",
+            5: "ERROR",
+        }
+
+    def log_request(
+        self,
         method: str,
         path: str,
-        headers: Optional[Dict[str, str]] = None,
+        headers: Optional[dict[str, str]] = None,
         body: Optional[Any] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        entry = APILogEntry(
-            timestamp=datetime.now(),
-            level=LogLevel.INFO,
-            request_id=request_id,
+        client_ip: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> LogEntry:
+        """Log an incoming request.
+
+        Args:
+            method: HTTP method.
+            path: Request path.
+            headers: Request headers.
+            body: Request body.
+            client_ip: Client IP address.
+            user_agent: User agent string.
+
+        Returns:
+            LogEntry for this request.
+        """
+        entry = LogEntry(
+            timestamp=datetime.utcnow().isoformat(),
             method=method,
             path=path,
-            status_code=None,
-            duration_ms=None,
-            request_body=self._truncate_body(body) if self.config.include_request_body else None,
-            headers=self._sanitize_headers(headers) if headers else None,
-            metadata=metadata or {},
+            request_headers=self._sanitize_dict(headers or {}),
+            request_body=self._sanitize_body(body) if self.log_bodies else None,
+            client_ip=client_ip,
+            user_agent=user_agent,
         )
-        await self._store_log(entry)
+        self._log_entry(entry, "INFO")
+        return entry
 
-    async def log_response(
+    def log_response(
         self,
-        request_id: str,
+        entry: LogEntry,
         status_code: int,
-        duration_ms: float,
-        response_body: Optional[Any] = None,
+        headers: Optional[dict[str, str]] = None,
+        body: Optional[Any] = None,
+        error: Optional[str] = None,
     ) -> None:
-        entry = APILogEntry(
-            timestamp=datetime.now(),
-            level=self._get_level_for_status(status_code),
-            request_id=request_id,
-            method="",
-            path="",
-            status_code=status_code,
-            duration_ms=duration_ms,
-            response_body=self._truncate_body(response_body) if self.config.include_response_body else None,
-        )
-        await self._store_log(entry)
+        """Log a response.
 
-    async def log_error(
+        Args:
+            entry: LogEntry from log_request.
+            status_code: Response status code.
+            headers: Response headers.
+            body: Response body.
+            error: Error message if any.
+        """
+        entry.status_code = status_code
+        entry.response_headers = headers or {}
+        entry.response_body = self._sanitize_body(body) if self.log_bodies else None
+        entry.error = error
+        level = self._get_log_level(status_code)
+        self._log_entry(entry, level)
+
+    def log_error(
         self,
-        request_id: str,
-        error: str,
-        method: str,
-        path: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        entry: LogEntry,
+        error: Exception,
     ) -> None:
-        entry = APILogEntry(
-            timestamp=datetime.now(),
-            level=LogLevel.ERROR,
-            request_id=request_id,
-            method=method,
-            path=path,
-            status_code=None,
-            duration_ms=None,
-            metadata={**(metadata or {}), "error": error},
-        )
-        await self._store_log(entry)
+        """Log an error.
 
-    async def _store_log(self, entry: APILogEntry) -> None:
-        async with self._log_lock:
-            self._logs.append(entry)
-            if len(self._logs) > 10000:
-                self._logs = self._logs[-5000:]
-        for handler in self._handlers:
-            try:
-                result = handler(entry)
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception as e:
-                logger.error(f"Log handler failed: {e}")
-        if self.config.log_to_console:
-            self._write_to_console(entry)
+        Args:
+            entry: LogEntry from log_request.
+            error: Exception that occurred.
+        """
+        entry.error = str(error)
+        self._log_entry(entry, "ERROR")
 
-    def _write_to_console(self, entry: APILogEntry) -> None:
-        log_message = f"[{entry.timestamp.isoformat()}] {entry.level.value.upper()} - {entry.request_id} - {entry.method} {entry.path}"
-        if entry.status_code:
-            log_message += f" - {entry.status_code}"
-        if entry.duration_ms:
-            log_message += f" - {entry.duration_ms:.2f}ms"
-        if entry.level == LogLevel.ERROR:
-            logger.error(log_message)
-        elif entry.level == LogLevel.WARNING:
-            logger.warning(log_message)
-        else:
-            logger.info(log_message)
+    def _sanitize_dict(self, data: dict[str, str]) -> dict[str, str]:
+        """Sanitize a dictionary by redacting sensitive values."""
+        result = {}
+        for key, value in data.items():
+            lower_key = key.lower().replace("-", "_")
+            if any(sk in lower_key for sk in self.sanitize_keys):
+                result[key] = "***REDACTED***"
+            else:
+                result[key] = str(value)[:500]
+        return result
 
-    def _get_level_for_status(self, status_code: int) -> LogLevel:
-        if status_code >= 500:
-            return LogLevel.CRITICAL
-        elif status_code >= 400:
-            return LogLevel.ERROR
-        elif status_code >= 300:
-            return LogLevel.WARNING
-        return LogLevel.INFO
-
-    def _truncate_body(self, body: Any, max_size: Optional[int] = None) -> Any:
-        max_size = max_size or self.config.max_body_size
+    def _sanitize_body(self, body: Any) -> Any:
+        """Sanitize a request/response body."""
         if body is None:
             return None
-        body_str = str(body)
-        if len(body_str) > max_size:
-            return body_str[:max_size] + "...[truncated]"
+        if isinstance(body, dict):
+            return {k: self._sanitize_body(v) for k, v in body.items()}
+        if isinstance(body, list):
+            return [self._sanitize_body(item) for item in body]
+        if isinstance(body, str):
+            body_str = body[:self.max_body_size]
+            for key in self.sanitize_keys:
+                pattern = rf'({key}["\s:=]+)[^&\s"]+'
+                body_str = re.sub(pattern, r"\1***REDACTED***", body_str, flags=re.IGNORECASE)
+            return body_str
         return body
 
-    def _sanitize_headers(self, headers: Dict[str, str]) -> Dict[str, str]:
-        sensitive = {"authorization", "cookie", "x-api-key", "x-auth-token"}
-        return {k: ("[REDACTED]" if k.lower() in sensitive else v) for k, v in headers.items()}
+    def _get_log_level(self, status_code: int) -> str:
+        """Get log level based on status code."""
+        for code, level in sorted(self.log_levels_by_status.items()):
+            if status_code >= code:
+                return level
+        return "INFO"
 
-    def get_logs(self, limit: Optional[int] = None, level: Optional[LogLevel] = None) -> List[APILogEntry]:
-        logs = self._logs
-        if level:
-            logs = [l for l in logs if l.level == level]
-        if limit:
-            return logs[-limit:]
-        return logs
+    def _log_entry(self, entry: LogEntry, level: str) -> None:
+        """Log an entry at the specified level."""
+        log_data = {
+            "timestamp": entry.timestamp,
+            "method": entry.method,
+            "path": entry.path,
+            "status_code": entry.status_code,
+            "latency": entry.latency,
+            "client_ip": entry.client_ip,
+        }
+        log_func = getattr(logger, level.lower(), logger.info)
+        log_func(json.dumps(log_data))
+
+
+class RequestLogger:
+    """Context manager for logging request lifecycle."""
+
+    def __init__(
+        self,
+        api_logger: APILogger,
+        method: str,
+        path: str,
+        **kwargs: Any,
+    ) -> None:
+        self.api_logger = api_logger
+        self.method = method
+        self.path = path
+        self.kwargs = kwargs
+        self.entry: Optional[LogEntry] = None
+        self.start_time: float = 0.0
+
+    def __enter__(self) -> RequestLogger:
+        self.start_time = time.time()
+        self.entry = self.api_logger.log_request(
+            self.method,
+            self.path,
+            **self.kwargs,
+        )
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        if self.entry:
+            self.entry.latency = time.time() - self.start_time
+            if exc_val:
+                self.api_logger.log_error(self.entry, exc_val)
