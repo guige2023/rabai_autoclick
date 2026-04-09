@@ -1,376 +1,367 @@
-"""Path utilities for RabAI AutoClick.
+"""Path and file system utilities.
 
-Provides:
-- Path helpers
-- Directory management
-- File type detection
+Provides path manipulation, file operations,
+and directory management utilities.
 """
 
 import os
 import shutil
-import tempfile
-from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 
-class FileType(Enum):
-    """File type categories."""
-    IMAGE = "image"
-    VIDEO = "video"
-    AUDIO = "audio"
-    DOCUMENT = "document"
-    CONFIG = "config"
-    CODE = "code"
-    ARCHIVE = "archive"
-    UNKNOWN = "unknown"
+def ensure_dir(path: Union[str, Path]) -> Path:
+    """Ensure directory exists, create if needed.
 
-
-IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.svg'}
-VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm'}
-AUDIO_EXTENSIONS = {'.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a', '.wma'}
-DOCUMENT_EXTENSIONS = {'.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt', '.md'}
-CONFIG_EXTENSIONS = {'.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf'}
-CODE_EXTENSIONS = {'.py', '.js', '.ts', '.java', '.c', '.cpp', '.h', '.go', '.rs', '.rb', '.php'}
-ARCHIVE_EXTENSIONS = {'.zip', '.tar', '.gz', '.bz2', '.7z', '.rar'}
-
-
-def get_file_type(path: Union[str, Path]) -> FileType:
-    """Determine file type from extension.
-
-    Args:
-        path: File path.
-
-    Returns:
-        FileType enum value.
+    Example:
+        ensure_dir("output/results")
     """
     path = Path(path)
-    ext = path.suffix.lower()
-
-    if ext in IMAGE_EXTENSIONS:
-        return FileType.IMAGE
-    if ext in VIDEO_EXTENSIONS:
-        return FileType.VIDEO
-    if ext in AUDIO_EXTENSIONS:
-        return FileType.AUDIO
-    if ext in DOCUMENT_EXTENSIONS:
-        return FileType.DOCUMENT
-    if ext in CONFIG_EXTENSIONS:
-        return FileType.CONFIG
-    if ext in CODE_EXTENSIONS:
-        return FileType.CODE
-    if ext in ARCHIVE_EXTENSIONS:
-        return FileType.ARCHIVE
-
-    return FileType.UNKNOWN
-
-
-def ensure_dir(path: Union[str, Path], mode: int = 0o755) -> Path:
-    """Ensure directory exists.
-
-    Args:
-        path: Directory path.
-        mode: Directory permissions.
-
-    Returns:
-        Path object.
-    """
-    path = Path(path)
-    path.mkdir(parents=True, exist_ok=True, mode=mode)
+    path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def ensure_parent_dir(path: Union[str, Path], mode: int = 0o755) -> Path:
-    """Ensure parent directory of a file exists.
+def ensure_dirs(paths: List[Union[str, Path]]) -> List[Path]:
+    """Ensure multiple directories exist.
 
-    Args:
-        path: File path.
-        mode: Directory permissions.
-
-    Returns:
-        Path object of parent directory.
+    Example:
+        ensure_dirs(["output/a", "output/b", "cache"])
     """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=mode)
-    return path
-
-
-def safe_filename(filename: str, replacement: str = '_') -> str:
-    """Make filename safe by removing invalid characters.
-
-    Args:
-        filename: Original filename.
-        replacement: Character to replace invalid chars with.
-
-    Returns:
-        Safe filename.
-    """
-    import re
-    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', replacement, filename)
-    safe = safe.strip('. ')
-    if not safe:
-        safe = 'unnamed'
-    return safe[:255]  # Most filesystems limit to 255 chars
-
-
-def copy_file(src: Union[str, Path], dst: Union[str, Path], overwrite: bool = False) -> bool:
-    """Copy file with error handling.
-
-    Args:
-        src: Source file path.
-        dst: Destination file path.
-        overwrite: If True, overwrite existing file.
-
-    Returns:
-        True on success, False on error.
-    """
-    src = Path(src)
-    dst = Path(dst)
-
-    if not src.exists():
-        return False
-
-    if dst.exists() and not overwrite:
-        return False
-
-    try:
-        ensure_parent_dir(dst)
-        shutil.copy2(src, dst)
-        return True
-    except Exception:
-        return False
-
-
-def move_file(src: Union[str, Path], dst: Union[str, Path], overwrite: bool = False) -> bool:
-    """Move file with error handling.
-
-    Args:
-        src: Source file path.
-        dst: Destination file path.
-        overwrite: If True, overwrite existing file.
-
-    Returns:
-        True on success, False on error.
-    """
-    src = Path(src)
-    dst = Path(dst)
-
-    if not src.exists():
-        return False
-
-    if dst.exists():
-        if not overwrite:
-            return False
-        try:
-            dst.unlink()
-        except Exception:
-            return False
-
-    try:
-        ensure_parent_dir(dst)
-        shutil.move(str(src), str(dst))
-        return True
-    except Exception:
-        return False
-
-
-def delete_file(path: Union[str, Path]) -> bool:
-    """Delete file with error handling.
-
-    Args:
-        path: File path to delete.
-
-    Returns:
-        True on success, False on error.
-    """
-    path = Path(path)
-    try:
-        if path.exists():
-            path.unlink()
-        return True
-    except Exception:
-        return False
+    return [ensure_dir(p) for p in paths]
 
 
 def get_size(path: Union[str, Path]) -> int:
     """Get file or directory size in bytes.
 
-    Args:
-        path: File or directory path.
-
-    Returns:
-        Size in bytes, 0 on error.
+    Example:
+        get_size("large_file.zip")
     """
     path = Path(path)
-    try:
-        if path.is_file():
-            return path.stat().st_size
-        if path.is_dir():
-            total = 0
-            for item in path.rglob('*'):
-                if item.is_file():
-                    total += item.stat().st_size
-            return total
-        return 0
-    except Exception:
-        return 0
+    if path.is_file():
+        return path.stat().st_size
+    elif path.is_dir():
+        total = 0
+        for item in path.rglob("*"):
+            if item.is_file():
+                total += item.stat().st_size
+        return total
+    return 0
 
 
-def format_size(size_bytes: int) -> str:
-    """Format byte size to human readable string.
+def copy_file(src: Union[str, Path], dst: Union[str, Path]) -> Path:
+    """Copy file to destination.
 
-    Args:
-        size_bytes: Size in bytes.
-
-    Returns:
-        Formatted string (e.g., "1.5 MB").
+    Example:
+        copy_file("input.txt", "output/copy.txt")
     """
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-        if size_bytes < 1024.0:
-            return f"{size_bytes:.1f} {unit}"
-        size_bytes /= 1024.0
-    return f"{size_bytes:.1f} PB"
+    src = Path(src)
+    dst = Path(dst)
+    ensure_dir(dst.parent)
+    shutil.copy2(src, dst)
+    return dst
 
 
-def walk_dir(
-    path: Union[str, Path],
-    pattern: str = "*",
-    recursive: bool = True,
-    include_hidden: bool = False,
-) -> List[Path]:
-    """Walk directory and return matching paths.
+def move_file(src: Union[str, Path], dst: Union[str, Path]) -> Path:
+    """Move file to destination.
+
+    Example:
+        move_file("temp.txt", "archive/old.txt")
+    """
+    src = Path(src)
+    dst = Path(dst)
+    ensure_dir(dst.parent)
+    shutil.move(str(src), str(dst))
+    return dst
+
+
+def delete_file(path: Union[str, Path]) -> bool:
+    """Delete file if exists.
+
+    Example:
+        delete_file("temp.txt")
+    """
+    path = Path(path)
+    if path.exists():
+        path.unlink()
+        return True
+    return False
+
+
+def delete_dir(path: Union[str, Path], recursive: bool = False) -> bool:
+    """Delete directory.
 
     Args:
         path: Directory path.
-        pattern: Glob pattern to match.
-        recursive: If True, search recursively.
-        include_hidden: If True, include hidden files.
+        recursive: Delete contents recursively.
 
-    Returns:
-        List of matching Path objects.
+    Example:
+        delete_dir("temp", recursive=True)
     """
     path = Path(path)
-    if not path.is_dir():
-        return []
+    if not path.exists():
+        return False
 
-    results = []
     if recursive:
-        for item in path.rglob(pattern):
-            if item.is_file():
-                if include_hidden or not _is_hidden(item):
-                    results.append(item)
+        shutil.rmtree(path)
     else:
-        for item in path.glob(pattern):
-            if item.is_file():
-                if include_hidden or not _is_hidden(item):
-                    results.append(item)
-
-    return sorted(results)
+        path.rmdir()
+    return True
 
 
-def _is_hidden(path: Path) -> bool:
-    """Check if path is hidden."""
-    return any(part.startswith('.') for part in path.parts)
-
-
-def clean_dir(
-    path: Union[str, Path],
-    pattern: str = "*",
-    recursive: bool = True,
-    dry_run: bool = True,
-) -> List[Path]:
-    """Clean directory by deleting matching files.
-
-    Args:
-        path: Directory path.
-        pattern: Glob pattern to match.
-        recursive: If True, search recursively.
-        dry_run: If True, don't actually delete.
-
-    Returns:
-        List of deleted (or would-be deleted) paths.
-    """
-    path = Path(path)
-    files = walk_dir(path, pattern, recursive)
-
-    deleted = []
-    for file in files:
-        if dry_run:
-            deleted.append(file)
-        elif delete_file(file):
-            deleted.append(file)
-
-    return deleted
-
-
-@dataclass
-class TempDir:
-    """Temporary directory context manager."""
-    path: Path
-    _created: bool = False
-
-    @classmethod
-    def create(cls, prefix: str = "rabai_") -> 'TempDir':
-        """Create a temporary directory.
-
-        Args:
-            prefix: Directory name prefix.
-
-        Returns:
-            TempDir instance.
-        """
-        path = Path(tempfile.mkdtemp(prefix=prefix))
-        return cls(path, _created=True)
-
-    def __enter__(self) -> Path:
-        """Enter context manager."""
-        return self.path
-
-    def __exit__(self, *args: Any) -> None:
-        """Exit context manager and cleanup."""
-        if self._created and self.path.exists():
-            shutil.rmtree(self.path, ignore_errors=True)
-
-    def cleanup(self) -> None:
-        """Manually cleanup directory."""
-        if self._created and self.path.exists():
-            shutil.rmtree(self.path, ignore_errors=True)
-
-
-def find_files_by_type(
+def list_files(
     directory: Union[str, Path],
-    file_type: FileType,
-    recursive: bool = True,
+    pattern: str = "*",
+    recursive: bool = False,
 ) -> List[Path]:
-    """Find files of a specific type.
+    """List files in directory.
 
-    Args:
-        directory: Directory to search.
-        file_type: Type of files to find.
-        recursive: If True, search recursively.
-
-    Returns:
-        List of matching file paths.
+    Example:
+        list_files("src", "*.py")
+        list_files("logs", "*.log", recursive=True)
     """
-    extensions = {
-        FileType.IMAGE: IMAGE_EXTENSIONS,
-        FileType.VIDEO: VIDEO_EXTENSIONS,
-        FileType.AUDIO: AUDIO_EXTENSIONS,
-        FileType.DOCUMENT: DOCUMENT_EXTENSIONS,
-        FileType.CONFIG: CONFIG_EXTENSIONS,
-        FileType.CODE: CODE_EXTENSIONS,
-        FileType.ARCHIVE: ARCHIVE_EXTENSIONS,
-    }.get(file_type, set())
+    directory = Path(directory)
+    if recursive:
+        return list(directory.rglob(pattern))
+    return list(directory.glob(pattern))
 
-    if not extensions:
-        return []
 
+def list_dirs(
+    directory: Union[str, Path],
+    recursive: bool = False,
+) -> List[Path]:
+    """List subdirectories.
+
+    Example:
+        list_dirs(".")
+    """
+    directory = Path(directory)
+    if recursive:
+        return [p for p in directory.rglob("*") if p.is_dir()]
+    return [p for p in directory.glob("*") if p.is_dir()]
+
+
+def find_files(
+    directory: Union[str, Path],
+    name_contains: Optional[str] = None,
+    extension: Optional[str] = None,
+    max_depth: Optional[int] = None,
+) -> List[Path]:
+    """Find files with criteria.
+
+    Example:
+        find_files(".", extension=".py")
+        find_files(".", name_contains="test")
+    """
     directory = Path(directory)
     results = []
 
-    for ext in extensions:
-        pattern = f"*{ext}"
-        results.extend(walk_dir(directory, pattern, recursive))
+    def _search(path: Path, depth: int = 0) -> None:
+        if max_depth is not None and depth > max_depth:
+            return
 
-    return sorted(set(results))
+        try:
+            for item in path.iterdir():
+                if item.is_file():
+                    match = True
+                    if name_contains and name_contains not in item.name:
+                        match = False
+                    if extension and not item.name.endswith(extension):
+                        match = False
+                    if match:
+                        results.append(item)
+                elif item.is_dir():
+                    _search(item, depth + 1)
+        except PermissionError:
+            pass
+
+    _search(directory)
+    return results
+
+
+def read_file(path: Union[str, Path], encoding: str = "utf-8") -> str:
+    """Read file contents as string.
+
+    Example:
+        content = read_file("data.txt")
+    """
+    with open(path, "r", encoding=encoding) as f:
+        return f.read()
+
+
+def write_file(
+    path: Union[str, Path],
+    content: str,
+    encoding: str = "utf-8",
+) -> None:
+    """Write string content to file.
+
+    Example:
+        write_file("output.txt", "Hello World")
+    """
+    path = Path(path)
+    ensure_dir(path.parent)
+    with open(path, "w", encoding=encoding) as f:
+        f.write(content)
+
+
+def read_lines(
+    path: Union[str, Path],
+    encoding: str = "utf-8",
+    strip: bool = True,
+) -> List[str]:
+    """Read file as list of lines.
+
+    Example:
+        lines = read_lines("input.txt")
+    """
+    with open(path, "r", encoding=encoding) as f:
+        lines = f.readlines()
+    if strip:
+        return [line.strip() for line in lines]
+    return lines
+
+
+def write_lines(
+    path: Union[str, Path],
+    lines: List[str],
+    newline: str = "\n",
+) -> None:
+    """Write list of lines to file.
+
+    Example:
+        write_lines("output.txt", ["line1", "line2"])
+    """
+    path = Path(path)
+    ensure_dir(path.parent)
+    with open(path, "w") as f:
+        for line in lines:
+            f.write(line + newline)
+
+
+def join_paths(*parts: Union[str, Path]) -> Path:
+    """Join path components.
+
+    Example:
+        join_paths("folder", "subfolder", "file.txt")
+    """
+    return Path(*parts)
+
+
+def normalize_path(path: Union[str, Path]) -> Path:
+    """Normalize and resolve path.
+
+    Example:
+        normalize_path("folder/../folder/./file.txt")
+    """
+    return Path(path).resolve()
+
+
+def relative_path(
+    path: Union[str, Path],
+    start: Union[str, Path] = ".",
+) -> Path:
+    """Get relative path from start.
+
+    Example:
+        relative_path("/home/user/file.txt", "/home")
+    """
+    path = Path(path).resolve()
+    start = Path(start).resolve()
+    return path.relative_to(start)
+
+
+def is_subpath(path: Union[str, Path], parent: Union[str, Path]) -> bool:
+    """Check if path is under parent.
+
+    Example:
+        is_subpath("/home/user/file.txt", "/home/user")
+    """
+    try:
+        path = Path(path).resolve()
+        parent = Path(parent).resolve()
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def walk_dir(
+    directory: Union[str, Path],
+    callback: Callable[[Path], Optional[bool]],
+) -> None:
+    """Walk directory calling callback for each item.
+
+    Example:
+        walk_dir(".", lambda p: print(p) if p.is_file() else None)
+    """
+    directory = Path(directory)
+    for item in directory.rglob("*"):
+        result = callback(item)
+        if result is False:
+            break
+
+
+def file_age(path: Union[str, Path]) -> float:
+    """Get file age in seconds since last modification.
+
+    Example:
+        if file_age("cache.json") > 3600:
+            refresh_cache()
+    """
+    import time
+    path = Path(path)
+    return time.time() - path.stat().st_mtime
+
+
+def is_older_than(path: Union[str, Path], seconds: float) -> bool:
+    """Check if file is older than specified seconds.
+
+    Example:
+        if is_older_than("cache.json", 3600):
+            print("Cache is stale")
+    """
+    return file_age(path) > seconds
+
+
+def file_hash(path: Union[str, Path], algorithm: str = "md5") -> str:
+    """Calculate file hash.
+
+    Example:
+        hash = file_hash("large_file.zip", "sha256")
+    """
+    import hashlib
+    path = Path(path)
+    h = hashlib.new(algorithm)
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def create_temp_file(
+    suffix: str = "",
+    prefix: str = "tmp",
+    dir: Optional[Union[str, Path]] = None,
+) -> Path:
+    """Create temporary file.
+
+    Example:
+        temp = create_temp_file(".txt", "myapp")
+    """
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix=suffix, prefix=prefix, dir=dir)
+    os.close(fd)
+    return Path(path)
+
+
+def create_temp_dir(
+    prefix: str = "tmp",
+    dir: Optional[Union[str, Path]] = None,
+) -> Path:
+    """Create temporary directory.
+
+    Example:
+        temp = create_temp_dir("work")
+    """
+    import tempfile
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=dir))
