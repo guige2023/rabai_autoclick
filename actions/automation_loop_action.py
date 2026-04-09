@@ -1,350 +1,583 @@
-"""Automation loop action module for RabAI AutoClick.
+"""
+Automation Loop Action Module.
 
-Provides loop-based automation:
-- ForEachLoopAction: Iterate over collections
-- WhileLoopAction: Loop while condition is true
-- UntilLoopAction: Loop until condition is true
-- DoWhileLoopAction: Execute then check condition
-- LoopControlAction: Break and continue controls
+Provides loop constructs for automation workflows including for loops,
+while loops, map, reduce, and parallel iteration patterns.
+
+Author: RabAI Team
 """
 
-import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, TypeVar, Generic
+from dataclasses import dataclass, field
+from enum import Enum
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-import sys
-import os
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+T = TypeVar('T')
+R = TypeVar('R')
 
 
-class ForEachLoopAction(BaseAction):
-    """Iterate over collections."""
-    action_type = "automation_foreach_loop"
-    display_name = "ForEach循环"
-    description = "遍历集合进行迭代"
+class LoopType(Enum):
+    """Types of loop constructs."""
+    FOR = "for"
+    WHILE = "while"
+    MAP = "map"
+    FILTER = "filter"
+    REDUCE = "reduce"
+    PARALLEL_FOR = "parallel_for"
+    DO_WHILE = "do_while"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            collection = params.get("collection", [])
-            item_var = params.get("item_var", "item")
-            index_var = params.get("index_var", "index")
-            action = params.get("action", {})
-            max_iterations = params.get("max_iterations", 1000)
-            start_index = params.get("start_index", 0)
-            step = params.get("step", 1)
 
-            if not isinstance(collection, (list, dict, str, tuple)):
-                collection = [collection]
+@dataclass
+class LoopConfig:
+    """Configuration for loop execution."""
+    loop_type: LoopType = LoopType.FOR
+    max_iterations: int = 1000
+    parallel_workers: int = 4
+    break_condition: Optional[Callable] = None
+    continue_condition: Optional[Callable] = None
+    timeout: Optional[float] = None
 
-            if isinstance(collection, dict):
-                items = list(collection.items())
-            else:
-                items = list(collection)
 
-            if start_index > 0:
-                items = items[start_index:]
+@dataclass
+class LoopResult:
+    """Result of a loop execution."""
+    loop_type: LoopType
+    total_iterations: int
+    successful_iterations: int
+    failed_iterations: int
+    results: List[Any]
+    duration_seconds: float
+    errors: List[str]
+    broken: bool = False
 
-            iterations = []
-            break_early = False
-            break_value = params.get("break_value")
 
-            for i, item in enumerate(items[:max_iterations]):
-                if step > 1 and i % step != 0:
-                    continue
-
-                item_data = item[1] if isinstance(item, tuple) else item
-                key_data = item[0] if isinstance(item, tuple) else None
-
-                iteration_vars = {item_var: item_data}
-                if index_var:
-                    iteration_vars[index_var] = i
-                if key_data is not None:
-                    iteration_vars["key"] = key_data
-
-                success = action.get("success", True)
-
-                if break_value is not None and item_data == break_value:
-                    iterations.append({
-                        "index": i,
-                        "item": item_data,
-                        "action_result": success,
-                        "break_triggered": True
-                    })
-                    break_early = True
+class ForLoop:
+    """
+    Classic for loop iterator.
+    
+    Example:
+        loop = ForLoop(items=[1, 2, 3, 4, 5])
+        loop.each(lambda x: print(x * 2))
+        result = loop.execute()
+    """
+    
+    def __init__(self, items: List[T]):
+        self.items = items
+        self._action: Optional[Callable] = None
+        self._filter_fn: Optional[Callable] = None
+        self._max_iterations = 1000
+        self._break_fn: Optional[Callable] = None
+    
+    def each(self, action: Callable[[T], Any]) -> "ForLoop":
+        """Set action for each item."""
+        self._action = action
+        return self
+    
+    def filter(self, predicate: Callable[[T], bool]) -> "ForLoop":
+        """Filter items before iteration."""
+        self._filter_fn = predicate
+        return self
+    
+    def take(self, count: int) -> "ForLoop":
+        """Take only first n items."""
+        self.items = self.items[:count]
+        return self
+    
+    def skip(self, count: int) -> "ForLoop":
+        """Skip first n items."""
+        self.items = self.items[count:]
+        return self
+    
+    def break_when(self, condition: Callable[[T, Any], bool]) -> "ForLoop":
+        """Break when condition is met."""
+        self._break_fn = condition
+        return self
+    
+    def execute(self) -> LoopResult:
+        """Execute the loop."""
+        import time
+        start_time = time.monotonic()
+        
+        if self._filter_fn:
+            items = [x for x in self.items if self._filter_fn(x)]
+        else:
+            items = self.items
+        
+        results = []
+        errors = []
+        broken = False
+        
+        for i, item in enumerate(items[:self._max_iterations]):
+            try:
+                if self._action:
+                    result = self._action(item)
+                    results.append(result)
+                
+                # Check break condition
+                if self._break_fn and self._break_fn(item, result if 'result' in locals() else None):
+                    broken = True
                     break
+            
+            except Exception as e:
+                errors.append(str(e))
+        
+        duration = time.monotonic() - start_time
+        
+        return LoopResult(
+            loop_type=LoopType.FOR,
+            total_iterations=len(items),
+            successful_iterations=len(results),
+            failed_iterations=len(errors),
+            results=results,
+            duration_seconds=duration,
+            errors=errors,
+            broken=broken
+        )
 
-                iterations.append({
-                    "index": i,
-                    "item": item_data,
-                    "action_result": success
-                })
 
-            return ActionResult(
-                success=True,
-                data={
-                    "iterations": iterations,
-                    "total_iterations": len(iterations),
-                    "collection_size": len(items),
-                    "break_early": break_early,
-                    "item_var": item_var,
-                    "index_var": index_var
-                },
-                message=f"ForEach loop: {len(iterations)} iterations"
+class WhileLoop:
+    """
+    While loop construct.
+    
+    Example:
+        loop = WhileLoop(lambda: count < 10)
+        loop.body(lambda: increment_and_return(count))
+        result = loop.execute()
+    """
+    
+    def __init__(self, condition: Callable[[], bool]):
+        self._condition = condition
+        self._body: Optional[Callable] = None
+        self._max_iterations = 1000
+        self._iteration_count = 0
+    
+    def body(self, action: Callable[[], Any]) -> "WhileLoop":
+        """Set body action."""
+        self._body = action
+        return self
+    
+    def max_iterations(self, count: int) -> "WhileLoop":
+        """Set maximum iterations."""
+        self._max_iterations = count
+        return self
+    
+    def execute(self) -> LoopResult:
+        """Execute the while loop."""
+        import time
+        start_time = time.monotonic()
+        
+        results = []
+        errors = []
+        
+        self._iteration_count = 0
+        
+        while self._condition():
+            if self._iteration_count >= self._max_iterations:
+                break
+            
+            self._iteration_count += 1
+            
+            try:
+                if self._body:
+                    result = self._body()
+                    results.append(result)
+            except Exception as e:
+                errors.append(str(e))
+        
+        duration = time.monotonic() - start_time
+        
+        return LoopResult(
+            loop_type=LoopType.WHILE,
+            total_iterations=self._iteration_count,
+            successful_iterations=len(results),
+            failed_iterations=len(errors),
+            results=results,
+            duration_seconds=duration,
+            errors=errors
+        )
+
+
+class DoWhileLoop:
+    """
+    Do-while loop (executes at least once).
+    
+    Example:
+        loop = DoWhileLoop(lambda: count < 10)
+        loop.body(lambda: increment())
+        result = loop.execute()
+    """
+    
+    def __init__(self, condition: Callable[[], bool]):
+        self._condition = condition
+        self._body: Optional[Callable] = None
+        self._max_iterations = 1000
+        self._iteration_count = 0
+    
+    def body(self, action: Callable[[], Any]) -> "DoWhileLoop":
+        """Set body action."""
+        self._body = action
+        return self
+    
+    def execute(self) -> LoopResult:
+        """Execute the do-while loop."""
+        import time
+        start_time = time.monotonic()
+        
+        results = []
+        errors = []
+        self._iteration_count = 0
+        
+        while True:
+            if self._iteration_count >= self._max_iterations:
+                break
+            
+            self._iteration_count += 1
+            
+            try:
+                if self._body:
+                    result = self._body()
+                    results.append(result)
+            except Exception as e:
+                errors.append(str(e))
+            
+            if not self._condition():
+                break
+        
+        duration = time.monotonic() - start_time
+        
+        return LoopResult(
+            loop_type=LoopType.DO_WHILE,
+            total_iterations=self._iteration_count,
+            successful_iterations=len(results),
+            failed_iterations=len(errors),
+            results=results,
+            duration_seconds=duration,
+            errors=errors
+        )
+
+
+class ParallelForLoop:
+    """
+    Parallel for loop using thread pool.
+    
+    Example:
+        loop = ParallelForLoop(items=[1, 2, 3, 4], workers=4)
+        loop.each(lambda x: expensive_operation(x))
+        result = loop.execute()
+    """
+    
+    def __init__(self, items: List[T], workers: int = 4):
+        self.items = items
+        self.workers = workers
+        self._action: Optional[Callable] = None
+        self._max_results = 1000
+    
+    def each(self, action: Callable[[T], Any]) -> "ParallelForLoop":
+        """Set action for each item."""
+        self._action = action
+        return self
+    
+    def limit(self, count: int) -> "ParallelForLoop":
+        """Limit number of parallel executions."""
+        self.workers = min(count, self.workers)
+        return self
+    
+    def execute(self) -> LoopResult:
+        """Execute the parallel loop."""
+        import time
+        start_time = time.monotonic()
+        
+        results = []
+        errors = []
+        
+        with ThreadPoolExecutor(max_workers=self.workers) as executor:
+            futures = []
+            
+            for item in self.items[:self._max_results]:
+                if self._action:
+                    future = executor.submit(self._action, item)
+                    futures.append((item, future))
+            
+            for item, future in futures:
+                try:
+                    result = future.result(timeout=30)
+                    results.append(result)
+                except Exception as e:
+                    errors.append(f"{item}: {str(e)}")
+        
+        duration = time.monotonic() - start_time
+        
+        return LoopResult(
+            loop_type=LoopType.PARALLEL_FOR,
+            total_iterations=len(self.items),
+            successful_iterations=len(results),
+            failed_iterations=len(errors),
+            results=results,
+            duration_seconds=duration,
+            errors=errors
+        )
+
+
+class MapReduce:
+    """
+    Map-Reduce pattern implementation.
+    
+    Example:
+        mr = MapReduce(data=[1, 2, 3, 4, 5])
+        mr.mapper(lambda x: (x % 2, x))  # (key, value)
+        mr.reducer(lambda key, values: sum(values))
+        result = mr.execute()
+    """
+    
+    def __init__(self, data: List[T]):
+        self.data = data
+        self._mapper: Optional[Callable] = None
+        self._reducer: Optional[Callable] = None
+        self._filter_fn: Optional[Callable] = None
+    
+    def mapper(self, func: Callable[[T], tuple]) -> "MapReduce":
+        """Set mapper function that returns (key, value)."""
+        self._mapper = func
+        return self
+    
+    def reducer(self, func: Callable[[Any, List], Any]) -> "MapReduce":
+        """Set reducer function that takes (key, values)."""
+        self._reducer = func
+        return self
+    
+    def filter(self, predicate: Callable[[T], bool]) -> "MapReduce":
+        """Filter input data."""
+        self._filter_fn = predicate
+        return self
+    
+    def execute(self) -> Dict[str, Any]:
+        """Execute map-reduce."""
+        import time
+        start_time = time.monotonic()
+        
+        # Filter
+        data = self.data
+        if self._filter_fn:
+            data = [x for x in data if self._filter_fn(x)]
+        
+        # Map
+        mapped = {}
+        for item in data:
+            if self._mapper:
+                key, value = self._mapper(item)
+                if key not in mapped:
+                    mapped[key] = []
+                mapped[key].append(value)
+        
+        # Reduce
+        results = {}
+        if self._reducer:
+            for key, values in mapped.items():
+                results[key] = self._reducer(key, values)
+        else:
+            results = mapped
+        
+        duration = time.monotonic() - start_time
+        
+        return {
+            "results": results,
+            "input_count": len(self.data),
+            "output_count": len(results),
+            "duration_seconds": duration
+        }
+
+
+class LoopExecutor:
+    """
+    Unified loop executor interface.
+    
+    Example:
+        executor = LoopExecutor()
+        executor.loop_type(LoopType.FOR)
+        executor.items([1, 2, 3])
+        executor.action(lambda x: x * 2)
+        result = executor.execute()
+    """
+    
+    def __init__(self):
+        self._loop_type = LoopType.FOR
+        self._items: List[Any] = []
+        self._condition: Optional[Callable] = None
+        self._action: Optional[Callable] = None
+        self._workers = 4
+        self._max_iterations = 1000
+    
+    def loop_type(self, loop_type: LoopType) -> "LoopExecutor":
+        """Set loop type."""
+        self._loop_type = loop_type
+        return self
+    
+    def items(self, items: List[Any]) -> "LoopExecutor":
+        """Set items to iterate over."""
+        self._items = items
+        return self
+    
+    def condition(self, cond: Callable) -> "LoopExecutor":
+        """Set condition function."""
+        self._condition = cond
+        return self
+    
+    def action(self, action: Callable) -> "LoopExecutor":
+        """Set action function."""
+        self._action = action
+        return self
+    
+    def workers(self, count: int) -> "LoopExecutor":
+        """Set number of workers for parallel loops."""
+        self._workers = count
+        return self
+    
+    def max_iterations(self, count: int) -> "LoopExecutor":
+        """Set maximum iterations."""
+        self._max_iterations = count
+        return self
+    
+    def execute(self) -> LoopResult:
+        """Execute the loop."""
+        if self._loop_type == LoopType.FOR:
+            loop = ForLoop(self._items)
+            if self._action:
+                loop.each(self._action)
+            loop._max_iterations = self._max_iterations
+            return loop.execute()
+        
+        elif self._loop_type == LoopType.WHILE and self._condition:
+            loop = WhileLoop(self._condition)
+            if self._action:
+                loop.body(self._action)
+            loop.max_iterations(self._max_iterations)
+            return loop.execute()
+        
+        elif self._loop_type == LoopType.DO_WHILE and self._condition:
+            loop = DoWhileLoop(self._condition)
+            if self._action:
+                loop.body(self._action)
+            return loop.execute()
+        
+        elif self._loop_type == LoopType.PARALLEL_FOR:
+            loop = ParallelForLoop(self._items, self._workers)
+            if self._action:
+                loop.each(self._action)
+            loop._max_results = self._max_iterations
+            return loop.execute()
+        
+        elif self._loop_type == LoopType.MAP:
+            loop = ParallelForLoop(self._items, self._workers)
+            if self._action:
+                loop.each(self._action)
+            return loop.execute()
+        
+        else:
+            return LoopResult(
+                loop_type=self._loop_type,
+                total_iterations=0,
+                successful_iterations=0,
+                failed_iterations=0,
+                results=[],
+                duration_seconds=0,
+                errors=["Invalid loop configuration"]
             )
-        except Exception as e:
-            return ActionResult(success=False, message=f"ForEach loop error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ["collection"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"item_var": "item", "index_var": "index", "action": {}, "max_iterations": 1000, "start_index": 0, "step": 1, "break_value": None}
 
 
-class WhileLoopAction(BaseAction):
-    """Loop while condition is true."""
-    action_type = "automation_while_loop"
-    display_name = "While循环"
-    description = "条件为真时循环"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            conditions = params.get("conditions", [])
-            data = params.get("data", {})
-            max_iterations = params.get("max_iterations", 1000)
-            loop_action = params.get("loop_action", {})
-            update_func = params.get("update_func")
-
-            iteration = 0
-            iterations = []
-            terminated_by = None
-
-            while iteration < max_iterations:
-                from core.base_action import BaseAction
-                eval_action = BaseAction()
-
-                cond_met = True
-                if conditions:
-                    for c in conditions:
-                        if c.get("type") == "counter":
-                            if iteration >= c.get("limit", max_iterations):
-                                cond_met = False
-                                terminated_by = "condition"
-                                break
-                        elif c.get("type") == "equals":
-                            field_val = data.get(c.get("field", ""), 0)
-                            if field_val != c.get("value"):
-                                cond_met = False
-                                terminated_by = "condition"
-                                break
-
-                if not cond_met:
-                    break
-
-                iterations.append({
-                    "iteration": iteration,
-                    "data_snapshot": dict(data),
-                    "action_result": loop_action.get("success", True)
-                })
-
-                if update_func:
-                    iteration += 1
-                else:
-                    iteration += 1
-
-            if terminated_by is None:
-                terminated_by = "max_iterations" if iteration >= max_iterations else "condition"
-
-            return ActionResult(
-                success=True,
-                data={
-                    "iterations": iterations,
-                    "total_iterations": len(iterations),
-                    "max_iterations": max_iterations,
-                    "terminated_by": terminated_by
-                },
-                message=f"While loop: {len(iterations)} iterations, terminated by {terminated_by}"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"While loop error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ["conditions"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"data": {}, "max_iterations": 1000, "loop_action": {}, "update_func": None}
+class BaseAction:
+    """Base class for all actions."""
+    
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Any:
+        raise NotImplementedError
 
 
-class UntilLoopAction(BaseAction):
-    """Loop until condition is true."""
-    action_type = "automation_until_loop"
-    display_name = "Until循环"
-    description = "条件为真时停止循环"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            conditions = params.get("conditions", [])
-            data = params.get("data", {})
-            max_iterations = params.get("max_iterations", 1000)
-            loop_action = params.get("loop_action", {})
-
-            iteration = 0
-            iterations = []
-            condition_met = False
-
-            while iteration < max_iterations:
-                from core.base_action import BaseAction
-
-                condition_met = False
-                if conditions:
-                    for c in conditions:
-                        if c.get("type") == "counter":
-                            if iteration >= c.get("limit", max_iterations):
-                                condition_met = True
-                                break
-                        elif c.get("type") == "equals":
-                            field_val = data.get(c.get("field", ""), 0)
-                            if field_val == c.get("value"):
-                                condition_met = True
-                                break
-
-                if condition_met:
-                    break
-
-                iterations.append({
-                    "iteration": iteration,
-                    "data_snapshot": dict(data),
-                    "action_result": loop_action.get("success", True)
-                })
-
-                iteration += 1
-
-            return ActionResult(
-                success=True,
-                data={
-                    "iterations": iterations,
-                    "total_iterations": len(iterations),
-                    "max_iterations": max_iterations,
-                    "condition_met": condition_met,
-                    "terminated_by": "condition" if condition_met else "max_iterations"
-                },
-                message=f"Until loop: {len(iterations)} iterations, condition met: {condition_met}"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Until loop error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ["conditions"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"data": {}, "max_iterations": 1000, "loop_action": {}}
-
-
-class DoWhileLoopAction(BaseAction):
-    """Execute then check condition."""
-    action_type = "automation_dowhile_loop"
-    display_name = "DoWhile循环"
-    description = "先执行后检查条件的循环"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            conditions = params.get("conditions", [])
-            data = params.get("data", {})
-            max_iterations = params.get("max_iterations", 1000)
-            loop_action = params.get("loop_action", {})
-
-            iteration = 0
-            iterations = []
-
-            while iteration < max_iterations:
-                iterations.append({
-                    "iteration": iteration,
-                    "data_snapshot": dict(data),
-                    "action_result": loop_action.get("success", True)
-                })
-
-                condition_met = False
-                if conditions:
-                    for c in conditions:
-                        if c.get("type") == "counter":
-                            if iteration >= c.get("limit", max_iterations):
-                                condition_met = True
-                                break
-
-                iteration += 1
-
-                if condition_met:
-                    break
-
-            return ActionResult(
-                success=True,
-                data={
-                    "iterations": iterations,
-                    "total_iterations": len(iterations),
-                    "max_iterations": max_iterations,
-                    "always_runs_at_least_once": True
-                },
-                message=f"DoWhile loop: {len(iterations)} iterations"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"DoWhile loop error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ["conditions"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"data": {}, "max_iterations": 1000, "loop_action": {}}
-
-
-class LoopControlAction(BaseAction):
-    """Break and continue controls."""
-    action_type = "automation_loop_control"
-    display_name = "循环控制"
-    description = "Break和Continue控制"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            action = params.get("action", "break")
-            label = params.get("label")
-            condition = params.get("condition")
-            data = params.get("data", {})
-
-            if condition:
-                from core.base_action import BaseAction
-                eval_action = BaseAction()
-                should_execute = True
-                if isinstance(condition, dict):
-                    if condition.get("type") == "equals":
-                        field_val = data.get(condition.get("field", ""), 0)
-                        should_execute = (field_val == condition.get("value"))
-                else:
-                    should_execute = bool(condition)
-
-                if not should_execute:
-                    return ActionResult(
-                        success=True,
-                        data={"executed": False, "action": action, "reason": "condition_not_met"},
-                        message=f"Loop control: {action} skipped (condition not met)"
-                    )
-
-            return ActionResult(
-                success=True,
-                data={
-                    "executed": True,
-                    "action": action,
-                    "label": label,
-                    "control_signal": action.upper()
-                },
-                message=f"Loop control: {action}" + (f" (label: {label})" if label else "")
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Loop control error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ["action"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"label": None, "condition": None, "data": {}}
+class AutomationLoopAction(BaseAction):
+    """
+    Loop action for workflow iteration.
+    
+    Parameters:
+        operation: Operation type (execute/map/reduce/parallel)
+        loop_type: Type of loop (for/while/map/parallel_for)
+        items: List of items to iterate
+        action: Action function reference
+        max_iterations: Maximum iterations
+        workers: Number of parallel workers
+    
+    Example:
+        action = AutomationLoopAction()
+        result = action.execute({}, {
+            "operation": "execute",
+            "loop_type": "for",
+            "items": [1, 2, 3, 4, 5]
+        })
+    """
+    
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute loop operation."""
+        operation = params.get("operation", "execute")
+        loop_type_str = params.get("loop_type", "for")
+        items = params.get("items", [])
+        max_iterations = params.get("max_iterations", 1000)
+        workers = params.get("workers", 4)
+        
+        loop_type = LoopType(loop_type_str)
+        
+        if operation == "execute":
+            executor = LoopExecutor()
+            executor.loop_type(loop_type)
+            executor.items(items)
+            executor.max_iterations(max_iterations)
+            executor.workers(workers)
+            
+            result = executor.execute()
+            
+            return {
+                "success": True,
+                "operation": "execute",
+                "loop_type": loop_type_str,
+                "total_iterations": result.total_iterations,
+                "successful_iterations": result.successful_iterations,
+                "failed_iterations": result.failed_iterations,
+                "broken": result.broken,
+                "duration_seconds": result.duration_seconds
+            }
+        
+        elif operation == "map":
+            mr = MapReduce(items)
+            
+            def map_fn(x):
+                return x  # Placeholder
+            
+            mr.mapper(map_fn)
+            
+            result = mr.execute()
+            
+            return {
+                "success": True,
+                "operation": "map",
+                "results": result.get("results", {}),
+                "duration_seconds": result.get("duration_seconds", 0)
+            }
+        
+        elif operation == "parallel":
+            loop = ParallelForLoop(items, workers)
+            
+            def action_fn(x):
+                return x * 2
+            
+            loop.each(action_fn)
+            result = loop.execute()
+            
+            return {
+                "success": True,
+                "operation": "parallel",
+                "total_iterations": result.total_iterations,
+                "successful_iterations": result.successful_iterations,
+                "duration_seconds": result.duration_seconds
+            }
+        
+        else:
+            return {"success": False, "error": f"Unknown operation: {operation}"}
