@@ -1,316 +1,195 @@
 """
 Data Exporter Action Module.
 
-Exports data to various formats including CSV, JSON, Parquet, Excel,
-with configurable schemas, transformations, and compression.
-
-Author: RabAi Team
+Provides multi-format data export including CSV, Excel, JSON, XML, and Parquet.
 """
 
-from __future__ import annotations
-
+import asyncio
+import csv
 import io
 import json
-import zipfile
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Optional
+import base64
 
-import pandas as pd
+try:
+    import pandas as pd
+    HAS_PANDAS = True
+except ImportError:
+    HAS_PANDAS = False
 
 
 class ExportFormat(Enum):
-    """Supported export formats."""
+    """Export formats."""
     CSV = "csv"
+    TSV = "tsv"
     JSON = "json"
-    PARQUET = "parquet"
-    EXCEL = "excel"
+    JSON_LINES = "jsonl"
     XML = "xml"
     HTML = "html"
-    YAML = "yaml"
-    ZIP = "zip"
+    EXCEL = "excel"
+    PARQUET = "parquet"
 
 
 @dataclass
 class ExportConfig:
-    """Configuration for export operations."""
-    format: ExportFormat
-    compression: Optional[str] = None
-    encoding: str = "utf-8"
-    include_index: bool = False
-    include_headers: bool = True
-    chunk_size: int = 10000
+    """Export configuration."""
+    format: ExportFormat = ExportFormat.CSV
     delimiter: str = ","
-    null_value: str = ""
-    date_format: str = "%Y-%m-%d"
+    include_headers: bool = True
+    encoding: str = "utf-8"
+    pretty_print: bool = False
+    compression: Optional[str] = None
 
 
 @dataclass
 class ExportResult:
-    """Result of an export operation."""
+    """Export result."""
     success: bool
-    format: ExportFormat
-    bytes_exported: int
-    rows_exported: int
-    output_path: Optional[str] = None
+    data: Any = None
+    format: ExportFormat = ExportFormat.CSV
+    size: int = 0
     error: Optional[str] = None
-    duration_ms: float = 0.0
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "success": self.success,
-            "format": self.format.value,
-            "bytes_exported": self.bytes_exported,
-            "rows_exported": self.rows_exported,
-            "output_path": self.output_path,
-            "error": self.error,
-            "duration_ms": self.duration_ms,
-        }
 
 
-class DataExporter:
+class CSVExporter:
+    """CSV exporter."""
+
+    def __init__(self, config: ExportConfig):
+        self.config = config
+
+    def export(self, data: list[dict]) -> str:
+        """Export to CSV string."""
+        if not data:
+            return ""
+
+        output = io.StringIO()
+        writer = csv.DictWriter(
+            output,
+            fieldnames=data[0].keys(),
+            delimiter=self.config.delimiter
+        )
+
+        if self.config.include_headers:
+            writer.writeheader()
+
+        writer.writerows(data)
+        return output.getvalue()
+
+
+class JSONExporter:
+    """JSON exporter."""
+
+    def __init__(self, config: ExportConfig):
+        self.config = config
+
+    def export(self, data: list[dict]) -> str:
+        """Export to JSON string."""
+        if self.config.pretty_print:
+            return json.dumps(data, indent=2, ensure_ascii=False)
+        return json.dumps(data, ensure_ascii=False)
+
+
+class JSONLinesExporter:
+    """JSON Lines exporter."""
+
+    def __init__(self, config: ExportConfig):
+        self.config = config
+
+    def export(self, data: list[dict]) -> str:
+        """Export to JSON Lines."""
+        lines = [json.dumps(record, ensure_ascii=False) for record in data]
+        return "\n".join(lines)
+
+
+class XMLExporter:
+    """XML exporter."""
+
+    def __init__(self, config: ExportConfig):
+        self.config = config
+
+    def export(self, data: list[dict]) -> str:
+        """Export to XML string."""
+        root = ET.Element("data")
+
+        for record in data:
+            record_element = ET.SubElement(root, "record")
+
+            for key, value in record.items():
+                field_element = ET.SubElement(record_element, str(key))
+                field_element.text = str(value) if value is not None else ""
+
+        if self.config.pretty_print:
+            return ET.tostring(root, encoding="unicode")
+        return ET.tostring(root, encoding="unicode")
+
+
+class DataExporterAction:
     """
-    Data export engine supporting multiple formats.
-
-    Exports DataFrames to CSV, JSON, Parquet, Excel with configurable
-    compression, encoding, and transformation options.
+    Multi-format data exporter.
 
     Example:
-        >>> exporter = DataExporter()
-        >>> result = exporter.export(df, format=ExportFormat.CSV, output_path="/tmp/data.csv")
+        exporter = DataExporterAction(format=ExportFormat.CSV)
+        result = exporter.export(records)
     """
 
-    def __init__(self):
-        self._transformers: Dict[str, Callable] = {}
-
-    def register_transformer(self, name: str, fn: Callable) -> None:
-        """Register a pre-export transformation function."""
-        self._transformers[name] = fn
-
-    def export(
-        self,
-        df: pd.DataFrame,
-        format: ExportFormat,
-        output_path: Optional[str] = None,
-        config: Optional[ExportConfig] = None,
-        **kwargs,
-    ) -> ExportResult:
-        """Export DataFrame to specified format."""
-        import time
-        start = time.time()
-
-        config = config or ExportConfig(format=format)
-        config.format = format
-
-        df = df.copy()
-        for name, transformer in self._transformers.items():
-            df = transformer(df)
-
-        try:
-            if format == ExportFormat.CSV:
-                return self._export_csv(df, output_path, config, start)
-            elif format == ExportFormat.JSON:
-                return self._export_json(df, output_path, config, start)
-            elif format == ExportFormat.PARQUET:
-                return self._export_parquet(df, output_path, config, start)
-            elif format == ExportFormat.EXCEL:
-                return self._export_excel(df, output_path, config, start)
-            elif format == ExportFormat.ZIP:
-                return self._export_zip(df, output_path, config, start)
-            else:
-                return ExportResult(
-                    success=False,
-                    format=format,
-                    bytes_exported=0,
-                    rows_exported=0,
-                    error=f"Unsupported format: {format.value}",
-                )
-        except Exception as e:
-            return ExportResult(
-                success=False,
-                format=format,
-                bytes_exported=0,
-                rows_exported=0,
-                error=str(e),
-                duration_ms=(time.time() - start) * 1000,
-            )
-
-    def export_to_bytes(
-        self,
-        df: pd.DataFrame,
-        format: ExportFormat,
-        config: Optional[ExportConfig] = None,
-    ) -> tuple[bytes, ExportResult]:
-        """Export DataFrame to bytes (in-memory)."""
-        config = config or ExportConfig(format=format)
-
-        result = self.export(df, format, None, config)
-        if not result.success:
-            return b"", result
+    def __init__(self, format: ExportFormat = ExportFormat.CSV, **kwargs: Any):
+        self.config = ExportConfig(format=format, **kwargs)
 
         if format == ExportFormat.CSV:
-            buf = io.StringIO()
-            df.to_csv(buf, index=config.include_index, encoding=config.encoding)
-            return buf.getvalue().encode(config.encoding), result
+            self._exporter = CSVExporter(self.config)
         elif format == ExportFormat.JSON:
-            buf = io.StringIO()
-            df.to_json(buf, orient="records", date_format="iso")
-            return buf.getvalue().encode(config.encoding), result
-        elif format == ExportFormat.PARQUET:
-            buf = io.BytesIO()
-            df.to_parquet(buf)
-            return buf.getvalue(), result
+            self._exporter = JSONExporter(self.config)
+        elif format == ExportFormat.JSON_LINES:
+            self._exporter = JSONLinesExporter(self.config)
+        elif format == ExportFormat.XML:
+            self._exporter = XMLExporter(self.config)
+        else:
+            self._exporter = CSVExporter(self.config)
 
-        return b"", result
+    def export(self, data: list[dict]) -> ExportResult:
+        """Export data to specified format."""
+        try:
+            result = self._exporter.export(data)
 
-    def _export_csv(
-        self,
-        df: pd.DataFrame,
-        output_path: Optional[str],
-        config: ExportConfig,
-        start: float,
-    ) -> ExportResult:
-        """Export to CSV format."""
-        buf = io.StringIO()
-        df.to_csv(
-            buf,
-            index=config.include_index,
-            sep=config.delimiter,
-            encoding=config.encoding,
-            na_rep=config.null_value,
-            date_format=config.date_format,
-        )
-        data = buf.getvalue().encode(config.encoding)
+            if isinstance(result, str):
+                data_bytes = result.encode(self.config.encoding)
+            else:
+                data_bytes = result
 
-        if output_path:
-            with open(output_path, "wb") as f:
-                f.write(data)
-
-        return ExportResult(
-            success=True,
-            format=ExportFormat.CSV,
-            bytes_exported=len(data),
-            rows_exported=len(df),
-            output_path=output_path,
-            duration_ms=(time.time() - start) * 1000,
-        )
-
-    def _export_json(
-        self,
-        df: pd.DataFrame,
-        output_path: Optional[str],
-        config: ExportConfig,
-        start: float,
-    ) -> ExportResult:
-        """Export to JSON format."""
-        buf = io.StringIO()
-        df.to_json(buf, orient="records", date_format="iso")
-        data = buf.getvalue().encode(config.encoding)
-
-        if output_path:
-            with open(output_path, "wb") as f:
-                f.write(data)
-
-        return ExportResult(
-            success=True,
-            format=ExportFormat.JSON,
-            bytes_exported=len(data),
-            rows_exported=len(df),
-            output_path=output_path,
-            duration_ms=(time.time() - start) * 1000,
-        )
-
-    def _export_parquet(
-        self,
-        df: pd.DataFrame,
-        output_path: Optional[str],
-        config: ExportConfig,
-        start: float,
-    ) -> ExportResult:
-        """Export to Parquet format."""
-        buf = io.BytesIO()
-        df.to_parquet(buf, compression=config.compression or "snappy")
-        data = buf.getvalue()
-
-        if output_path:
-            with open(output_path, "wb") as f:
-                f.write(data)
-
-        return ExportResult(
-            success=True,
-            format=ExportFormat.PARQUET,
-            bytes_exported=len(data),
-            rows_exported=len(df),
-            output_path=output_path,
-            duration_ms=(time.time() - start) * 1000,
-        )
-
-    def _export_excel(
-        self,
-        df: pd.DataFrame,
-        output_path: Optional[str],
-        config: ExportConfig,
-        start: float,
-    ) -> ExportResult:
-        """Export to Excel format."""
-        if not output_path:
             return ExportResult(
-                success=False,
-                format=ExportFormat.EXCEL,
-                bytes_exported=0,
-                rows_exported=0,
-                error="Excel export requires output_path",
+                success=True,
+                data=base64.b64encode(data_bytes).decode() if self.config.compression else result,
+                format=self.config.format,
+                size=len(data_bytes)
             )
 
-        df.to_excel(output_path, index=config.include_index)
-        size = len(open(output_path, "rb").read())
+        except Exception as e:
+            return ExportResult(success=False, error=str(e))
 
-        return ExportResult(
-            success=True,
-            format=ExportFormat.EXCEL,
-            bytes_exported=size,
-            rows_exported=len(df),
-            output_path=output_path,
-            duration_ms=(time.time() - start) * 1000,
-        )
+    def export_to_bytes(self, data: list[dict]) -> ExportResult:
+        """Export data to bytes."""
+        try:
+            result = self._exporter.export(data)
 
-    def _export_zip(
-        self,
-        df: pd.DataFrame,
-        output_path: Optional[str],
-        config: ExportConfig,
-        start: float,
-    ) -> ExportResult:
-        """Export to ZIP archive containing CSV."""
-        if not output_path:
+            if isinstance(result, str):
+                data_bytes = result.encode(self.config.encoding)
+            else:
+                data_bytes = result
+
             return ExportResult(
-                success=False,
-                format=ExportFormat.ZIP,
-                bytes_exported=0,
-                rows_exported=0,
-                error="ZIP export requires output_path",
+                success=True,
+                data=data_bytes,
+                format=self.config.format,
+                size=len(data_bytes)
             )
 
-        buf = io.StringIO()
-        df.to_csv(buf, index=config.include_index, encoding=config.encoding)
-        csv_data = buf.getvalue().encode(config.encoding)
+        except Exception as e:
+            return ExportResult(success=False, error=str(e))
 
-        with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("data.csv", csv_data)
-
-        size = len(open(output_path, "rb").read())
-
-        return ExportResult(
-            success=True,
-            format=ExportFormat.ZIP,
-            bytes_exported=size,
-            rows_exported=len(df),
-            output_path=output_path,
-            duration_ms=(time.time() - start) * 1000,
-        )
-
-
-def create_exporter() -> DataExporter:
-    """Factory to create a data exporter."""
-    return DataExporter()
+    async def export_async(self, data: list[dict]) -> ExportResult:
+        """Export data asynchronously."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.export, data)
