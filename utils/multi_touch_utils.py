@@ -1,172 +1,216 @@
 """
-Multi-touch utilities for complex touch gesture handling.
+Multi-Touch Pattern Utilities for UI Automation.
 
-Provides multi-touch gesture recognition, finger tracking,
-and touch point correlation.
+This module provides utilities for recognizing and matching
+multi-touch patterns in UI automation workflows.
+
+Author: AI Assistant
+License: MIT
 """
 
 from __future__ import annotations
 
+import math
+import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional, Dict, Any, Tuple, Set
+from enum import Enum
+
+
+class TouchPattern(Enum):
+    """Recognized multi-touch patterns."""
+    SINGLE_TAP = "single_tap"
+    DOUBLE_TAP = "double_tap"
+    TWO_FINGER_TAP = "two_finger_tap"
+    THREE_FINGER_TAP = "three_finger_tap"
+    SCROLL = "scroll"
+    ZOOM = "zoom"
+    ROTATE = "rotate"
+    SWIPE_LEFT = "swipe_left"
+    SWIPE_RIGHT = "swipe_right"
+    SWIPE_UP = "swipe_up"
+    SWIPE_DOWN = "swipe_down"
+    UNKNOWN = "unknown"
 
 
 @dataclass
-class TouchTrack:
-    """Tracks a single finger's touch path."""
-    finger_id: int
-    points: list[tuple[float, float, float]] = field(default_factory=list)  # x, y, timestamp
-    is_active: bool = True
-
-    def add_point(self, x: float, y: float, timestamp: float) -> None:
-        self.points.append((x, y, timestamp))
-
-    def start_point(self) -> Optional[tuple[float, float, float]]:
-        return self.points[0] if self.points else None
-
-    def end_point(self) -> Optional[tuple[float, float, float]]:
-        return self.points[-1] if self.points else None
-
-    def total_distance(self) -> float:
-        """Compute total distance traveled."""
-        if len(self.points) < 2:
-            return 0.0
-        total = 0.0
-        for i in range(1, len(self.points)):
-            dx = self.points[i][0] - self.points[i-1][0]
-            dy = self.points[i][1] - self.points[i-1][1]
-            total += (dx*dx + dy*dy) ** 0.5
-        return total
-
-    def velocity(self) -> float:
-        """Compute average velocity."""
-        if len(self.points) < 2:
-            return 0.0
-        total_dist = self.total_distance()
-        total_time = self.points[-1][2] - self.points[0][2]
-        if total_time <= 0:
-            return 0.0
-        return total_dist / total_time
+class MultiTouchContact:
+    """A single contact in a multi-touch event."""
+    id: int
+    x: float
+    y: float
+    pressure: float
+    timestamp: float
+    touch_type: str = "finger"
 
 
 @dataclass
-class MultiTouchGesture:
-    """A recognized multi-touch gesture."""
-    gesture_type: str
-    finger_count: int
-    tracks: list[TouchTrack]
-    duration_ms: float
-    metadata: dict = field(default_factory=dict)
+class MultiTouchEvent:
+    """Represents a complete multi-touch event."""
+    pattern: TouchPattern
+    contacts: List[MultiTouchContact] = field(default_factory=list)
+    center_x: float = 0.0
+    center_y: float = 0.0
+    duration: float = 0.0
+    timestamp: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-class MultiTouchEngine:
-    """Engine for multi-touch gesture recognition and tracking."""
+@dataclass
+class PatternMatch:
+    """Result of pattern matching."""
+    pattern: TouchPattern
+    confidence: float
+    matched_points: int
+    total_points: int
 
-    def __init__(self):
-        self._tracks: dict[int, TouchTrack] = {}
 
-    def begin_touch(self, finger_id: int, x: float, y: float, timestamp: float) -> TouchTrack:
-        """Start tracking a new touch."""
-        track = TouchTrack(finger_id=finger_id)
-        track.add_point(x, y, timestamp)
-        self._tracks[finger_id] = track
-        return track
+class MultiTouchPatternMatcher:
+    """Matches multi-touch input against known patterns."""
 
-    def update_touch(self, finger_id: int, x: float, y: float, timestamp: float) -> None:
-        """Update an existing touch point."""
-        if finger_id in self._tracks:
-            self._tracks[finger_id].add_point(x, y, timestamp)
+    def __init__(self) -> None:
+        self._contact_count: int = 0
+        self._contact_ids: Set[int] = set()
+        self._touch_history: Dict[int, List[MultiTouchContact]] = {}
+        self._start_time: Optional[float] = None
+        self._last_tap_time: float = 0.0
 
-    def end_touch(self, finger_id: int) -> Optional[TouchTrack]:
-        """End tracking a touch and return the track."""
-        track = self._tracks.pop(finger_id, None)
-        if track:
-            track.is_active = False
-        return track
+    def begin_event(self) -> None:
+        """Begin a new multi-touch event."""
+        self._contact_ids.clear()
+        self._touch_history.clear()
+        self._contact_count = 0
+        self._start_time = time.time()
 
-    def recognize_gesture(self) -> Optional[MultiTouchGesture]:
-        """Recognize the current gesture from active tracks."""
-        active_tracks = [t for t in self._tracks.values() if t.is_active]
-        if len(active_tracks) < 2:
-            return None
+    def add_contact(
+        self,
+        contact_id: int,
+        x: float,
+        y: float,
+        pressure: float = 0.5,
+    ) -> None:
+        """Add a contact to the current event."""
+        self._contact_ids.add(contact_id)
+        self._contact_count = len(self._contact_ids)
 
-        all_tracks = list(self._tracks.values())
-        if not all_tracks:
-            return None
-
-        total_duration = 0.0
-        for track in all_tracks:
-            if len(track.points) >= 2:
-                duration = track.points[-1][2] - track.points[0][2]
-                total_duration = max(total_duration, duration)
-
-        gesture_type = self._classify_gesture(active_tracks)
-        return MultiTouchGesture(
-            gesture_type=gesture_type,
-            finger_count=len(active_tracks),
-            tracks=all_tracks,
-            duration_ms=total_duration,
+        contact = MultiTouchContact(
+            id=contact_id,
+            x=x,
+            y=y,
+            pressure=pressure,
+            timestamp=time.time(),
         )
 
-    def _classify_gesture(self, tracks: list[TouchTrack]) -> str:
-        """Classify the gesture type from tracks."""
-        if len(tracks) == 2:
-            return self._classify_two_finger(tracks)
-        elif len(tracks) == 3:
-            return "three_finger_tap"
-        else:
-            return f"{len(tracks)}_finger_tap"
+        if contact_id not in self._touch_history:
+            self._touch_history[contact_id] = []
+        self._touch_history[contact_id].append(contact)
 
-    def _classify_two_finger(self, tracks: list[TouchTrack]) -> str:
-        """Classify a two-finger gesture."""
-        t1, t2 = tracks[0], tracks[1]
+    def remove_contact(self, contact_id: int) -> None:
+        """Remove a contact from the current event."""
+        self._contact_ids.discard(contact_id)
+        self._contact_count = len(self._contact_ids)
 
-        # Compute distance change between fingers
-        if len(t1.points) < 2 or len(t2.points) < 2:
-            return "two_finger_tap"
+    def recognize_pattern(
+        self,
+        end_x: Optional[float] = None,
+        end_y: Optional[float] = None,
+    ) -> MultiTouchEvent:
+        """Recognize the pattern from the current touch data."""
+        duration = 0.0
+        if self._start_time is not None:
+            duration = (time.time() - self._start_time) * 1000.0
 
-        start_dist = self._distance(t1.points[0], t2.points[0])
-        end_dist = self._distance(t1.points[-1], t2.points[-1])
+        center_x, center_y = self._calculate_center()
 
-        if end_dist > start_dist * 1.5:
-            return "pinch_open"
-        elif end_dist < start_dist * 0.67:
-            return "pinch_close"
-        elif abs(t1.velocity() - t2.velocity()) < 50:
-            return "two_finger_scroll"
-        else:
-            return "two_finger_drag"
+        pattern = self._classify_pattern(duration, end_x, end_y, center_x, center_y)
 
-    def _distance(self, p1: tuple[float, float, float], p2: tuple[float, float, float]) -> float:
-        return ((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2) ** 0.5
+        all_contacts: List[MultiTouchContact] = []
+        for contacts in self._touch_history.values():
+            all_contacts.extend(contacts)
 
-    def clear(self) -> None:
-        self._tracks.clear()
+        return MultiTouchEvent(
+            pattern=pattern,
+            contacts=all_contacts,
+            center_x=center_x,
+            center_y=center_y,
+            duration=duration,
+            timestamp=self._start_time or time.time(),
+        )
 
+    def _calculate_center(self) -> Tuple[float, float]:
+        """Calculate the center point of all contacts."""
+        if not self._touch_history:
+            return (0.0, 0.0)
 
-def recognize_from_touch_list(
-    touches: list[tuple[int, float, float, float]]
-) -> str:
-    """Quick recognition from a list of (finger_id, x, y, timestamp) tuples.
+        latest_contacts = []
+        for contacts in self._touch_history.values():
+            if contacts:
+                latest_contacts.append(contacts[-1])
 
-    Args:
-        touches: List of touch events in chronological order
+        if not latest_contacts:
+            return (0.0, 0.0)
 
-    Returns:
-        Gesture type string
-    """
-    engine = MultiTouchEngine()
-    last_finger_id = -1
+        avg_x = sum(c.x for c in latest_contacts) / len(latest_contacts)
+        avg_y = sum(c.y for c in latest_contacts) / len(latest_contacts)
+        return (avg_x, avg_y)
 
-    for finger_id, x, y, ts in touches:
-        if finger_id != last_finger_id:
-            engine.begin_touch(finger_id, x, y, ts)
-            last_finger_id = finger_id
-        else:
-            engine.update_touch(finger_id, x, y, ts)
+    def _classify_pattern(
+        self,
+        duration: float,
+        end_x: Optional[float],
+        end_y: Optional[float],
+        center_x: float,
+        center_y: float,
+    ) -> TouchPattern:
+        """Classify the touch pattern."""
+        count = self._contact_count
 
-    gesture = engine.recognize_gesture()
-    return gesture.gesture_type if gesture else "unknown"
+        if count == 1:
+            if duration < 200:
+                return TouchPattern.SINGLE_TAP
+            return TouchPattern.UNKNOWN
 
+        if count == 2:
+            if duration < 200:
+                return TouchPattern.TWO_FINGER_TAP
+            return TouchPattern.ZOOM
 
-__all__ = ["MultiTouchEngine", "MultiTouchGesture", "TouchTrack", "recognize_from_touch_list"]
+        if count == 3:
+            if duration < 200:
+                return TouchPattern.THREE_FINGER_TAP
+            return TouchPattern.ROTATE
+
+        if end_x is not None and end_y is not None:
+            latest = list(self._touch_history.values())
+            if latest:
+                first_contacts = [group[0] for group in latest if group]
+                if first_contacts:
+                    start_center_x = sum(c.x for c in first_contacts) / len(first_contacts)
+                    start_center_y = sum(c.y for c in first_contacts) / len(first_contacts)
+                    dx = end_x - start_center_x
+                    dy = end_y - start_center_y
+
+                    if abs(dx) > abs(dy):
+                        if dx < 0:
+                            return TouchPattern.SWIPE_LEFT
+                        else:
+                            return TouchPattern.SWIPE_RIGHT
+                    else:
+                        if dy < 0:
+                            return TouchPattern.SWIPE_UP
+                        else:
+                            return TouchPattern.SWIPE_DOWN
+
+        return TouchPattern.UNKNOWN
+
+    def get_contact_count(self) -> int:
+        """Get the number of active contacts."""
+        return self._contact_count
+
+    def reset(self) -> None:
+        """Reset all state."""
+        self._contact_ids.clear()
+        self._touch_history.clear()
+        self._contact_count = 0
+        self._start_time = None
+        self._last_tap_time = 0.0
