@@ -1,319 +1,281 @@
-"""Idempotency Action Module.
+"""Idempotency action module for RabAI AutoClick.
 
-Provides idempotency key management to ensure safe operation retries
-and prevent duplicate processing.
+Provides idempotency handling:
+- IdempotencyStore: Store and check idempotency keys
+- IdempotencyChecker: Verify if operation was already executed
+- IdempotencyGuard: Guard operations with idempotency keys
+- IdempotencyTTLManager: Manage TTL for idempotency keys
 """
+
 from __future__ import annotations
 
-import hashlib
-import time
-import uuid
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Dict, List, Optional
-
+import json
 import sys
 import os
+import time
+import hashlib
+import threading
+from typing import Any, Callable, Dict, List, Optional, Union
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-class IdempotencyStatus(Enum):
-    """Idempotency record status."""
-    PENDING = "pending"
-    PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    EXPIRED = "expired"
+try:
+    import redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
 
 
 @dataclass
 class IdempotencyRecord:
     """Idempotency record."""
     key: str
-    status: IdempotencyStatus
+    status: str
     result: Optional[Any] = None
-    error: Optional[str] = None
-    created_at: float = field(default_factory=time.time)
+    created_at: float = 0.0
     expires_at: float = 0.0
-    attempts: int = 0
-    last_attempt: float = 0.0
+    execution_count: int = 0
 
 
-class IdempotencyStore:
-    """In-memory idempotency store."""
+class IdempotencyStoreAction(BaseAction):
+    """Store and manage idempotency keys."""
+    action_type = "idempotency_store"
+    display_name = "幂等性存储"
+    description = "存储和管理幂等性Key"
 
-    def __init__(self, default_ttl_seconds: float = 86400):
-        self._records: Dict[str, IdempotencyRecord] = {}
-        self._default_ttl = default_ttl_seconds
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "check")
+            store_path = params.get("store_path", "/tmp/idempotency")
+            key = params.get("key", "")
+            ttl_seconds = params.get("ttl_seconds", 86400)
+            result_data = params.get("result_data", None)
+            redis_url = params.get("redis_url", "redis://localhost:6379/0")
+            use_redis = params.get("use_redis", False) and REDIS_AVAILABLE
 
-    def create(self, key: str, ttl_seconds: Optional[float] = None) -> Optional[IdempotencyRecord]:
-        """Create idempotency record."""
-        if key in self._records:
-            return None
+            if not key:
+                return ActionResult(success=False, message="key is required")
 
-        ttl = ttl_seconds or self._default_ttl
-        record = IdempotencyRecord(
-            key=key,
-            status=IdempotencyStatus.PENDING,
-            expires_at=time.time() + ttl
-        )
-        self._records[key] = record
-        return record
+            key_hash = hashlib.sha256(key.encode()).hexdigest()[:32]
+            os.makedirs(store_path, exist_ok=True)
+            key_file = os.path.join(store_path, f"{key_hash}.json")
 
-    def get(self, key: str) -> Optional[IdempotencyRecord]:
-        """Get idempotency record."""
-        record = self._records.get(key)
-        if record and time.time() > record.expires_at:
-            record.status = IdempotencyStatus.EXPIRED
-        return record
+            if use_redis:
+                client = redis.from_url(redis_url, decode_responses=False)
 
-    def start_processing(self, key: str) -> Optional[IdempotencyRecord]:
-        """Mark as processing."""
-        record = self._records.get(key)
-        if record and record.status == IdempotencyStatus.PENDING:
-            record.status = IdempotencyStatus.PROCESSING
-            record.attempts += 1
-            record.last_attempt = time.time()
-            return record
-        return None
+            if operation == "check":
+                if use_redis:
+                    exists = client.exists(key)
+                    if exists:
+                        val = client.get(key)
+                        record = json.loads(val.decode()) if val else {}
+                        return ActionResult(
+                            success=True,
+                            message="Key exists",
+                            data={"key": key, "status": record.get("status"), "result": record.get("result")}
+                        )
+                    return ActionResult(success=True, message="Key not found", data={"key": key, "exists": False})
 
-    def complete(self, key: str, result: Any) -> Optional[IdempotencyRecord]:
-        """Mark as completed."""
-        record = self._records.get(key)
-        if record:
-            record.status = IdempotencyStatus.COMPLETED
-            record.result = result
-        return record
+                if os.path.exists(key_file):
+                    with open(key_file) as f:
+                        record = json.load(f)
+                    if record.get("expires_at", 0) > time.time():
+                        return ActionResult(
+                            success=True,
+                            message="Key exists",
+                            data={"key": key, "status": record.get("status"), "result": record.get("result")}
+                        )
+                    else:
+                        os.remove(key_file)
+                return ActionResult(success=True, message="Key not found", data={"key": key, "exists": False})
 
-    def fail(self, key: str, error: str) -> Optional[IdempotencyRecord]:
-        """Mark as failed."""
-        record = self._records.get(key)
-        if record:
-            record.status = IdempotencyStatus.FAILED
-            record.error = error
-        return record
+            elif operation == "store":
+                status = params.get("status", "completed")
+                created_at = time.time()
+                expires_at = created_at + ttl_seconds
 
-    def delete(self, key: str) -> bool:
-        """Delete record."""
-        if key in self._records:
-            del self._records[key]
-            return True
-        return False
-
-    def cleanup_expired(self) -> int:
-        """Remove expired records."""
-        now = time.time()
-        expired = [
-            k for k, r in self._records.items()
-            if now > r.expires_at
-        ]
-        for k in expired:
-            del self._records[k]
-        return len(expired)
-
-
-_global_store = IdempotencyStore()
-
-
-class IdempotencyAction:
-    """Idempotency action.
-
-    Example:
-        action = IdempotencyAction()
-
-        result = action.get_or_create("order-123")
-        if result.is_new:
-            process_order()
-            action.complete("order-123", {"order_id": "123"})
-    """
-
-    def __init__(self, store: Optional[IdempotencyStore] = None):
-        self._store = store or _global_store
-
-    def get_or_create(self, key: str,
-                     ttl_seconds: Optional[float] = None) -> Dict[str, Any]:
-        """Get existing record or create new one."""
-        existing = self._store.get(key)
-
-        if existing:
-            if existing.status == IdempotencyStatus.COMPLETED:
-                return {
-                    "success": True,
-                    "is_new": False,
+                record = {
                     "key": key,
-                    "status": existing.status.value,
-                    "result": existing.result,
-                    "message": "Operation already completed"
+                    "key_hash": key_hash,
+                    "status": status,
+                    "result": result_data,
+                    "created_at": created_at,
+                    "expires_at": expires_at,
+                    "execution_count": 1,
                 }
 
-            if existing.status == IdempotencyStatus.PROCESSING:
-                return {
-                    "success": True,
-                    "is_new": False,
+                if use_redis:
+                    client.setex(key, ttl_seconds, json.dumps(record))
+                else:
+                    with open(key_file, "w") as f:
+                        json.dump(record, f)
+
+                return ActionResult(success=True, message=f"Stored: {key}", data={"key": key, "expires_at": expires_at})
+
+            elif operation == "delete":
+                if use_redis:
+                    client.delete(key)
+                elif os.path.exists(key_file):
+                    os.remove(key_file)
+
+                return ActionResult(success=True, message=f"Deleted: {key}")
+
+            elif operation == "list":
+                records = []
+                if use_redis:
+                    keys = client.keys("*")
+                    for k in keys:
+                        val = client.get(k)
+                        if val:
+                            rec = json.loads(val.decode())
+                            records.append({"key": rec.get("key"), "status": rec.get("status"), "expires_at": rec.get("expires_at")})
+                else:
+                    for filename in os.listdir(store_path):
+                        if filename.endswith(".json"):
+                            with open(os.path.join(store_path, filename)) as f:
+                                record = json.load(f)
+                                if record.get("expires_at", 0) > time.time():
+                                    records.append({"key": record.get("key"), "status": record.get("status"), "expires_at": record.get("expires_at")})
+
+                return ActionResult(success=True, message=f"{len(records)} active keys", data={"records": records, "count": len(records)})
+
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+
+
+class IdempotencyGuardAction(BaseAction):
+    """Guard operations with idempotency key checking."""
+    action_type = "idempotency_guard"
+    display_name = "幂等性保护"
+    description = "基于幂等性Key保护操作"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            key = params.get("key", "")
+            operation_fn = params.get("operation_fn", None)
+            ttl_seconds = params.get("ttl_seconds", 3600)
+            store_path = params.get("store_path", "/tmp/idempotency")
+            redis_url = params.get("redis_url", "redis://localhost:6379/0")
+            use_redis = params.get("use_redis", False) and REDIS_AVAILABLE
+
+            if not key:
+                return ActionResult(success=False, message="key is required")
+
+            key_hash = hashlib.sha256(key.encode()).hexdigest()[:32]
+            os.makedirs(store_path, exist_ok=True)
+
+            if use_redis:
+                client = redis.from_url(redis_url, decode_responses=True)
+
+                existing = client.get(key)
+                if existing:
+                    record = json.loads(existing)
+                    return ActionResult(
+                        success=True,
+                        message="Operation already executed (idempotent)",
+                        data={"key": key, "status": record.get("status"), "cached_result": record.get("result")}
+                    )
+
+                client.setex(key, ttl_seconds, json.dumps({"status": "in_progress", "key": key}))
+            else:
+                key_file = os.path.join(store_path, f"{key_hash}.json")
+                if os.path.exists(key_file):
+                    with open(key_file) as f:
+                        record = json.load(f)
+                    if record.get("expires_at", 0) > time.time():
+                        return ActionResult(
+                            success=True,
+                            message="Operation already executed (idempotent)",
+                            data={"key": key, "status": record.get("status"), "cached_result": record.get("result")}
+                        )
+
+                record = {
                     "key": key,
-                    "status": existing.status.value,
-                    "attempts": existing.attempts,
-                    "message": "Operation in progress"
+                    "status": "in_progress",
+                    "created_at": time.time(),
+                    "expires_at": time.time() + ttl_seconds,
                 }
+                with open(key_file, "w") as f:
+                    json.dump(record, f)
 
-            if existing.status == IdempotencyStatus.FAILED:
-                return {
-                    "success": True,
-                    "is_new": False,
-                    "key": key,
-                    "status": existing.status.value,
-                    "error": existing.error,
-                    "message": "Operation previously failed"
-                }
+            return ActionResult(
+                success=True,
+                message=f"Idempotency key acquired: {key}",
+                data={"key": key, "acquired": True}
+            )
 
-        record = self._store.create(key, ttl_seconds)
-        if record:
-            return {
-                "success": True,
-                "is_new": True,
-                "key": key,
-                "status": record.status.value,
-                "message": "New idempotency key created"
-            }
-
-        return {
-            "success": False,
-            "message": "Failed to create idempotency key"
-        }
-
-    def start_processing(self, key: str) -> Dict[str, Any]:
-        """Start processing with key."""
-        record = self._store.start_processing(key)
-        if record:
-            return {
-                "success": True,
-                "key": key,
-                "status": record.status.value,
-                "attempts": record.attempts,
-                "message": "Processing started"
-            }
-        return {
-            "success": False,
-            "message": "Cannot start processing (not pending or not found)"
-        }
-
-    def complete(self, key: str, result: Any) -> Dict[str, Any]:
-        """Complete operation with key."""
-        record = self._store.complete(key, result)
-        if record:
-            return {
-                "success": True,
-                "key": key,
-                "status": record.status.value,
-                "message": "Operation completed"
-            }
-        return {
-            "success": False,
-            "message": "Key not found"
-        }
-
-    def fail(self, key: str, error: str) -> Dict[str, Any]:
-        """Fail operation with key."""
-        record = self._store.fail(key, error)
-        if record:
-            return {
-                "success": True,
-                "key": key,
-                "status": record.status.value,
-                "error": record.error,
-                "message": "Operation marked as failed"
-            }
-        return {
-            "success": False,
-            "message": "Key not found"
-        }
-
-    def get(self, key: str) -> Dict[str, Any]:
-        """Get idempotency record."""
-        record = self._store.get(key)
-        if record:
-            return {
-                "success": True,
-                "key": key,
-                "status": record.status.value,
-                "result": record.result,
-                "error": record.error,
-                "created_at": record.created_at,
-                "expires_at": record.expires_at,
-                "attempts": record.attempts
-            }
-        return {
-            "success": False,
-            "message": "Key not found"
-        }
-
-    def delete(self, key: str) -> Dict[str, Any]:
-        """Delete idempotency record."""
-        if self._store.delete(key):
-            return {"success": True, "message": "Deleted"}
-        return {"success": False, "message": "Key not found"}
-
-    def cleanup(self) -> Dict[str, Any]:
-        """Cleanup expired records."""
-        count = self._store.cleanup_expired()
-        return {
-            "success": True,
-            "expired_removed": count,
-            "message": f"Removed {count} expired records"
-        }
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
 
 
-def execute(context: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute idempotency action."""
-    operation = params.get("operation", "")
-    action = IdempotencyAction()
+class IdempotencyTTLManagerAction(BaseAction):
+    """Manage TTL for idempotency keys."""
+    action_type = "idempotency_ttl_manager"
+    display_name = "幂等性TTL管理"
+    description = "管理幂等性Key的TTL"
 
-    try:
-        if operation == "get_or_create":
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "cleanup")
+            store_path = params.get("store_path", "/tmp/idempotency")
+            redis_url = params.get("redis_url", "redis://localhost:6379/0")
+            use_redis = params.get("use_redis", False) and REDIS_AVAILABLE
             key = params.get("key", "")
-            if not key:
-                return {"success": False, "message": "key required"}
-            return action.get_or_create(key, params.get("ttl_seconds"))
+            new_ttl = params.get("new_ttl", 86400)
 
-        elif operation == "start":
-            key = params.get("key", "")
-            if not key:
-                return {"success": False, "message": "key required"}
-            return action.start_processing(key)
+            if operation == "cleanup":
+                cleaned = 0
+                if use_redis:
+                    client = redis.from_url(redis_url, decode_responses=True)
+                    keys = client.keys("*")
+                    for k in keys:
+                        val = client.get(k)
+                        if val:
+                            record = json.loads(val)
+                            if record.get("expires_at", 0) < time.time():
+                                client.delete(k)
+                                cleaned += 1
+                else:
+                    for filename in os.listdir(store_path):
+                        if filename.endswith(".json"):
+                            filepath = os.path.join(store_path, filename)
+                            with open(filepath) as f:
+                                record = json.load(f)
+                            if record.get("expires_at", 0) < time.time():
+                                os.remove(filepath)
+                                cleaned += 1
 
-        elif operation == "complete":
-            key = params.get("key", "")
-            result = params.get("result")
-            if not key:
-                return {"success": False, "message": "key required"}
-            return action.complete(key, result)
+                return ActionResult(success=True, message=f"Cleaned {cleaned} expired keys")
 
-        elif operation == "fail":
-            key = params.get("key", "")
-            error = params.get("error", "Unknown error")
-            if not key:
-                return {"success": False, "message": "key required"}
-            return action.fail(key, error)
+            elif operation == "extend":
+                if not key:
+                    return ActionResult(success=False, message="key required")
 
-        elif operation == "get":
-            key = params.get("key", "")
-            if not key:
-                return {"success": False, "message": "key required"}
-            return action.get(key)
+                key_hash = hashlib.sha256(key.encode()).hexdigest()[:32]
+                key_file = os.path.join(store_path, f"{key_hash}.json")
 
-        elif operation == "delete":
-            key = params.get("key", "")
-            if not key:
-                return {"success": False, "message": "key required"}
-            return action.delete(key)
+                if not os.path.exists(key_file):
+                    return ActionResult(success=False, message=f"Key not found: {key}")
 
-        elif operation == "cleanup":
-            return action.cleanup()
+                with open(key_file) as f:
+                    record = json.load(f)
 
-        else:
-            return {"success": False, "message": f"Unknown operation: {operation}"}
+                record["expires_at"] = time.time() + new_ttl
+                with open(key_file, "w") as f:
+                    json.dump(record, f)
 
-    except Exception as e:
-        return {"success": False, "message": f"Idempotency error: {str(e)}"}
+                return ActionResult(success=True, message=f"Extended TTL for: {key}")
+
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")

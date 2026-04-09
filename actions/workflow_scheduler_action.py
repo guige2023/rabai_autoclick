@@ -1,266 +1,164 @@
-"""
-Workflow scheduler module for orchestrating complex multi-step workflows.
+"""Workflow Scheduler Action Module.
 
-Supports DAG-based scheduling, dependency resolution, and parallel execution.
+Schedule and manage workflow executions with cron and interval support.
 """
+
 from __future__ import annotations
 
-import time
-import uuid
-from collections import deque
+import asyncio
+import croniter
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
-
-class WorkflowStatus(Enum):
-    """Workflow status."""
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-    PAUSED = "paused"
-
-
-class TaskStatus(Enum):
-    """Task status."""
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    SKIPPED = "skipped"
+from .automation_scheduler_action import Schedule, ScheduleType
 
 
 @dataclass
-class WorkflowTask:
-    """A task in a workflow."""
-    id: str
-    name: str
-    action: Callable
-    dependencies: list[str] = field(default_factory=list)
-    timeout_seconds: int = 300
-    retry_count: int = 0
-    status: TaskStatus = TaskStatus.PENDING
-    result: Any = None
-    error: Optional[str] = None
-    start_time: Optional[float] = None
-    end_time: Optional[float] = None
-
-
-@dataclass
-class Workflow:
-    """A workflow definition."""
-    id: str
-    name: str
-    tasks: list[WorkflowTask]
-    description: str = ""
-    parallel_execution: bool = True
-    metadata: dict = field(default_factory=dict)
-
-
-@dataclass
-class WorkflowExecution:
-    """A workflow execution instance."""
-    id: str
-    workflow: Workflow
-    status: WorkflowStatus = WorkflowStatus.PENDING
-    task_results: dict[str, Any] = field(default_factory=dict)
-    task_errors: dict[str, str] = field(default_factory=dict)
-    start_time: float = field(default_factory=time.time)
-    end_time: Optional[float] = None
-    current_tasks: list[str] = field(default_factory=list)
+class ScheduledWorkflow:
+    """Scheduled workflow definition."""
+    schedule_id: str
+    workflow_fn: Callable
+    schedule: Schedule
+    args: tuple = field(default_factory=tuple)
+    kwargs: dict = field(default_factory=dict)
+    enabled: bool = True
+    description: str | None = None
+    last_run: datetime | None = None
+    next_run: datetime | None = None
+    run_count: int = 0
+    error_count: int = 0
 
 
 class WorkflowScheduler:
-    """
-    Workflow scheduler for DAG-based task orchestration.
+    """Schedule and manage workflow executions."""
 
-    Supports dependency resolution, parallel execution,
-    and workflow state management.
-    """
+    def __init__(self) -> None:
+        self._scheduled: dict[str, ScheduledWorkflow] = {}
+        self._running = False
+        self._task: asyncio.Task | None = None
+        self._lock = asyncio.Lock()
 
-    def __init__(self):
-        self._workflows: dict[str, Workflow] = {}
-        self._executions: dict[str, WorkflowExecution] = {}
-
-    def create_workflow(
+    async def schedule_workflow(
         self,
-        name: str,
-        tasks: list[WorkflowTask],
-        parallel_execution: bool = True,
-        description: str = "",
-    ) -> Workflow:
-        """Create a new workflow."""
-        workflow = Workflow(
-            id=str(uuid.uuid4())[:12],
-            name=name,
-            tasks=tasks,
-            description=description,
-            parallel_execution=parallel_execution,
+        schedule_id: str,
+        workflow_fn: Callable,
+        schedule: Schedule,
+        *args,
+        description: str | None = None,
+        **kwargs
+    ) -> ScheduledWorkflow:
+        """Schedule a workflow."""
+        sw = ScheduledWorkflow(
+            schedule_id=schedule_id,
+            workflow_fn=workflow_fn,
+            schedule=schedule,
+            args=args,
+            kwargs=kwargs,
+            description=description
         )
+        sw.next_run = self._calculate_next_run(sw)
+        async with self._lock:
+            self._scheduled[schedule_id] = sw
+        return sw
 
-        self._workflows[workflow.id] = workflow
-        return workflow
+    def _calculate_next_run(self, sw: ScheduledWorkflow) -> datetime | None:
+        """Calculate next run time."""
+        now = datetime.now(timezone.utc)
+        stype = sw.schedule.schedule_type
+        if stype == ScheduleType.IMMEDIATE:
+            return now
+        if stype == ScheduleType.ONCE and sw.schedule.run_at:
+            return sw.schedule.run_at
+        if stype == ScheduleType.INTERVAL and sw.schedule.interval_seconds:
+            if sw.last_run:
+                from datetime import timedelta
+                return sw.last_run + timedelta(seconds=sw.schedule.interval_seconds)
+            return now
+        if stype == ScheduleType.CRON and sw.schedule.cron_expression:
+            try:
+                cron = croniter.croniter(sw.schedule.cron_expression, now)
+                return cron.get_next(datetime)
+            except Exception:
+                return None
+        return None
 
-    def execute_workflow(
-        self,
-        workflow_id: str,
-        execution_id: Optional[str] = None,
-    ) -> WorkflowExecution:
-        """Execute a workflow."""
-        workflow = self._workflows.get(workflow_id)
-        if not workflow:
-            raise ValueError(f"Workflow not found: {workflow_id}")
+    async def unschedule(self, schedule_id: str) -> bool:
+        """Remove a scheduled workflow."""
+        async with self._lock:
+            if schedule_id in self._scheduled:
+                del self._scheduled[schedule_id]
+                return True
+            return False
 
-        execution = WorkflowExecution(
-            id=execution_id or str(uuid.uuid4())[:8],
-            workflow=workflow,
-        )
+    async def enable(self, schedule_id: str) -> bool:
+        """Enable a scheduled workflow."""
+        async with self._lock:
+            sw = self._scheduled.get(schedule_id)
+            if sw:
+                sw.enabled = True
+                sw.next_run = self._calculate_next_run(sw)
+                return True
+            return False
 
-        self._executions[execution.id] = execution
-        return self._execute_workflow(execution)
+    async def disable(self, schedule_id: str) -> bool:
+        """Disable a scheduled workflow."""
+        async with self._lock:
+            sw = self._scheduled.get(schedule_id)
+            if sw:
+                sw.enabled = False
+                return True
+            return False
 
-    def _execute_workflow(self, execution: WorkflowExecution) -> WorkflowExecution:
-        """Execute a workflow's tasks."""
-        execution.status = WorkflowStatus.RUNNING
-        workflow = execution.workflow
+    async def start(self) -> None:
+        """Start the scheduler."""
+        self._running = True
+        self._task = asyncio.create_task(self._run_loop())
 
-        pending_tasks = {t.id: t for t in workflow.tasks}
-        completed_tasks: set[str] = set()
-        running_tasks: set[str] = set()
+    async def stop(self) -> None:
+        """Stop the scheduler."""
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
 
-        while pending_tasks or running_tasks:
-            if execution.status == WorkflowStatus.CANCELLED:
-                break
+    async def _run_loop(self) -> None:
+        """Main scheduler loop."""
+        while self._running:
+            now = datetime.now(timezone.utc)
+            async with self._lock:
+                for sw in list(self._scheduled.values()):
+                    if not sw.enabled:
+                        continue
+                    if sw.next_run and now >= sw.next_run:
+                        asyncio.create_task(self._execute_workflow(sw))
+                        sw.last_run = now
+                        sw.next_run = self._calculate_next_run(sw)
+            await asyncio.sleep(1)
 
-            if workflow.parallel_execution:
-                ready_tasks = self._get_ready_tasks(pending_tasks, completed_tasks)
-
-                for task in ready_tasks[:self._max_parallel_tasks()]:
-                    self._execute_task(task, execution)
-                    running_tasks.add(task.id)
-                    pending_tasks.pop(task.id)
-            else:
-                ready_tasks = self._get_ready_tasks(pending_tasks, completed_tasks)
-                if ready_tasks:
-                    task = ready_tasks[0]
-                    self._execute_task(task, execution)
-                    completed_tasks.add(task.id)
-                    pending_tasks.pop(task.id)
-                    running_tasks.discard(task.id)
-                else:
-                    break
-
-            completed_this_round = set()
-            for task_id in running_tasks:
-                task = next((t for t in execution.workflow.tasks if t.id == task_id), None)
-                if task and task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.SKIPPED):
-                    completed_this_round.add(task_id)
-                    completed_tasks.add(task_id)
-                    running_tasks.discard(task_id)
-
-                    if task.status == TaskStatus.COMPLETED:
-                        execution.task_results[task.id] = task.result
-                    elif task.status == TaskStatus.FAILED:
-                        execution.task_errors[task.id] = task.error
-
-            if not completed_this_round and not ready_tasks:
-                break
-
-        if execution.task_errors:
-            execution.status = WorkflowStatus.FAILED
-        else:
-            execution.status = WorkflowStatus.COMPLETED
-
-        execution.end_time = time.time()
-        return execution
-
-    def _get_ready_tasks(
-        self,
-        pending_tasks: dict[str, WorkflowTask],
-        completed_tasks: set[str],
-    ) -> list[WorkflowTask]:
-        """Get tasks that are ready to execute."""
-        ready = []
-
-        for task in pending_tasks.values():
-            if all(dep in completed_tasks for dep in task.dependencies):
-                ready.append(task)
-
-        return ready
-
-    def _max_parallel_tasks(self) -> int:
-        """Get maximum parallel tasks."""
-        return 4
-
-    def _execute_task(
-        self,
-        task: WorkflowTask,
-        execution: WorkflowExecution,
-    ) -> None:
-        """Execute a single task."""
-        task.status = TaskStatus.RUNNING
-        task.start_time = time.time()
-
+    async def _execute_workflow(self, sw: ScheduledWorkflow) -> None:
+        """Execute a scheduled workflow."""
         try:
-            result = task.action(execution.task_results)
-            task.result = result
-            task.status = TaskStatus.COMPLETED
-        except Exception as e:
-            task.error = str(e)
+            if asyncio.iscoroutinefunction(sw.workflow_fn):
+                await sw.workflow_fn(*sw.args, **sw.kwargs)
+            else:
+                await asyncio.to_thread(sw.workflow_fn, *sw.args, **sw.kwargs)
+            sw.run_count += 1
+        except Exception:
+            sw.error_count += 1
 
-            if task.retry_count > 0:
-                task.retry_count -= 1
-                task.status = TaskStatus.PENDING
-                return
+    def get_scheduled_workflows(self) -> list[ScheduledWorkflow]:
+        """Get all scheduled workflows."""
+        return list(self._scheduled.values())
 
-            task.status = TaskStatus.FAILED
-
-        task.end_time = time.time()
-
-    def get_execution(self, execution_id: str) -> Optional[WorkflowExecution]:
-        """Get a workflow execution."""
-        return self._executions.get(execution_id)
-
-    def cancel_execution(self, execution_id: str) -> bool:
-        """Cancel a workflow execution."""
-        execution = self._executions.get(execution_id)
-        if execution and execution.status == WorkflowStatus.RUNNING:
-            execution.status = WorkflowStatus.CANCELLED
-            return True
-        return False
-
-    def list_executions(
-        self,
-        workflow_id: Optional[str] = None,
-        status: Optional[WorkflowStatus] = None,
-    ) -> list[dict]:
-        """List workflow executions."""
-        executions = list(self._executions.values())
-
-        if workflow_id:
-            executions = [e for e in executions if e.workflow.id == workflow_id]
-        if status:
-            executions = [e for e in executions if e.status == status]
-
+    def get_pending_workflows(self) -> list[ScheduledWorkflow]:
+        """Get workflows ready to run."""
+        now = datetime.now(timezone.utc)
         return [
-            {
-                "id": e.id,
-                "workflow_id": e.workflow.id,
-                "workflow_name": e.workflow.name,
-                "status": e.status.value,
-                "start_time": e.start_time,
-                "end_time": e.end_time,
-            }
-            for e in sorted(executions, key=lambda x: x.start_time, reverse=True)
+            sw for sw in self._scheduled.values()
+            if sw.enabled and sw.next_run and now >= sw.next_run
         ]
-
-    def get_workflow(self, workflow_id: str) -> Optional[Workflow]:
-        """Get a workflow by ID."""
-        return self._workflows.get(workflow_id)
-
-    def list_workflows(self) -> list[Workflow]:
-        """List all workflows."""
-        return list(self._workflows.values())
