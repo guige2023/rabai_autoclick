@@ -1,405 +1,262 @@
-"""API cache management action module for RabAI AutoClick.
+"""API response caching with TTL and invalidation.
 
-Provides caching operations for API responses:
-- CacheLookupAction: Look up cached responses
-- CacheStoreAction: Store API responses in cache
-- CacheInvalidateAction: Invalidate cached entries
-- CacheStatsAction: Get cache statistics
-- CacheWarmingAction: Warm cache with frequently used data
+This module provides caching functionality for API responses with
+time-to-live (TTL) support, automatic expiration, and manual invalidation.
+
+Example:
+    >>> from actions.api_cache_action import APICache
+    >>> cache = APICache(ttl=300)
+    >>> result = cache.get_or_fetch(get_user, user_id=123)
 """
 
-from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta
-import hashlib
+from __future__ import annotations
+
+import time
 import json
+import hashlib
+import threading
+import logging
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
+from pathlib import Path
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class LRUCache:
-    """Simple LRU cache implementation."""
-    
-    def __init__(self, max_size: int = 1000):
+@dataclass
+class CacheEntry:
+    """A cached response entry."""
+    key: str
+    value: Any
+    created_at: float
+    ttl: float
+    hit_count: int = 0
+
+    def is_expired(self) -> bool:
+        """Check if the entry has expired."""
+        return time.time() - self.created_at > self.ttl
+
+    def age(self) -> float:
+        """Get the age of the entry in seconds."""
+        return time.time() - self.created_at
+
+
+class APICache:
+    """In-memory cache for API responses.
+
+    Attributes:
+        ttl: Default time-to-live for cache entries in seconds.
+        max_size: Maximum number of entries to cache.
+    """
+
+    def __init__(
+        self,
+        ttl: float = 300.0,
+        max_size: int = 1000,
+        persist_path: Optional[Path] = None,
+    ) -> None:
+        self.ttl = ttl
         self.max_size = max_size
-        self._cache: Dict[str, Dict] = {}
-        self._access_order: List[str] = []
-    
-    def get(self, key: str) -> Optional[Dict]:
-        if key in self._cache:
-            self._access_order.remove(key)
-            self._access_order.append(key)
-            return self._cache[key]
-        return None
-    
-    def set(self, key: str, value: Dict) -> None:
-        if key in self._cache:
-            self._access_order.remove(key)
-        elif len(self._cache) >= self.max_size:
-            oldest = self._access_order.pop(0)
-            del self._cache[oldest]
-        
-        self._cache[key] = value
-        self._access_order.append(key)
-    
+        self._cache: dict[str, CacheEntry] = {}
+        self._lock = threading.RLock()
+        self._persist_path = persist_path
+        if persist_path:
+            self._load_from_disk()
+
+    def get(self, key: str) -> Optional[Any]:
+        """Get a cached value by key.
+
+        Args:
+            key: The cache key.
+
+        Returns:
+            The cached value or None if not found or expired.
+        """
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is None:
+                logger.debug(f"Cache miss: {key}")
+                return None
+            if entry.is_expired():
+                logger.debug(f"Cache expired: {key}")
+                del self._cache[key]
+                return None
+            entry.hit_count += 1
+            logger.debug(f"Cache hit: {key}")
+            return entry.value
+
+    def set(self, key: str, value: Any, ttl: Optional[float] = None) -> None:
+        """Set a cache entry.
+
+        Args:
+            key: The cache key.
+            value: The value to cache.
+            ttl: Optional custom TTL for this entry.
+        """
+        with self._lock:
+            if len(self._cache) >= self.max_size:
+                self._evict_oldest()
+            self._cache[key] = CacheEntry(
+                key=key,
+                value=value,
+                created_at=time.time(),
+                ttl=ttl or self.ttl,
+            )
+            logger.debug(f"Cache set: {key}")
+
     def delete(self, key: str) -> bool:
-        if key in self._cache:
-            del self._cache[key]
-            self._access_order.remove(key)
-            return True
-        return False
-    
+        """Delete a cache entry.
+
+        Args:
+            key: The cache key to delete.
+
+        Returns:
+            True if the key was deleted, False if not found.
+        """
+        with self._lock:
+            if key in self._cache:
+                del self._cache[key]
+                logger.debug(f"Cache deleted: {key}")
+                return True
+            return False
+
     def clear(self) -> int:
-        count = len(self._cache)
-        self._cache.clear()
-        self._access_order.clear()
-        return count
-    
-    def get_stats(self) -> Dict:
-        return {
-            "size": len(self._cache),
-            "max_size": self.max_size,
-            "utilization": len(self._cache) / self.max_size if self.max_size > 0 else 0
-        }
+        """Clear all cache entries.
 
+        Returns:
+            Number of entries cleared.
+        """
+        with self._lock:
+            count = len(self._cache)
+            self._cache.clear()
+            logger.debug(f"Cache cleared: {count} entries")
+            return count
 
-class TTLCache:
-    """Cache with time-to-live support."""
-    
-    def __init__(self, default_ttl: int = 3600):
-        self.default_ttl = default_ttl
-        self._cache: Dict[str, Dict] = {}
-        self._expiry: Dict[str, datetime] = {}
-    
-    def get(self, key: str) -> Optional[Dict]:
-        if key not in self._cache:
-            return None
-        
-        if datetime.now() > self._expiry[key]:
-            self.delete(key)
-            return None
-        
-        return self._cache[key]
-    
-    def set(self, key: str, value: Dict, ttl: Optional[int] = None) -> None:
-        self._cache[key] = value
-        ttl = ttl or self.default_ttl
-        self._expiry[key] = datetime.now() + timedelta(seconds=ttl)
-    
-    def delete(self, key: str) -> bool:
-        if key in self._cache:
-            del self._cache[key]
-            del self._expiry[key]
-            return True
-        return False
-    
-    def clear(self) -> int:
-        count = len(self._cache)
-        self._cache.clear()
-        self._expiry.clear()
-        return count
-    
-    def cleanup(self) -> int:
-        now = datetime.now()
-        expired_keys = [k for k, v in self._expiry.items() if now > v]
-        for key in expired_keys:
-            self.delete(key)
-        return len(expired_keys)
+    def get_or_fetch(
+        self,
+        func: Callable[..., Any],
+        *args: Any,
+        cache_key: Optional[str] = None,
+        ttl: Optional[float] = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Get from cache or fetch from function.
 
+        Args:
+            func: The function to call if cache miss.
+            *args: Positional arguments for the function.
+            cache_key: Optional custom cache key.
+            ttl: Optional custom TTL for this entry.
+            **kwargs: Keyword arguments for the function.
 
-class CacheLookupAction(BaseAction):
-    """Look up cached responses."""
-    action_type = "cache_lookup"
-    display_name = "缓存查询"
-    description = "查询缓存的API响应"
-    
-    def __init__(self):
-        super().__init__()
-        self._cache = LRUCache(max_size=1000)
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            cache_key = params.get("cache_key")
-            if not cache_key:
-                key_parts = {
-                    "endpoint": params.get("endpoint"),
-                    "params": params.get("params"),
-                    "user": params.get("user_id")
-                }
-                cache_key = self._generate_key(key_parts)
-            
-            cached = self._cache.get(cache_key)
-            
-            if cached:
-                return ActionResult(
-                    success=True,
-                    message="Cache hit",
-                    data={
-                        "cache_hit": True,
-                        "cache_key": cache_key,
-                        "cached_at": cached.get("cached_at"),
-                        "data": cached.get("data")
-                    }
-                )
-            else:
-                return ActionResult(
-                    success=True,
-                    message="Cache miss",
-                    data={
-                        "cache_hit": False,
-                        "cache_key": cache_key
-                    }
-                )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-    
-    def _generate_key(self, parts: Dict) -> str:
-        content = json.dumps(parts, sort_keys=True)
-        return hashlib.sha256(content.encode()).hexdigest()[:16]
+        Returns:
+            The cached or freshly fetched value.
+        """
+        if cache_key is None:
+            cache_key = self._make_key(func, args, kwargs)
+        cached = self.get(cache_key)
+        if cached is not None:
+            return cached
+        result = func(*args, **kwargs)
+        self.set(cache_key, result, ttl=ttl)
+        return result
 
+    def invalidate_pattern(self, pattern: str) -> int:
+        """Invalidate all keys matching a pattern.
 
-class CacheStoreAction(BaseAction):
-    """Store API responses in cache."""
-    action_type = "cache_store"
-    display_name = "缓存存储"
-    description = "将API响应存储到缓存"
-    
-    def __init__(self):
-        super().__init__()
-        self._cache = LRUCache(max_size=1000)
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            cache_key = params.get("cache_key")
-            data = params.get("data")
-            ttl = params.get("ttl")
-            
-            if not cache_key:
-                key_parts = {
-                    "endpoint": params.get("endpoint"),
-                    "params": params.get("params"),
-                    "user": params.get("user_id")
-                }
-                cache_key = self._generate_key(key_parts)
-            
-            cache_entry = {
-                "data": data,
-                "cached_at": datetime.now().isoformat(),
-                "ttl": ttl,
-                "hits": 0
+        Args:
+            pattern: Glob-style pattern (e.g., "user:*").
+
+        Returns:
+            Number of keys invalidated.
+        """
+        import fnmatch
+        with self._lock:
+            keys = [k for k in self._cache.keys() if fnmatch.fnmatch(k, pattern)]
+            for key in keys:
+                del self._cache[key]
+            logger.debug(f"Cache invalidated {len(keys)} keys matching: {pattern}")
+            return len(keys)
+
+    def get_stats(self) -> dict[str, Any]:
+        """Get cache statistics.
+
+        Returns:
+            Dictionary containing cache stats.
+        """
+        with self._lock:
+            total_hits = sum(e.hit_count for e in self._cache.values())
+            return {
+                "size": len(self._cache),
+                "max_size": self.max_size,
+                "total_hits": total_hits,
+                "avg_ttl": self.ttl,
             }
-            
-            self._cache.set(cache_key, cache_entry)
-            
-            return ActionResult(
-                success=True,
-                message="Data cached successfully",
-                data={
-                    "cache_key": cache_key,
-                    "cached_at": cache_entry["cached_at"],
-                    "ttl": ttl
+
+    def _evict_oldest(self) -> None:
+        """Evict the oldest cache entry."""
+        if not self._cache:
+            return
+        oldest_key = min(
+            self._cache.keys(),
+            key=lambda k: self._cache[k].created_at,
+        )
+        del self._cache[oldest_key]
+
+    def _make_key(
+        self,
+        func: Callable[..., Any],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> str:
+        """Generate a cache key from function and arguments."""
+        key_parts = [
+            func.__module__,
+            func.__name__,
+            str(args),
+            str(sorted(kwargs.items())),
+        ]
+        key_str = "|".join(key_parts)
+        return hashlib.md5(key_str.encode()).hexdigest()
+
+    def _load_from_disk(self) -> None:
+        """Load cache from disk."""
+        if not self._persist_path or not self._persist_path.exists():
+            return
+        try:
+            with open(self._persist_path, "r") as f:
+                data = json.load(f)
+            with self._lock:
+                for key, entry_data in data.items():
+                    self._cache[key] = CacheEntry(
+                        key=key,
+                        value=entry_data["value"],
+                        created_at=entry_data["created_at"],
+                        ttl=entry_data["ttl"],
+                        hit_count=entry_data.get("hit_count", 0),
+                    )
+            logger.info(f"Loaded {len(self._cache)} entries from disk")
+        except Exception as e:
+            logger.warning(f"Failed to load cache from disk: {e}")
+
+    def save_to_disk(self) -> None:
+        """Save cache to disk."""
+        if not self._persist_path:
+            return
+        try:
+            self._persist_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._lock:
+                data = {
+                    key: {
+                        "value": entry.value,
+                        "created_at": entry.created_at,
+                        "ttl": entry.ttl,
+                        "hit_count": entry.hit_count,
+                    }
+                    for key, entry in self._cache.items()
                 }
-            )
+            with open(self._persist_path, "w") as f:
+                json.dump(data, f)
+            logger.debug(f"Saved {len(data)} entries to disk")
         except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-    
-    def _generate_key(self, parts: Dict) -> str:
-        content = json.dumps(parts, sort_keys=True)
-        return hashlib.sha256(content.encode()).hexdigest()[:16]
-
-
-class CacheInvalidateAction(BaseAction):
-    """Invalidate cached entries."""
-    action_type = "cache_invalidate"
-    display_name = "缓存失效"
-    description = "使缓存条目失效"
-    
-    def __init__(self):
-        super().__init__()
-        self._cache = LRUCache(max_size=1000)
-        self._ttl_cache = TTLCache()
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "delete")
-            
-            if operation == "delete":
-                cache_key = params.get("cache_key")
-                if not cache_key:
-                    return ActionResult(success=False, message="cache_key is required")
-                
-                deleted = self._cache.delete(cache_key)
-                ttl_deleted = self._ttl_cache.delete(cache_key)
-                
-                return ActionResult(
-                    success=True,
-                    message=f"Cache entry deleted: {deleted or ttl_deleted}",
-                    data={
-                        "cache_key": cache_key,
-                        "deleted": deleted or ttl_deleted
-                    }
-                )
-            
-            elif operation == "clear":
-                lru_count = self._cache.clear()
-                ttl_count = self._ttl_cache.clear()
-                
-                return ActionResult(
-                    success=True,
-                    message="Cache cleared",
-                    data={
-                        "lru_entries_cleared": lru_count,
-                        "ttl_entries_cleared": ttl_count
-                    }
-                )
-            
-            elif operation == "cleanup":
-                cleaned = self._ttl_cache.cleanup()
-                
-                return ActionResult(
-                    success=True,
-                    message=f"Cleaned up {cleaned} expired entries",
-                    data={"cleaned_entries": cleaned}
-                )
-            
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-
-
-class CacheStatsAction(BaseAction):
-    """Get cache statistics."""
-    action_type = "cache_stats"
-    display_name = "缓存统计"
-    description = "获取缓存统计信息"
-    
-    def __init__(self):
-        super().__init__()
-        self._cache = LRUCache(max_size=1000)
-        self._ttl_cache = TTLCache()
-        self._hits = 0
-        self._misses = 0
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            self._ttl_cache.cleanup()
-            
-            lru_stats = self._cache.get_stats()
-            
-            total_requests = self._hits + self._misses
-            hit_rate = self._hits / total_requests if total_requests > 0 else 0
-            
-            return ActionResult(
-                success=True,
-                message="Cache statistics retrieved",
-                data={
-                    "lru_cache": lru_stats,
-                    "ttl_cache_size": len(self._ttl_cache._cache),
-                    "hits": self._hits,
-                    "misses": self._misses,
-                    "hit_rate": hit_rate,
-                    "total_requests": total_requests
-                }
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-    
-    def record_hit(self) -> None:
-        self._hits += 1
-    
-    def record_miss(self) -> None:
-        self._misses += 1
-
-
-class CacheWarmingAction(BaseAction):
-    """Warm cache with frequently used data."""
-    action_type = "cache_warming"
-    display_name = "缓存预热"
-    description = "预热缓存常用数据"
-    
-    def __init__(self):
-        super().__init__()
-        self._warm_data: List[Dict] = []
-        self._cache = LRUCache(max_size=1000)
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "warm")
-            
-            if operation == "add":
-                data = params.get("data")
-                priority = params.get("priority", 1)
-                
-                self._warm_data.append({
-                    "data": data,
-                    "priority": priority,
-                    "added_at": datetime.now().isoformat()
-                })
-                
-                return ActionResult(
-                    success=True,
-                    message="Data added for warming",
-                    data={"warm_data_count": len(self._warm_data)}
-                )
-            
-            elif operation == "warm":
-                max_items = params.get("max_items", 100)
-                fetch_fn = params.get("fetch_fn")
-                
-                sorted_data = sorted(self._warm_data, key=lambda x: x["priority"], reverse=True)
-                warmed = 0
-                failed = 0
-                
-                for item in sorted_data[:max_items]:
-                    cache_key = self._generate_key(item["data"])
-                    
-                    if callable(fetch_fn):
-                        try:
-                            fetched_data = fetch_fn(item["data"])
-                            self._cache.set(cache_key, {
-                                "data": fetched_data,
-                                "cached_at": datetime.now().isoformat()
-                            })
-                            warmed += 1
-                        except Exception:
-                            failed += 1
-                    else:
-                        self._cache.set(cache_key, {
-                            "data": item["data"],
-                            "cached_at": datetime.now().isoformat()
-                        })
-                        warmed += 1
-                
-                return ActionResult(
-                    success=True,
-                    message=f"Cache warming complete",
-                    data={
-                        "warmed_count": warmed,
-                        "failed_count": failed,
-                        "total_warm_data": len(self._warm_data)
-                    }
-                )
-            
-            elif operation == "clear":
-                count = len(self._warm_data)
-                self._warm_data.clear()
-                
-                return ActionResult(
-                    success=True,
-                    message=f"Cleared {count} warm data entries",
-                    data={"cleared_count": count}
-                )
-            
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-    
-    def _generate_key(self, data: Any) -> str:
-        content = json.dumps(data, sort_keys=True) if isinstance(data, (dict, list)) else str(data)
-        return hashlib.sha256(content.encode()).hexdigest()[:16]
+            logger.warning(f"Failed to save cache to disk: {e}")
