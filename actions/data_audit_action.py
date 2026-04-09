@@ -1,326 +1,441 @@
-"""Data audit action module for RabAI AutoClick.
+"""
+Data Audit Action Module.
 
-Provides data audit trail with compliance tracking,
-access logging, change detection, and audit reports.
+Data auditing and compliance tracking with field-level
+change tracking, PII detection, and audit report generation.
 """
 
+import hashlib
 import time
-import sys
-import os
-import json
-from typing import Any, Dict, List, Optional, Union, Callable
-from datetime import datetime, timedelta
-import threading
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
+from enum import Enum
+import logging
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class AuditEvent:
-    """Represents an audit event."""
-    
-    def __init__(
-        self,
-        event_id: str,
-        event_type: str,
-        actor: str,
-        resource: str,
-        action: str,
-        result: str,
-        details: Optional[Dict[str, Any]] = None,
-        metadata: Optional[Dict[str, Any]] = None
-    ):
-        self.event_id = event_id
-        self.event_type = event_type
-        self.actor = actor
-        self.resource = resource
-        self.action = action
-        self.result = result
-        self.details = details or {}
-        self.metadata = metadata or {}
-        self.timestamp = time.time()
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary."""
-        return {
-            'event_id': self.event_id,
-            'event_type': self.event_type,
-            'actor': self.actor,
-            'resource': self.resource,
-            'action': self.action,
-            'result': self.result,
-            'details': self.details,
-            'metadata': self.metadata,
-            'timestamp': self.timestamp,
-            'datetime': datetime.fromtimestamp(self.timestamp).isoformat()
-        }
+class AuditEventType(Enum):
+    """Audit event types."""
+    CREATE = "create"
+    READ = "read"
+    UPDATE = "update"
+    DELETE = "delete"
+    EXPORT = "export"
+    ACCESS = "access"
 
 
-class DataAuditAction(BaseAction):
-    """Track and audit data operations for compliance.
-    
-    Supports audit logging, access tracking, change detection,
-    compliance reports, and retention policies.
+class PIIFieldType(Enum):
+    """PII field type classifications."""
+    NAME = "name"
+    EMAIL = "email"
+    PHONE = "phone"
+    ADDRESS = "address"
+    SSN = "ssn"
+    CREDIT_CARD = "credit_card"
+    PASSWORD = "password"
+    BANK_ACCOUNT = "bank_account"
+    CUSTOM = "custom"
+
+
+@dataclass
+class AuditEntry:
     """
-    action_type = "data_audit"
-    display_name = "数据审计"
-    description = "数据操作审计和合规追踪"
-    
+    Single audit entry.
+
+    Attributes:
+        entry_id: Unique entry identifier.
+        event_type: Type of audit event.
+        entity_type: Type of entity affected.
+        entity_id: ID of entity affected.
+        user: User who performed action.
+        timestamp: When event occurred.
+        changes: Dict of field changes.
+        pii_accessed: Whether PII was accessed.
+        metadata: Additional metadata.
+    """
+    entry_id: str
+    event_type: AuditEventType
+    entity_type: str
+    entity_id: str
+    user: str
+    timestamp: float = field(default_factory=time.time, init=False)
+    changes: dict = field(default_factory=dict)
+    pii_accessed: bool = False
+    pii_fields: list = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass
+class PIIField:
+    """PII field definition."""
+    name: str
+    field_type: PIIFieldType
+    sensitivity_level: int = 1
+    anonymize_func: Optional[Callable[[str], str]] = None
+
+
+@dataclass
+class AuditReport:
+    """Audit report summary."""
+    total_events: int
+    by_type: dict
+    by_user: dict
+    pii_access_count: int
+    time_range: tuple
+
+
+class DataAuditAction:
+    """
+    Data auditing and compliance tracking.
+
+    Example:
+        auditor = DataAuditAction()
+        auditor.register_pii_field("email", PIIFieldType.EMAIL)
+        auditor.log_event(AuditEventType.UPDATE, "user", "123", changes=delta)
+    """
+
     def __init__(self):
-        super().__init__()
-        self._audit_log: List[AuditEvent] = []
-        self._retention_days = 365
-        self._lock = threading.RLock()
-    
-    def execute(
+        """Initialize data audit action."""
+        self._entries: list[AuditEntry] = []
+        self._pii_fields: dict[str, PIIField] = {}
+        self._entity_index: dict[str, list[int]] = {}
+        self._max_entries = 100000
+
+    def register_pii_field(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute audit operations.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: action (log, query, report,
-                   archive, purge), config.
-        
-        Returns:
-            ActionResult with operation result.
+        field_name: str,
+        field_type: PIIFieldType,
+        sensitivity_level: int = 1,
+        anonymize_func: Optional[Callable[[str], str]] = None
+    ) -> PIIField:
         """
-        action = params.get('action', 'log')
-        
-        if action == 'log':
-            return self._log_event(params)
-        elif action == 'query':
-            return self._query_events(params)
-        elif action == 'report':
-            return self._generate_report(params)
-        elif action == 'archive':
-            return self._archive_events(params)
-        elif action == 'purge':
-            return self._purge_old_events(params)
-        elif action == 'summary':
-            return self._get_summary(params)
-        else:
-            return ActionResult(
-                success=False,
-                message=f"Unknown action: {action}"
-            )
-    
-    def _log_event(
+        Register a PII field.
+
+        Args:
+            field_name: Field name pattern.
+            field_type: Type of PII.
+            sensitivity_level: Sensitivity 1-5.
+            anonymize_func: Optional anonymization function.
+
+        Returns:
+            Created PIIField.
+        """
+        pii_field = PIIField(
+            name=field_name,
+            field_type=field_type,
+            sensitivity_level=sensitivity_level,
+            anonymize_func=anonymize_func
+        )
+
+        self._pii_fields[field_name] = pii_field
+        logger.debug(f"Registered PII field: {field_name}")
+        return pii_field
+
+    def log_event(
         self,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Log an audit event."""
-        event_type = params.get('event_type', 'data_operation')
-        actor = params.get('actor', 'system')
-        resource = params.get('resource', '')
-        action = params.get('action', '')
-        result = params.get('result', 'success')
-        details = params.get('details', {})
-        metadata = params.get('metadata', {})
-        
-        event_id = params.get('event_id') or f"evt_{int(time.time() * 1000)}"
-        
-        event = AuditEvent(
-            event_id=event_id,
+        event_type: AuditEventType,
+        entity_type: str,
+        entity_id: str,
+        user: str = "system",
+        changes: Optional[dict] = None,
+        metadata: Optional[dict] = None
+    ) -> AuditEntry:
+        """
+        Log an audit event.
+
+        Args:
+            event_type: Type of event.
+            entity_type: Entity type.
+            entity_id: Entity ID.
+            user: User performing action.
+            changes: Dict of changes.
+            metadata: Additional metadata.
+
+        Returns:
+            Created AuditEntry.
+        """
+        import uuid
+
+        entry = AuditEntry(
+            entry_id=str(uuid.uuid4())[:12],
             event_type=event_type,
-            actor=actor,
-            resource=resource,
-            action=action,
-            result=result,
-            details=details,
-            metadata=metadata
+            entity_type=entity_type,
+            entity_id=entity_id,
+            user=user,
+            changes=changes or {},
+            metadata=metadata or {}
         )
-        
-        with self._lock:
-            self._audit_log.append(event)
-        
-        return ActionResult(
-            success=True,
-            message=f"Audit event logged: {action}",
-            data={'event_id': event_id}
-        )
-    
-    def _query_events(
+
+        entry.pii_accessed, entry.pii_fields = self._detect_pii(changes or {})
+
+        self._entries.append(entry)
+
+        key = f"{entity_type}:{entity_id}"
+        if key not in self._entity_index:
+            self._entity_index[key] = []
+        self._entity_index[key].append(len(self._entries) - 1)
+
+        if len(self._entries) > self._max_entries:
+            self._compact()
+
+        logger.debug(f"Audit logged: {event_type.value} on {key} by {user}")
+        return entry
+
+    def _detect_pii(self, data: dict) -> tuple[bool, list[str]]:
+        """Detect PII fields in data."""
+        pii_fields = []
+        has_pii = False
+
+        for key, value in data.items():
+            if key.lower() in self._pii_fields:
+                pii_fields.append(key)
+                has_pii = True
+                continue
+
+            key_lower = key.lower()
+            if any(pattern in key_lower for pattern in ["email", "phone", "ssn", "password", "address"]):
+                pii_fields.append(key)
+                has_pii = True
+
+        return has_pii, pii_fields
+
+    def anonymize_value(self, value: str, field_type: PIIFieldType) -> str:
+        """
+        Anonymize a PII value.
+
+        Args:
+            value: Value to anonymize.
+            field_type: Type of PII.
+
+        Returns:
+            Anonymized string.
+        """
+        if not value:
+            return "***"
+
+        if field_type == PIIFieldType.EMAIL:
+            parts = value.split("@")
+            if len(parts) == 2:
+                return f"{parts[0][0]}***@{parts[1]}"
+
+        elif field_type == PIIFieldType.PHONE:
+            return f"***-***-{value[-4:]}"
+
+        elif field_type == PIIFieldType.SSN:
+            return f"***-**-{value[-4:]}"
+
+        elif field_type == PIIFieldType.CREDIT_CARD:
+            return f"****-****-****-{value[-4:]}"
+
+        elif field_type == PIIFieldType.NAME:
+            return value[0] + "***"
+
+        return hashlib.sha256(value.encode()).hexdigest()[:8]
+
+    def get_entity_history(
         self,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Query audit events."""
-        actor = params.get('actor')
-        resource = params.get('resource')
-        action = params.get('action')
-        result = params.get('result')
-        event_type = params.get('event_type')
-        start_time = params.get('start_time')
-        end_time = params.get('end_time')
-        limit = params.get('limit', 100)
-        offset = params.get('offset', 0)
-        
-        with self._lock:
-            results = self._audit_log
-            
-            if actor:
-                results = [e for e in results if e.actor == actor]
-            if resource:
-                results = [e for e in results if e.resource == resource]
-            if action:
-                results = [e for e in results if e.action == action]
-            if result:
-                results = [e for e in results if e.result == result]
-            if event_type:
-                results = [e for e in results if e.event_type == event_type]
-            if start_time:
-                results = [e for e in results if e.timestamp >= start_time]
-            if end_time:
-                results = [e for e in results if e.timestamp <= end_time]
-            
-            total = len(results)
-            results = results[offset:offset + limit]
-        
-        return ActionResult(
-            success=True,
-            message=f"Found {total} events, returning {len(results)}",
-            data={
-                'events': [e.to_dict() for e in results],
-                'total': total,
-                'limit': limit,
-                'offset': offset
-            }
-        )
-    
-    def _generate_report(
+        entity_type: str,
+        entity_id: str,
+        limit: int = 100
+    ) -> list[AuditEntry]:
+        """
+        Get audit history for an entity.
+
+        Args:
+            entity_type: Entity type.
+            entity_id: Entity ID.
+            limit: Maximum entries to return.
+
+        Returns:
+            List of AuditEntries.
+        """
+        key = f"{entity_type}:{entity_id}"
+        indices = self._entity_index.get(key, [])
+
+        entries = []
+        for idx in reversed(indices[-limit:]):
+            if idx < len(self._entries):
+                entries.append(self._entries[idx])
+
+        return entries
+
+    def get_user_activity(
         self,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Generate an audit report."""
-        start_time = params.get('start_time', time.time() - 86400 * 7)
-        end_time = params.get('end_time', time.time())
-        group_by = params.get('group_by', 'action')
-        
-        with self._lock:
-            events = [
-                e for e in self._audit_log
-                if start_time <= e.timestamp <= end_time
+        user: str,
+        limit: int = 100
+    ) -> list[AuditEntry]:
+        """
+        Get audit entries for a user.
+
+        Args:
+            user: Username.
+            limit: Maximum entries.
+
+        Returns:
+            List of AuditEntries.
+        """
+        user_entries = [e for e in reversed(self._entries) if e.user == user]
+        return user_entries[:limit]
+
+    def get_pii_access_log(
+        self,
+        since: Optional[float] = None
+    ) -> list[AuditEntry]:
+        """
+        Get entries where PII was accessed.
+
+        Args:
+            since: Timestamp to filter from.
+
+        Returns:
+            List of AuditEntries with PII access.
+        """
+        entries = [e for e in self._entries if e.pii_accessed]
+
+        if since:
+            entries = [e for e in entries if e.timestamp >= since]
+
+        return entries
+
+    def generate_report(
+        self,
+        since: Optional[float] = None,
+        until: Optional[float] = None
+    ) -> AuditReport:
+        """
+        Generate audit report.
+
+        Args:
+            since: Start timestamp.
+            until: End timestamp.
+
+        Returns:
+            AuditReport summary.
+        """
+        entries = self._entries
+
+        if since:
+            entries = [e for e in entries if e.timestamp >= since]
+        if until:
+            entries = [e for e in entries if e.timestamp <= until]
+
+        by_type: dict = {}
+        by_user: dict = {}
+        pii_count = 0
+
+        for entry in entries:
+            event_type = entry.event_type.value
+            by_type[event_type] = by_type.get(event_type, 0) + 1
+
+            by_user[entry.user] = by_user.get(entry.user, 0) + 1
+
+            if entry.pii_accessed:
+                pii_count += 1
+
+        timestamps = [e.timestamp for e in entries] if entries else [time.time()]
+
+        return AuditReport(
+            total_events=len(entries),
+            by_type=by_type,
+            by_user=by_user,
+            pii_access_count=pii_count,
+            time_range=(min(timestamps), max(timestamps)) if timestamps else (0, 0)
+        )
+
+    def verify_integrity(
+        self,
+        entity_type: str,
+        entity_id: str,
+        expected_hash: str
+    ) -> bool:
+        """
+        Verify entity data integrity.
+
+        Args:
+            entity_type: Entity type.
+            entity_id: Entity ID.
+            expected_hash: Expected hash value.
+
+        Returns:
+            True if integrity verified.
+        """
+        history = self.get_entity_history(entity_type, entity_id)
+
+        if not history:
+            return False
+
+        combined = "|".join(str(e.timestamp) for e in history)
+        actual_hash = hashlib.sha256(combined.encode()).hexdigest()
+
+        return actual_hash == expected_hash
+
+    def export_audit_log(
+        self,
+        path: str,
+        format: str = "json",
+        since: Optional[float] = None
+    ) -> None:
+        """
+        Export audit log to file.
+
+        Args:
+            path: Output file path.
+            format: Export format (json/csv).
+            since: Export entries since timestamp.
+        """
+        entries = self._entries
+
+        if since:
+            entries = [e for e in entries if e.timestamp >= since]
+
+        if format == "json":
+            import json
+            data = [
+                {
+                    "entry_id": e.entry_id,
+                    "event_type": e.event_type.value,
+                    "entity_type": e.entity_type,
+                    "entity_id": e.entity_id,
+                    "user": e.user,
+                    "timestamp": e.timestamp,
+                    "changes": e.changes,
+                    "pii_accessed": e.pii_accessed,
+                    "metadata": e.metadata
+                }
+                for e in entries
             ]
-        
-        report = {
-            'period': {
-                'start': datetime.fromtimestamp(start_time).isoformat(),
-                'end': datetime.fromtimestamp(end_time).isoformat()
-            },
-            'total_events': len(events),
-            'summary': {}
+            with open(path, "w") as f:
+                json.dump(data, f, indent=2)
+
+        logger.info(f"Exported {len(entries)} audit entries to {path}")
+
+    def _compact(self) -> None:
+        """Compact old entries."""
+        keep = self._max_entries // 2
+        self._entries = self._entries[-keep:]
+        self._rebuild_index()
+
+    def _rebuild_index(self) -> None:
+        """Rebuild entity index after compaction."""
+        self._entity_index.clear()
+
+        for i, entry in enumerate(self._entries):
+            key = f"{entry.entity_type}:{entry.entity_id}"
+            if key not in self._entity_index:
+                self._entity_index[key] = []
+            self._entity_index[key].append(i)
+
+    def get_stats(self) -> dict:
+        """Get audit statistics."""
+        return {
+            "total_entries": len(self._entries),
+            "pii_fields_registered": len(self._pii_fields),
+            "entities_tracked": len(self._entity_index),
+            "max_entries": self._max_entries
         }
-        
-        if group_by == 'action':
-            action_counts = {}
-            for event in events:
-                action = event.action or 'unknown'
-                action_counts[action] = action_counts.get(action, 0) + 1
-            report['summary']['by_action'] = action_counts
-        elif group_by == 'actor':
-            actor_counts = {}
-            for event in events:
-                actor = event.actor or 'unknown'
-                actor_counts[actor] = actor_counts.get(actor, 0) + 1
-            report['summary']['by_actor'] = actor_counts
-        elif group_by == 'resource':
-            resource_counts = {}
-            for event in events:
-                resource = event.resource or 'unknown'
-                resource_counts[resource] = resource_counts.get(resource, 0) + 1
-            report['summary']['by_resource'] = resource_counts
-        
-        result_counts = {'success': 0, 'failure': 0}
-        for event in events:
-            if event.result in result_counts:
-                result_counts[event.result] += 1
-        report['summary']['by_result'] = result_counts
-        
-        return ActionResult(
-            success=True,
-            message=f"Generated audit report for period",
-            data=report
-        )
-    
-    def _archive_events(
-        self,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Archive old audit events."""
-        before_time = params.get('before_time', time.time() - 86400 * 30)
-        
-        with self._lock:
-            to_archive = [e for e in self._audit_log if e.timestamp < before_time]
-            remaining = [e for e in self._audit_log if e.timestamp >= before_time]
-            
-            archived_data = [e.to_dict() for e in to_archive]
-            self._audit_log = remaining
-        
-        return ActionResult(
-            success=True,
-            message=f"Archived {len(to_archive)} events",
-            data={
-                'archived_count': len(to_archive),
-                'remaining_count': len(remaining),
-                'archived_data': archived_data
-            }
-        )
-    
-    def _purge_old_events(
-        self,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Purge events older than retention period."""
-        retention_days = params.get('retention_days', self._retention_days)
-        cutoff_time = time.time() - (retention_days * 86400)
-        
-        with self._lock:
-            before_count = len(self._audit_log)
-            self._audit_log = [
-                e for e in self._audit_log if e.timestamp >= cutoff_time
-            ]
-            purged_count = before_count - len(self._audit_log)
-        
-        return ActionResult(
-            success=True,
-            message=f"Purged {purged_count} events older than {retention_days} days",
-            data={
-                'purged_count': purged_count,
-                'remaining_count': len(self._audit_log)
-            }
-        )
-    
-    def _get_summary(
-        self,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Get audit log summary."""
-        with self._lock:
-            total = len(self._audit_log)
-            
-            actors = set(e.actor for e in self._audit_log)
-            resources = set(e.resource for e in self._audit_log)
-            actions = set(e.action for e in self._audit_log)
-            
-            result_counts = {}
-            for event in self._audit_log:
-                result_counts[event.result] = result_counts.get(event.result, 0) + 1
-            
-            oldest = min((e.timestamp for e in self._audit_log), default=None)
-            newest = max((e.timestamp for e in self._audit_log), default=None)
-        
-        return ActionResult(
-            success=True,
-            message=f"Audit summary: {total} events",
-            data={
-                'total_events': total,
-                'unique_actors': len(actors),
-                'unique_resources': len(resources),
-                'unique_actions': len(actions),
-                'by_result': result_counts,
-                'oldest_event': datetime.fromtimestamp(oldest).isoformat() if oldest else None,
-                'newest_event': datetime.fromtimestamp(newest).isoformat() if newest else None
-            }
-        )
+
+    def clear(self) -> None:
+        """Clear all audit entries."""
+        self._entries.clear()
+        self._entity_index.clear()

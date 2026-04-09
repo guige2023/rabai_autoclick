@@ -1,486 +1,309 @@
-"""Data Fingerprint Action Module.
+"""
+Data Fingerprint Action Module.
 
-Provides data fingerprinting, deduplication, and
-content-addressable storage for datasets.
+Data fingerprinting and deduplication with multiple
+hashing algorithms, similarity detection, and chunking.
 """
 
-from typing import Any, Dict, List, Optional, Callable, Tuple
+import hashlib
 from dataclasses import dataclass, field
 from enum import Enum
-import hashlib
-import json
-import csv
-import io
-from datetime import datetime
+from typing import Any, Callable, Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 
-class ContentType(Enum):
-    """Supported content types for fingerprinting."""
-    JSON = "json"
-    CSV = "csv"
-    TEXT = "text"
-    BINARY = "binary"
-    STRUCTURED = "structured"
-
-
-@dataclass
-class DataFingerprint:
-    """Fingerprint for a data record."""
-    content_hash: str
-    algorithm: str
-    content_type: ContentType
-    size_bytes: int
-    created_at: datetime = field(default_factory=datetime.now)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+class HashAlgorithm(Enum):
+    """Supported hashing algorithms."""
+    MD5 = "md5"
+    SHA1 = "sha1"
+    SHA256 = "sha256"
+    SHA512 = "sha512"
+    xxHASH = "xxhash"
 
 
 @dataclass
-class Record:
-    """A data record with fingerprint."""
-    id: str
-    fingerprint: DataFingerprint
-    content: Any
-    created_at: datetime = field(default_factory=datetime.now)
-    tags: List[str] = field(default_factory=list)
+class Fingerprint:
+    """
+    Data fingerprint.
+
+    Attributes:
+        hash_value: Hash of the data.
+        algorithm: Hash algorithm used.
+        chunk_count: Number of chunks (for chunked fingerprinting).
+        size_bytes: Original data size.
+    """
+    hash_value: str
+    algorithm: HashAlgorithm
+    chunk_count: int = 1
+    size_bytes: int = 0
 
 
 @dataclass
-class DatasetFingerprint:
-    """Fingerprint for an entire dataset."""
-    record_count: int
-    total_size_bytes: int
-    algorithm: str
-    dataset_hash: str
-    record_hashes: List[str] = field(default_factory=list)
-    created_at: datetime = field(default_factory=datetime.now)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-
-class ContentHasher:
-    """Hashes various content types."""
-
-    def __init__(self, algorithm: str = "sha256"):
-        self.algorithm = algorithm
-
-    def hash_bytes(self, data: bytes) -> str:
-        """Hash bytes directly."""
-        if self.algorithm == "md5":
-            return hashlib.md5(data).hexdigest()
-        elif self.algorithm == "sha1":
-            return hashlib.sha1(data).hexdigest()
-        elif self.algorithm == "sha256":
-            return hashlib.sha256(data).hexdigest()
-        elif self.algorithm == "blake2b":
-            return hashlib.blake2b(data).hexdigest()
-        return hashlib.sha256(data).hexdigest()
-
-    def hash_json(self, data: Any, sort_keys: bool = True) -> str:
-        """Hash JSON-serializable data."""
-        json_str = json.dumps(data, sort_keys=sort_keys, default=str)
-        return self.hash_bytes(json_str.encode('utf-8'))
-
-    def hash_csv(self, data: List[Dict[str, Any]]) -> str:
-        """Hash CSV data."""
-        if not data:
-            return self.hash_bytes(b"")
-
-        output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=data[0].keys())
-        writer.writeheader()
-        for row in data:
-            writer.writerow(row)
-
-        return self.hash_bytes(output.getvalue().encode('utf-8'))
-
-    def hash_text(self, text: str) -> str:
-        """Hash text content."""
-        return self.hash_bytes(text.encode('utf-8'))
-
-    def hash_record(self, record: Dict[str, Any]) -> str:
-        """Hash a structured record."""
-        return self.hash_json(record)
-
-
-class DataFingerprinter:
-    """Generates fingerprints for data records."""
-
-    def __init__(self, hasher: Optional[ContentHasher] = None):
-        self.hasher = hasher or ContentHasher()
-
-    def fingerprint_json(
-        self,
-        data: Any,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> DataFingerprint:
-        """Fingerprint JSON data."""
-        content_bytes = json.dumps(data, sort_keys=True, default=str).encode('utf-8')
-        return DataFingerprint(
-            content_hash=self.hasher.hash_bytes(content_bytes),
-            algorithm=self.hasher.algorithm,
-            content_type=ContentType.JSON,
-            size_bytes=len(content_bytes),
-            metadata=metadata or {},
-        )
-
-    def fingerprint_csv(
-        self,
-        data: List[Dict[str, Any]],
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> DataFingerprint:
-        """Fingerprint CSV data."""
-        content_bytes = json.dumps(data, sort_keys=True, default=str).encode('utf-8')
-        return DataFingerprint(
-            content_hash=self.hasher.hash_bytes(content_bytes),
-            algorithm=self.hasher.algorithm,
-            content_type=ContentType.CSV,
-            size_bytes=len(content_bytes),
-            metadata=metadata or {},
-        )
-
-    def fingerprint_text(
-        self,
-        text: str,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> DataFingerprint:
-        """Fingerprint text content."""
-        content_bytes = text.encode('utf-8')
-        return DataFingerprint(
-            content_hash=self.hasher.hash_bytes(content_bytes),
-            algorithm=self.hasher.algorithm,
-            content_type=ContentType.TEXT,
-            size_bytes=len(content_bytes),
-            metadata=metadata or {},
-        )
-
-    def fingerprint_record(
-        self,
-        record: Dict[str, Any],
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> DataFingerprint:
-        """Fingerprint a structured record."""
-        content_hash = self.hasher.hash_record(record)
-        content_bytes = json.dumps(record, sort_keys=True, default=str).encode('utf-8')
-        return DataFingerprint(
-            content_hash=content_hash,
-            algorithm=self.hasher.algorithm,
-            content_type=ContentType.STRUCTURED,
-            size_bytes=len(content_bytes),
-            metadata=metadata or {},
-        )
-
-
-class DataDeduplicator:
-    """Deduplicates data records based on fingerprints."""
-
-    def __init__(self):
-        self._seen_hashes: Dict[str, List[str]] = {}
-        self._duplicate_count: int = 0
-
-    def is_duplicate(
-        self,
-        fingerprint: DataFingerprint,
-        record_id: Optional[str] = None,
-    ) -> bool:
-        """Check if fingerprint has been seen."""
-        content_hash = fingerprint.content_hash
-
-        if content_hash not in self._seen_hashes:
-            self._seen_hashes[content_hash] = []
-            return False
-
-        if record_id and record_id in self._seen_hashes[content_hash]:
-            return True
-
-        self._duplicate_count += 1
-        return True
-
-    def add(
-        self,
-        fingerprint: DataFingerprint,
-        record_id: Optional[str] = None,
-    ):
-        """Record a fingerprint as seen."""
-        content_hash = fingerprint.content_hash
-        if content_hash not in self._seen_hashes:
-            self._seen_hashes[content_hash] = []
-        if record_id:
-            self._seen_hashes[content_hash].append(record_id)
-
-    def get_duplicate_groups(
-        self,
-    ) -> Dict[str, List[str]]:
-        """Get all duplicate groups."""
-        return {
-            hash_val: ids
-            for hash_val, ids in self._seen_hashes.items()
-            if len(ids) > 1
-        }
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Get deduplication statistics."""
-        total_unique = len(self._seen_hashes)
-        total_duplicates = self._duplicate_count
-        return {
-            "unique_hashes": total_unique,
-            "duplicate_count": total_duplicates,
-            "deduplication_rate": (
-                total_duplicates / (total_unique + total_duplicates)
-                if total_unique + total_duplicates > 0 else 0
-            ),
-        }
-
-    def reset(self):
-        """Reset deduplication state."""
-        self._seen_hashes.clear()
-        self._duplicate_count = 0
-
-
-class ContentAddressableStore:
-    """Content-addressable storage for data records."""
-
-    def __init__(self, max_size: int = 10000):
-        self._storage: Dict[str, Record] = {}
-        self._max_size = max_size
-        self._access_times: Dict[str, datetime] = {}
-
-    def put(
-        self,
-        record_id: str,
-        fingerprint: DataFingerprint,
-        content: Any,
-        tags: Optional[List[str]] = None,
-    ) -> bool:
-        """Store a record."""
-        if fingerprint.content_hash in self._storage:
-            return False
-
-        if len(self._storage) >= self._max_size:
-            self._evict_oldest()
-
-        record = Record(
-            id=record_id,
-            fingerprint=fingerprint,
-            content=content,
-            tags=tags or [],
-        )
-        self._storage[fingerprint.content_hash] = record
-        self._access_times[fingerprint.content_hash] = datetime.now()
-        return True
-
-    def get(self, fingerprint: DataFingerprint) -> Optional[Record]:
-        """Retrieve a record by fingerprint."""
-        record = self._storage.get(fingerprint.content_hash)
-        if record:
-            self._access_times[fingerprint.content_hash] = datetime.now()
-        return record
-
-    def get_by_id(self, record_id: str) -> Optional[Record]:
-        """Retrieve a record by ID."""
-        for record in self._storage.values():
-            if record.id == record_id:
-                self._access_times[record.fingerprint.content_hash] = datetime.now()
-                return record
-        return None
-
-    def contains(self, fingerprint: DataFingerprint) -> bool:
-        """Check if fingerprint exists."""
-        return fingerprint.content_hash in self._storage
-
-    def delete(self, fingerprint: DataFingerprint) -> bool:
-        """Delete a record."""
-        if fingerprint.content_hash in self._storage:
-            del self._storage[fingerprint.content_hash]
-            del self._access_times[fingerprint.content_hash]
-            return True
-        return False
-
-    def _evict_oldest(self):
-        """Evict least recently accessed record."""
-        if not self._storage:
-            return
-        oldest_hash = min(
-            self._access_times.keys(),
-            key=lambda h: self._access_times[h]
-        )
-        del self._storage[oldest_hash]
-        del self._access_times[oldest_hash]
-
-    def clear(self):
-        """Clear all records."""
-        self._storage.clear()
-        self._access_times.clear()
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Get storage statistics."""
-        total_size = sum(
-            r.fingerprint.size_bytes for r in self._storage.values()
-        )
-        return {
-            "record_count": len(self._storage),
-            "max_size": self._max_size,
-            "total_bytes": total_size,
-            "utilization": len(self._storage) / self._max_size * 100,
-        }
-
-
-class DatasetFingerprinter:
-    """Fingerprints entire datasets."""
-
-    def __init__(self, hasher: Optional[ContentHasher] = None):
-        self.hasher = hasher or ContentHasher()
-        self.data_fingerprinter = DataFingerprinter(hasher)
-
-    def fingerprint_dataset(
-        self,
-        records: List[Dict[str, Any]],
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> DatasetFingerprint:
-        """Generate fingerprint for entire dataset."""
-        record_hashes = []
-        total_size = 0
-
-        for record in records:
-            fp = self.data_fingerprinter.fingerprint_record(record)
-            record_hashes.append(fp.content_hash)
-            total_size += fp.size_bytes
-
-        dataset_content = "|".join(sorted(record_hashes))
-        dataset_hash = self.hasher.hash_bytes(dataset_content.encode('utf-8'))
-
-        return DatasetFingerprint(
-            record_count=len(records),
-            total_size_bytes=total_size,
-            algorithm=self.hasher.algorithm,
-            dataset_hash=dataset_hash,
-            record_hashes=record_hashes,
-            metadata=metadata or {},
-        )
-
-    def detect_dataset_changes(
-        self,
-        old_dataset: DatasetFingerprint,
-        new_records: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        """Detect changes between dataset fingerprints."""
-        new_fp = self.fingerprint_dataset(new_records)
-
-        added = []
-        removed = []
-        unchanged = []
-
-        old_hashes = set(old_dataset.record_hashes)
-        new_hashes = set(new_fp.record_hashes)
-
-        for hash_val in old_dataset.record_hashes:
-            if hash_val not in new_hashes:
-                removed.append(hash_val)
-
-        for hash_val in new_fp.record_hashes:
-            if hash_val not in old_hashes:
-                added.append(hash_val)
-            else:
-                unchanged.append(hash_val)
-
-        return {
-            "changed": old_dataset.dataset_hash != new_fp.dataset_hash,
-            "added_count": len(added),
-            "removed_count": len(removed),
-            "unchanged_count": len(unchanged),
-            "added": added[:10],
-            "removed": removed[:10],
-        }
+class SimilarityMatch:
+    """Similarity match result."""
+    fingerprint1: str
+    fingerprint2: str
+    similarity_score: float
+    match_type: str
 
 
 class DataFingerprintAction:
-    """High-level data fingerprinting action."""
+    """
+    Data fingerprinting and deduplication.
 
-    def __init__(
-        self,
-        fingerprinter: Optional[DataFingerprinter] = None,
-        deduplicator: Optional[DataDeduplicator] = None,
-        cas: Optional[ContentAddressableStore] = None,
-        dataset_fingerprinter: Optional[DatasetFingerprinter] = None,
-    ):
-        self.fingerprinter = fingerprinter or DataFingerprinter()
-        self.deduplicator = deduplicator or DataDeduplicator()
-        self.cas = cas or ContentAddressableStore()
-        self.dataset_fingerprinter = dataset_fingerprinter or DatasetFingerprinter()
+    Example:
+        fingerprinter = DataFingerprintAction()
+        fp = fingerprinter.fingerprint(data, algorithm=HashAlgorithm.SHA256)
+        fingerprinter.is_duplicate(fp)
+    """
+
+    def __init__(self):
+        """Initialize data fingerprint action."""
+        self._fingerprints: dict[str, Fingerprint] = {}
+        self._seen_hashes: set = set()
 
     def fingerprint(
         self,
         data: Any,
-        content_type: str = "json",
-    ) -> DataFingerprint:
-        """Fingerprint data based on content type."""
-        if content_type == "json":
-            return self.fingerprinter.fingerprint_json(data)
-        elif content_type == "csv":
-            return self.fingerprinter.fingerprint_csv(data)
-        elif content_type == "text":
-            return self.fingerprinter.fingerprint_text(data)
+        algorithm: HashAlgorithm = HashAlgorithm.SHA256,
+        chunk_size: Optional[int] = None
+    ) -> Fingerprint:
+        """
+        Generate fingerprint for data.
+
+        Args:
+            data: Data to fingerprint.
+            algorithm: Hash algorithm to use.
+            chunk_size: Chunk size for large data (None for single hash).
+
+        Returns:
+            Fingerprint object.
+        """
+        if isinstance(data, str):
+            data_bytes = data.encode("utf-8")
+        elif isinstance(data, bytes):
+            data_bytes = data
         else:
-            return self.fingerprinter.fingerprint_json(data)
+            data_bytes = str(data).encode("utf-8")
 
-    def deduplicate(
+        size_bytes = len(data_bytes)
+
+        if chunk_size and size_bytes > chunk_size:
+            hash_value, chunk_count = self._chunked_hash(data_bytes, algorithm, chunk_size)
+        else:
+            hash_value = self._hash_bytes(data_bytes, algorithm)
+            chunk_count = 1
+
+        fp = Fingerprint(
+            hash_value=hash_value,
+            algorithm=algorithm,
+            chunk_count=chunk_count,
+            size_bytes=size_bytes
+        )
+
+        self._fingerprints[hash_value] = fp
+        self._seen_hashes.add(hash_value)
+
+        return fp
+
+    def _hash_bytes(
         self,
-        records: List[Dict[str, Any]],
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Deduplicate records, returning unique and duplicate lists."""
-        unique = []
-        duplicates = []
+        data: bytes,
+        algorithm: HashAlgorithm
+    ) -> str:
+        """Hash bytes with specified algorithm."""
+        if algorithm == HashAlgorithm.MD5:
+            return hashlib.md5(data).hexdigest()
+        elif algorithm == HashAlgorithm.SHA1:
+            return hashlib.sha1(data).hexdigest()
+        elif algorithm == HashAlgorithm.SHA256:
+            return hashlib.sha256(data).hexdigest()
+        elif algorithm == HashAlgorithm.SHA512:
+            return hashlib.sha512(data).hexdigest()
+        elif algorithm == HashAlgorithm.xxHASH:
+            try:
+                import xxhash
+                return xxhash.xxh64(data).hexdigest()
+            except ImportError:
+                return hashlib.sha256(data).hexdigest()
 
-        for record in records:
-            fp = self.fingerprinter.fingerprint_record(record)
-            if not self.deduplicator.is_duplicate(fp):
-                unique.append(record)
-                self.deduplicator.add(fp)
-            else:
-                duplicates.append(record)
+        return hashlib.sha256(data).hexdigest()
 
-        return unique, duplicates
-
-    def store(
+    def _chunked_hash(
         self,
-        record_id: str,
-        data: Any,
-        tags: Optional[List[str]] = None,
-    ) -> bool:
-        """Store data in CAS."""
-        fp = self.fingerprinter.fingerprint_json(data)
-        return self.cas.put(record_id, fp, data, tags)
+        data: bytes,
+        algorithm: HashAlgorithm,
+        chunk_size: int
+    ) -> tuple[str, int]:
+        """Hash data in chunks (for large data)."""
+        chunk_hashes = []
 
-    def get(self, fingerprint: DataFingerprint) -> Optional[Any]:
-        """Retrieve data from CAS."""
-        record = self.cas.get(fingerprint)
-        return record.content if record else None
+        for i in range(0, len(data), chunk_size):
+            chunk = data[i:i + chunk_size]
+            chunk_hash = self._hash_bytes(chunk, algorithm)
+            chunk_hashes.append(chunk_hash)
 
-    def fingerprint_dataset(
+        combined = "".join(chunk_hashes).encode()
+        total_hash = self._hash_bytes(combined, HashAlgorithm.SHA256)
+
+        return total_hash, len(chunk_hashes)
+
+    def is_duplicate(
         self,
-        records: List[Dict[str, Any]],
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> DatasetFingerprint:
-        """Fingerprint entire dataset."""
-        return self.dataset_fingerprinter.fingerprint_dataset(records, metadata)
+        fingerprint: Fingerprint,
+        check_similar: bool = False
+    ) -> tuple[bool, Optional[str]]:
+        """
+        Check if fingerprint is duplicate.
 
-    def get_dedup_stats(self) -> Dict[str, Any]:
-        """Get deduplication statistics."""
-        return self.deduplicator.get_stats()
+        Args:
+            fingerprint: Fingerprint to check.
+            check_similar: Also check for similar fingerprints.
 
-    def get_storage_stats(self) -> Dict[str, Any]:
-        """Get storage statistics."""
-        return self.cas.get_stats()
+        Returns:
+            Tuple of (is_duplicate, original_hash).
+        """
+        if fingerprint.hash_value in self._seen_hashes:
+            for hash_val, fp in self._fingerprints.items():
+                if fp.hash_value == fingerprint.hash_value and hash_val != fingerprint.hash_value:
+                    return True, hash_val
 
+        return False, None
 
-# Module exports
-__all__ = [
-    "DataFingerprintAction",
-    "DataFingerprinter",
-    "DatasetFingerprinter",
-    "DataDeduplicator",
-    "ContentAddressableStore",
-    "ContentHasher",
-    "DataFingerprint",
-    "DatasetFingerprint",
-    "Record",
-    "ContentType",
-]
+    def find_similar(
+        self,
+        fingerprint: Fingerprint,
+        threshold: float = 0.9
+    ) -> list[SimilarityMatch]:
+        """
+        Find similar fingerprints.
+
+        Args:
+            fingerprint: Fingerprint to compare.
+            threshold: Similarity threshold (0-1).
+
+        Returns:
+            List of SimilarityMatch objects.
+        """
+        matches = []
+
+        for hash_val, fp in self._fingerprints.items():
+            if hash_val == fingerprint.hash_value:
+                continue
+
+            score = self._calculate_similarity(fingerprint, fp)
+
+            if score >= threshold:
+                matches.append(SimilarityMatch(
+                    fingerprint1=fingerprint.hash_value,
+                    fingerprint2=hash_val,
+                    similarity_score=score,
+                    match_type="partial" if score < 1.0 else "exact"
+                ))
+
+        return matches
+
+    def _calculate_similarity(
+        self,
+        fp1: Fingerprint,
+        fp2: Fingerprint
+    ) -> float:
+        """Calculate similarity between two fingerprints."""
+        if fp1.size_bytes == 0 or fp2.size_bytes == 0:
+            return 0.0
+
+        size_ratio = min(fp1.size_bytes, fp2.size_bytes) / max(fp1.size_bytes, fp2.size_bytes)
+
+        hash_distance = self._hamming_distance(fp1.hash_value, fp2.hash_value)
+        max_distance = len(fp1.hash_value) * 4
+
+        hash_similarity = 1.0 - (hash_distance / max_distance)
+
+        return (size_ratio + hash_similarity) / 2.0
+
+    def _hamming_distance(self, hash1: str, hash2: str) -> int:
+        """Calculate Hamming distance between two hashes."""
+        if len(hash1) != len(hash2):
+            return abs(len(hash1) - len(hash2)) * 4
+
+        distance = 0
+        for c1, c2 in zip(hash1, hash2):
+            if c1 != c2:
+                distance += 1
+
+        return distance
+
+    def dedupe_list(
+        self,
+        items: list,
+        key_func: Optional[Callable[[Any], Any]] = None
+    ) -> list:
+        """
+        Deduplicate list while preserving order.
+
+        Args:
+            items: List of items.
+            key_func: Optional function to extract comparison key.
+
+        Returns:
+            Deduplicated list.
+        """
+        seen = set()
+        result = []
+
+        for item in items:
+            key = key_func(item) if key_func else item
+
+            if key not in seen:
+                seen.add(key)
+                result.append(item)
+
+        logger.info(f"Deduplicated {len(items)} -> {len(result)} items")
+        return result
+
+    def content_define_chunking(
+        self,
+        data: bytes,
+        chunk_min: int = 512,
+        chunk_max: int = 4096
+    ) -> list[tuple[int, bytes]]:
+        """
+        Content-defined chunking (CDC) for deduplication.
+
+        Args:
+            data: Data to chunk.
+            chunk_min: Minimum chunk size.
+            chunk_max: Maximum chunk size.
+
+        Returns:
+            List of (offset, chunk_data) tuples.
+        """
+        chunks = []
+        i = 0
+
+        while i < len(data):
+            chunk_end = min(i + chunk_max, len(data))
+
+            if chunk_end - i < chunk_min:
+                chunk_end = min(i + chunk_min, len(data))
+
+            chunk = data[i:chunk_end]
+            chunks.append((i, chunk))
+
+            i = chunk_end
+
+        return chunks
+
+    def get_stats(self) -> dict:
+        """Get fingerprint statistics."""
+        return {
+            "total_fingerprints": len(self._fingerprints),
+            "unique_hashes": len(self._seen_hashes)
+        }
+
+    def clear(self) -> None:
+        """Clear all fingerprints."""
+        self._fingerprints.clear()
+        self._seen_hashes.clear()
