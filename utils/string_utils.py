@@ -1,505 +1,302 @@
-"""String utilities for RabAI AutoClick.
+"""String manipulation and text processing utilities.
 
-Provides:
-- String manipulation helpers
-- Text cleaning and formatting
-- Pattern matching utilities
+Provides text transformation, sanitization, and
+common string operations for automation.
 """
 
+import hashlib
 import re
 import unicodedata
-from typing import List, Optional, Callable
+from typing import Any, Callable, Dict, List, Optional, Pattern, Union
 
 
-def capitalize(text: str) -> str:
-    """Capitalize first letter of string.
+def slugify(
+    text: str,
+    max_length: int = 0,
+    lowercase: bool = True,
+    separator: str = "-",
+) -> str:
+    """Convert text to URL-friendly slug.
 
-    Args:
-        text: Input string.
-
-    Returns:
-        Capitalized string.
+    Example:
+        slugify("Hello World!")  # "hello-world"
     """
-    if not text:
-        return text
-    return text[0].upper() + text[1:]
+    text = unicodedata.normalize("NFKD", text)
+    text = re.sub(r"[^\w\s-]", "", text)
+    text = re.sub(r"[-\s]+", separator, text).strip(separator)
 
+    if lowercase:
+        text = text.lower()
 
-def title_case(text: str) -> str:
-    """Convert string to title case.
+    if max_length > 0 and len(text) > max_length:
+        text = text[:max_length].rsplit(separator, 1)[0]
 
-    Args:
-        text: Input string.
-
-    Returns:
-        Title cased string.
-    """
-    return text.title()
-
-
-def snake_to_camel(text: str) -> str:
-    """Convert snake_case to camelCase.
-
-    Args:
-        text: Snake case string.
-
-    Returns:
-        Camel case string.
-    """
-    components = text.split('_')
-    return components[0] + ''.join(x.title() for x in components[1:])
+    return text
 
 
 def camel_to_snake(text: str) -> str:
     """Convert camelCase to snake_case.
 
-    Args:
-        text: Camel case string.
-
-    Returns:
-        Snake case string.
+    Example:
+        camel_to_snake("camelCase")  # "camel_case"
     """
-    pattern = re.compile(r'(?<!^)(?=[A-Z])')
-    return pattern.sub('_', text).lower()
+    text = re.sub("(.)([A-Z][a-z]+)", r"\1_\2", text)
+    text = re.sub("([a-z0-9])([A-Z])", r"\1_\2", text)
+    return text.lower()
 
 
-def kebab_to_snake(text: str) -> str:
-    """Convert kebab-case to snake_case.
+def snake_to_camel(text: str, capitalize_first: bool = False) -> str:
+    """Convert snake_case to camelCase.
 
-    Args:
-        text: Kebab case string.
-
-    Returns:
-        Snake case string.
+    Example:
+        snake_to_camel("snake_case")  # "snakeCase"
+        snake_to_camel("snake_case", capitalize_first=True)  # "SnakeCase"
     """
-    return text.replace('-', '_')
+    components = text.split("_")
+    result = components[0]
+    if not capitalize_first:
+        result = components[0]
+    result += "".join(x.title() for x in components[1:])
+    return result
 
 
-def snake_to_kebab(text: str) -> str:
-    """Convert snake_case to kebab-case.
+def pascal_case(text: str) -> str:
+    """Convert text to PascalCase.
 
-    Args:
-        text: Snake case string.
-
-    Returns:
-        Kebab case string.
+    Example:
+        pascal_case("hello world")  # "HelloWorld"
     """
-    return text.replace('_', '-')
+    words = re.findall(r"[A-Z][a-z]*|[a-z]+", text.title())
+    return "".join(words)
 
 
-def strip_whitespace(text: str) -> str:
-    """Strip all whitespace from string.
+def kebab_case(text: str) -> str:
+    """Convert text to kebab-case.
 
-    Args:
-        text: Input string.
-
-    Returns:
-        String with whitespace removed.
+    Example:
+        kebab_case("Hello World")  # "hello-world"
     """
-    return ''.join(text.split())
+    return slugify(text, separator="-")
 
 
-def normalize_whitespace(text: str) -> str:
-    """Normalize whitespace to single spaces.
+def title_case(text: str) -> str:
+    """Convert text to Title Case.
 
-    Args:
-        text: Input string.
-
-    Returns:
-        String with normalized whitespace.
+    Example:
+        title_case("hello world")  # "Hello World"
     """
-    return ' '.join(text.split())
+    return text.title()
 
 
-def truncate(text: str, max_length: int, suffix: str = "...") -> str:
-    """Truncate string to max length.
+def truncate(
+    text: str,
+    max_length: int,
+    suffix: str = "...",
+) -> str:
+    """Truncate text with suffix.
 
-    Args:
-        text: Input string.
-        max_length: Maximum length.
-        suffix: Suffix to append if truncated.
-
-    Returns:
-        Truncated string.
+    Example:
+        truncate("Hello World", 8)  # "Hello..."
     """
     if len(text) <= max_length:
         return text
     return text[:max_length - len(suffix)] + suffix
 
 
-def remove_prefix(text: str, prefix: str) -> str:
-    """Remove prefix from string.
+def strip_html(text: str) -> str:
+    """Remove HTML tags from text.
 
-    Args:
-        text: Input string.
-        prefix: Prefix to remove.
-
-    Returns:
-        String without prefix.
+    Example:
+        strip_html("<p>Hello <b>World</b></p>")  # "Hello World"
     """
-    if text.startswith(prefix):
-        return text[len(prefix):]
-    return text
+    return re.sub(r"<[^>]+>", "", text)
 
 
-def remove_suffix(text: str, suffix: str) -> str:
-    """Remove suffix from string.
+def remove_whitespace(text: str) -> str:
+    """Remove all whitespace from text.
 
-    Args:
-        text: Input string.
-        suffix: Suffix to remove.
-
-    Returns:
-        String without suffix.
+    Example:
+        remove_whitespace("hello   world")  # "helloworld"
     """
-    if text.endswith(suffix):
-        return text[:-len(suffix)]
-    return text
+    return re.sub(r"\s+", "", text)
 
 
-def is_blank(text: str) -> bool:
-    """Check if string is blank (empty or whitespace only).
+def normalize_whitespace(text: str) -> str:
+    """Normalize whitespace to single spaces.
 
-    Args:
-        text: Input string.
-
-    Returns:
-        True if blank.
+    Example:
+        normalize_whitespace("hello    world")  # "hello world"
     """
-    return not text or text.isspace()
+    return re.sub(r"\s+", " ", text).strip()
 
 
-def is_numeric(text: str) -> bool:
-    """Check if string contains only numeric characters.
+def remove_accents(text: str) -> str:
+    """Remove accents from text.
 
-    Args:
-        text: Input string.
-
-    Returns:
-        True if numeric.
+    Example:
+        remove_accents("café")  # "cafe"
     """
-    return text.isdigit()
+    nfd = unicodedata.normalize("NFD", text)
+    return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
 
 
-def is_alpha(text: str) -> bool:
-    """Check if string contains only alphabetic characters.
+def extract_numbers(text: str) -> List[float]:
+    """Extract all numbers from text.
 
-    Args:
-        text: Input string.
-
-    Returns:
-        True if alphabetic.
+    Example:
+        extract_numbers("abc 123 def 45.6")  # [123.0, 45.6]
     """
-    return text.isalpha()
+    return [float(x) for x in re.findall(r"-?\d+\.?\d*", text)]
 
 
-def is_alphanumeric(text: str) -> bool:
-    """Check if string contains only alphanumeric characters.
+def extract_words(text: str, min_length: int = 1) -> List[str]:
+    """Extract words from text.
 
-    Args:
-        text: Input string.
-
-    Returns:
-        True if alphanumeric.
+    Example:
+        extract_words("Hello, World!")  # ["Hello", "World"]
     """
-    return text.isalnum()
+    words = re.findall(r"\b[a-zA-Z]+\b", text)
+    if min_length > 1:
+        words = [w for w in words if len(w) >= min_length]
+    return words
 
 
-def count_words(text: str) -> int:
-    """Count words in string.
+def mask_sensitive(
+    text: str,
+    pattern: str = r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b",
+    replacement: str = "****-****-****-****",
+) -> str:
+    """Mask sensitive patterns like credit card numbers.
 
-    Args:
-        text: Input string.
-
-    Returns:
-        Word count.
+    Example:
+        mask_sensitive("Card: 1234-5678-9012-3456")  # "Card: ****-****-****-****"
     """
-    return len(text.split())
+    return re.sub(pattern, replacement, text)
 
 
-def reverse_words(text: str) -> str:
-    """Reverse words in string.
+def hash_string(text: str, algorithm: str = "md5") -> str:
+    """Hash string using specified algorithm.
 
-    Args:
-        text: Input string.
-
-    Returns:
-        String with reversed words.
+    Example:
+        hash_string("password")  # "5f4dcc3b5aa765d61d8327deb882cf99"
     """
-    return ' '.join(text.split()[::-1])
+    h = hashlib.new(algorithm)
+    h.update(text.encode())
+    return h.hexdigest()
+
+
+def repeat_string(text: str, count: int, separator: str = "") -> str:
+    """Repeat string with separator.
+
+    Example:
+        repeat_string("hi", 3)  # "hihihi"
+        repeat_string("hi", 3, "-")  # "hi-hi-hi"
+    """
+    return separator.join([text] * count)
 
 
 def reverse_string(text: str) -> str:
-    """Reverse string characters.
+    """Reverse a string.
 
-    Args:
-        text: Input string.
-
-    Returns:
-        Reversed string.
+    Example:
+        reverse_string("hello")  # "olleh"
     """
     return text[::-1]
 
 
-def is_palindrome(text: str) -> bool:
-    """Check if string is a palindrome.
+def is_palindrome(text: str, ignore_case: bool = True, ignore_spaces: bool = True) -> bool:
+    """Check if text is a palindrome.
 
-    Args:
-        text: Input string.
-
-    Returns:
-        True if palindrome.
+    Example:
+        is_palindrome("A man a plan a canal Panama")  # True
     """
-    cleaned = ''.join(c.lower() for c in text if c.isalnum())
-    return cleaned == cleaned[::-1]
-
-
-def contains(text: str, substring: str, case_sensitive: bool = True) -> bool:
-    """Check if string contains substring.
-
-    Args:
-        text: Input string.
-        substring: Substring to find.
-        case_sensitive: Whether to case sensitive.
-
-    Returns:
-        True if contains.
-    """
-    if not case_sensitive:
+    if ignore_spaces:
+        text = text.replace(" ", "")
+    if ignore_case:
         text = text.lower()
-        substring = substring.lower()
-    return substring in text
+    return text == text[::-1]
 
 
-def replace_all(text: str, old: str, new: str) -> str:
-    """Replace all occurrences of substring.
+def word_count(text: str) -> int:
+    """Count words in text."""
+    return len(re.findall(r"\b\w+\b", text))
 
-    Args:
-        text: Input string.
-        old: Old substring.
-        new: New substring.
 
-    Returns:
-        String with replacements.
+def char_count(text: str, include_spaces: bool = True) -> int:
+    """Count characters in text."""
+    if include_spaces:
+        return len(text)
+    return len(text.replace(" ", ""))
+
+
+def levenshtein_distance(s1: str, s2: str) -> int:
+    """Calculate Levenshtein distance between two strings.
+
+    Example:
+        levenshtein_distance("kitten", "sitting")  # 3
     """
-    return text.replace(old, new)
+    if len(s1) < len(s2):
+        return levenshtein_distance(s2, s1)
+
+    if len(s2) == 0:
+        return len(s1)
+
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+
+    return previous_row[-1]
 
 
-def split_lines(text: str) -> List[str]:
-    """Split text into lines.
+def highlight_matches(
+    text: str,
+    pattern: Union[str, Pattern[str]],
+    prefix: str = "**",
+    suffix: str = "**",
+) -> str:
+    """Highlight pattern matches in text.
 
-    Args:
-        text: Input string.
-
-    Returns:
-        List of lines.
+    Example:
+        highlight_matches("error occurred", "error")  # "**error** occurred"
     """
-    return text.splitlines()
+    if isinstance(pattern, str):
+        pattern = re.compile(pattern, re.IGNORECASE)
+    return pattern.sub(f"{prefix}\\{pattern.pattern}\\{suffix}", text)
 
 
-def join_lines(lines: List[str]) -> str:
-    """Join lines with newlines.
+def capitalize_words(text: str, exceptions: Optional[List[str]] = None) -> str:
+    """Capitalize first letter of each word with exceptions.
 
-    Args:
-        lines: List of lines.
-
-    Returns:
-        Joined string.
+    Example:
+        capitalize_words("the quick brown fox")  # "The Quick Brown Fox"
     """
-    return '\n'.join(lines)
-
-
-def indent(text: str, spaces: int) -> str:
-    """Indent text by spaces.
-
-    Args:
-        text: Input string.
-        spaces: Number of spaces to indent.
-
-    Returns:
-        Indented string.
-    """
-    indent_str = ' ' * spaces
-    return '\n'.join(indent_str + line for line in text.splitlines())
-
-
-def unindent(text: str) -> str:
-    """Remove leading whitespace from each line.
-
-    Args:
-        text: Input string.
-
-    Returns:
-        Unindented string.
-    """
-    lines = text.splitlines()
-    if not lines:
-        return text
-    min_indent = min(len(line) - len(line.lstrip()) for line in lines if line.strip())
-    if min_indent == 0:
-        return text
-    return '\n'.join(line[min_indent:] for line in lines)
-
-
-def remove_special_chars(text: str, keep: str = "") -> str:
-    """Remove special characters from string.
-
-    Args:
-        text: Input string.
-        keep: Characters to keep.
-
-    Returns:
-        String without special characters.
-    """
-    pattern = f"[^a-zA-Z0-9{re.escape(keep)}]"
-    return re.sub(pattern, '', text)
-
-
-def normalize_unicode(text: str) -> str:
-    """Normalize unicode characters.
-
-    Args:
-        text: Input string.
-
-    Returns:
-        Normalized string.
-    """
-    return unicodedata.normalize('NFKD', text)
-
-
-def to_ascii(text: str) -> str:
-    """Convert string to ASCII, removing non-ASCII characters.
-
-    Args:
-        text: Input string.
-
-    Returns:
-        ASCII string.
-    """
-    return unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii')
-
-
-def word_wrap(text: str, width: int) -> List[str]:
-    """Wrap text to specified width.
-
-    Args:
-        text: Input string.
-        width: Maximum line width.
-
-    Returns:
-        List of wrapped lines.
-    """
+    exceptions = exceptions or ["a", "an", "the", "and", "but", "or", "in", "on", "at"]
     words = text.split()
-    lines = []
-    current_line = []
-    current_length = 0
-
-    for word in words:
-        word_len = len(word)
-        if current_length + word_len + len(current_line) <= width:
-            current_line.append(word)
-            current_length += word_len
+    result = []
+    for i, word in enumerate(words):
+        if i == 0 or word.lower() not in exceptions:
+            result.append(word.capitalize())
         else:
-            if current_line:
-                lines.append(' '.join(current_line))
-            current_line = [word]
-            current_length = word_len
-
-    if current_line:
-        lines.append(' '.join(current_line))
-
-    return lines
+            result.append(word.lower())
+    return " ".join(result)
 
 
-def extract_numbers(text: str) -> List[float]:
-    """Extract all numbers from string.
+def replace_multiple(
+    text: str,
+    replacements: Dict[str, str],
+) -> str:
+    """Replace multiple substrings in text.
 
-    Args:
-        text: Input string.
-
-    Returns:
-        List of numbers.
+    Example:
+        replace_multiple("hello world", {"hello": "hi", "world": "there"})
+        # "hi there"
     """
-    pattern = r'-?\d+\.?\d*'
-    matches = re.findall(pattern, text)
-    return [float(m) for m in matches]
-
-
-def extract_words(text: str) -> List[str]:
-    """Extract all words from string.
-
-    Args:
-        text: Input string.
-
-    Returns:
-        List of words.
-    """
-    return re.findall(r'\b[a-zA-Z]+\b', text)
-
-
-def filter_chars(text: str, condition: Callable[[str], bool]) -> str:
-    """Filter characters based on condition.
-
-    Args:
-        text: Input string.
-        condition: Function that returns True for chars to keep.
-
-    Returns:
-        Filtered string.
-    """
-    return ''.join(c for c in text if condition(c))
-
-
-def map_chars(text: str, mapper: Callable[[str], str]) -> str:
-    """Map characters using transformation function.
-
-    Args:
-        text: Input string.
-        mapper: Transformation function.
-
-    Returns:
-        Transformed string.
-    """
-    return ''.join(mapper(c) for c in text)
-
-
-def pad_left(text: str, width: int, char: str = " ") -> str:
-    """Pad string on left to reach width.
-
-    Args:
-        text: Input string.
-        width: Target width.
-        char: Character to pad with.
-
-    Returns:
-        Padded string.
-    """
-    return text.rjust(width, char)
-
-
-def pad_right(text: str, width: int, char: str = " ") -> str:
-    """Pad string on right to reach width.
-
-    Args:
-        text: Input string.
-        width: Target width.
-        char: Character to pad with.
-
-    Returns:
-        Padded string.
-    """
-    return text.ljust(width, char)
-
-
-def center_text(text: str, width: int, char: str = " ") -> str:
-    """Center text within width.
-
-    Args:
-        text: Input string.
-        width: Target width.
-        char: Character to pad with.
-
-    Returns:
-        Centered string.
-    """
-    return text.center(width, char)
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
