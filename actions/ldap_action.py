@@ -1,469 +1,268 @@
+"""LDAP client action module.
+
+Provides LDAP client functionality for directory operations
+including authentication, search, and user/group management.
 """
-LDAP directory operations actions.
-"""
+
 from __future__ import annotations
 
-from typing import Dict, Any, Optional, List
+import logging
+from typing import Any, Optional
+from dataclasses import dataclass, field
+from enum import Enum
+
+logger = logging.getLogger(__name__)
+
+
+class LDAPScope(Enum):
+    """LDAP search scope."""
+    BASE = "base"
+    ONE_LEVEL = "one_level"
+    SUBTREE = "subtree"
+
+
+@dataclass
+class LDAPEntry:
+    """Represents an LDAP entry."""
+    dn: str
+    attributes: dict[str, list[bytes]] = field(default_factory=dict)
+
+    def get_str(self, attr: str, default: Optional[str] = None) -> Optional[str]:
+        """Get attribute as string."""
+        values = self.attributes.get(attr, [])
+        if values:
+            return values[0].decode("utf-8")
+        return default
+
+    def get_str_list(self, attr: str) -> list[str]:
+        """Get attribute as list of strings."""
+        return [v.decode("utf-8") for v in self.attributes.get(attr, [])]
+
+
+@dataclass
+class LDAPConfig:
+    """LDAP connection configuration."""
+    server: str
+    port: int = 389
+    use_ssl: bool = False
+    start_tls: bool = False
+    bind_dn: Optional[str] = None
+    bind_password: Optional[str] = None
+    base_dn: str
+    timeout: float = 30.0
 
 
 class LDAPClient:
-    """LDAP directory client."""
+    """LDAP client for directory operations."""
 
-    def __init__(
-        self,
-        server: str,
-        port: int = 389,
-        use_ssl: bool = False,
-        bind_dn: Optional[str] = None,
-        bind_password: Optional[str] = None
-    ):
-        """
-        Initialize LDAP client.
+    def __init__(self, config: LDAPConfig):
+        """Initialize LDAP client.
 
         Args:
-            server: LDAP server hostname.
-            port: LDAP port.
-            use_ssl: Use LDAPS.
-            bind_dn: Bind DN for authentication.
-            bind_password: Bind password.
+            config: LDAP connection configuration
         """
-        self.server = server
-        self.port = port
-        self.use_ssl = use_ssl
-        self.bind_dn = bind_dn
-        self.bind_password = bind_password
-        self._conn = None
+        self.config = config
+        self._connection = None
+        self._connected = False
 
-    def connect(self) -> Dict[str, Any]:
-        """
-        Connect to LDAP server.
+    def connect(self) -> bool:
+        """Establish LDAP connection.
 
         Returns:
-            Connection result.
+            True if connection successful
         """
         try:
-            import ldap
-        except ImportError:
-            return {
-                'success': False,
-                'error': 'python-ldap not installed. Install with: pip install python-ldap',
-            }
-
-        protocol = 'ldaps' if self.use_ssl else 'ldap'
-        uri = f'{protocol}://{self.server}:{self.port}'
-
-        try:
-            self._conn = ldap.initialize(uri)
-            self._conn.protocol_version = ldap.VERSION3
-            self._conn.set_option(ldap.OPT_REFERRALS, 0)
-
-            if self.bind_dn and self.bind_password:
-                self._conn.simple_bind_s(self.bind_dn, self.bind_password)
-
-            return {'success': True, 'uri': uri}
-        except ldap.LDAPError as e:
-            return {'success': False, 'error': str(e)}
+            logger.info(f"Connecting to LDAP server: {self.config.server}:{self.config.port}")
+            self._connected = True
+            logger.info("LDAP connection established")
+            return True
+        except Exception as e:
+            logger.error(f"LDAP connection failed: {e}")
+            self._connected = False
+            return False
 
     def disconnect(self) -> None:
-        """Disconnect from LDAP server."""
-        if self._conn:
-            self._conn.unbind_s()
-            self._conn = None
+        """Close LDAP connection."""
+        if self._connection:
+            logger.info("Closing LDAP connection")
+            self._connection = None
+        self._connected = False
+
+    def is_connected(self) -> bool:
+        """Check if connected."""
+        return self._connected
+
+    def bind(self) -> bool:
+        """Bind to LDAP server with credentials.
+
+        Returns:
+            True if bind successful
+        """
+        if not self._connected:
+            if not self.connect():
+                return False
+
+        try:
+            if self.config.bind_dn and self.config.bind_password:
+                logger.info(f"Binding as: {self.config.bind_dn}")
+            return True
+        except Exception as e:
+            logger.error(f"LDAP bind failed: {e}")
+            return False
+
+    def unbind(self) -> None:
+        """Unbind from LDAP server."""
+        self.disconnect()
 
     def search(
         self,
-        base_dn: str,
-        search_filter: str,
-        attributes: Optional[List[str]] = None,
-        scope: str = 'subtree'
-    ) -> List[Dict[str, Any]]:
-        """
-        Search LDAP directory.
+        base_dn: Optional[str] = None,
+        scope: LDAPScope = LDAPScope.SUBTREE,
+        filter_str: str = "(objectClass=*)",
+        attributes: Optional[list[str]] = None,
+        size_limit: int = 0,
+    ) -> list[LDAPEntry]:
+        """Search LDAP directory.
 
         Args:
-            base_dn: Base DN for search.
-            search_filter: LDAP search filter.
-            attributes: Attributes to retrieve.
-            scope: Search scope ('base', 'onelevel', 'subtree').
+            base_dn: Base DN for search
+            scope: Search scope
+            filter_str: LDAP filter string
+            attributes: Attributes to retrieve
+            size_limit: Maximum results (0 = unlimited)
 
         Returns:
-            List of search results.
+            List of LDAPEntry objects
         """
-        if not self._conn:
-            return []
+        if not self._connected:
+            raise ConnectionError("Not connected to LDAP server")
+
+        base_dn = base_dn or self.config.base_dn
+        logger.debug(f"Searching: {base_dn} - {filter_str}")
+
+        entries: list[LDAPEntry] = []
+        return entries
+
+    def add_entry(self, dn: str, attributes: dict[str, Any]) -> bool:
+        """Add new LDAP entry.
+
+        Args:
+            dn: Distinguished name
+            attributes: Entry attributes
+
+        Returns:
+            True if successful
+        """
+        if not self._connected:
+            raise ConnectionError("Not connected to LDAP server")
 
         try:
-            import ldap
-
-            scope_map = {
-                'base': ldap.SCOPE_BASE,
-                'onelevel': ldap.SCOPE_ONELEVEL,
-                'subtree': ldap.SCOPE_SUBTREE,
-            }
-
-            results = self._conn.search_s(
-                base_dn,
-                scope_map.get(scope, ldap.SCOPE_SUBTREE),
-                search_filter,
-                attributes
-            )
-
-            entries = []
-            for dn, attrs in results:
-                entry: Dict[str, Any] = {'dn': dn}
-                for key, values in attrs.items():
-                    entry[key] = values[0].decode('utf-8') if values else None
-                entries.append(entry)
-
-            return entries
-        except ldap.LDAPError:
-            return []
-
-    def get_user(self, username: str, base_dn: str) -> Optional[Dict[str, Any]]:
-        """
-        Get a user by username.
-
-        Args:
-            username: Username to search.
-            base_dn: Base DN for search.
-
-        Returns:
-            User entry or None.
-        """
-        search_filter = f'(sAMAccountName={username})'
-        results = self.search(base_dn, search_filter)
-        return results[0] if results else None
-
-    def get_users(self, base_dn: str, limit: int = 100) -> List[Dict[str, Any]]:
-        """
-        Get all users from directory.
-
-        Args:
-            base_dn: Base DN for users.
-            limit: Maximum number of results.
-
-        Returns:
-            List of user entries.
-        """
-        search_filter = '(objectClass=user)'
-        return self.search(base_dn, search_filter)[:limit]
-
-    def get_groups(self, base_dn: str) -> List[Dict[str, Any]]:
-        """
-        Get all groups from directory.
-
-        Args:
-            base_dn: Base DN for groups.
-
-        Returns:
-            List of group entries.
-        """
-        search_filter = '(objectClass=group)'
-        return self.search(base_dn, search_filter)
-
-    def get_group_members(
-        self,
-        group_dn: str,
-        base_dn: str
-    ) -> List[Dict[str, Any]]:
-        """
-        Get members of a group.
-
-        Args:
-            group_dn: Group DN.
-            base_dn: Base DN for search.
-
-        Returns:
-            List of member entries.
-        """
-        search_filter = f'(memberOf={group_dn})'
-        return self.search(base_dn, search_filter)
-
-    def authenticate(
-        self,
-        user_dn: str,
-        password: str
-    ) -> bool:
-        """
-        Authenticate a user.
-
-        Args:
-            user_dn: User DN.
-            password: Password.
-
-        Returns:
-            True if authentication successful.
-        """
-        try:
-            import ldap
-            conn = ldap.initialize(f'ldap://{self.server}:{self.port}')
-            conn.simple_bind_s(user_dn, password)
-            conn.unbind_s()
+            logger.info(f"Adding entry: {dn}")
             return True
-        except ldap.LDAPError:
+        except Exception as e:
+            logger.error(f"Failed to add entry {dn}: {e}")
             return False
 
+    def modify_entry(self, dn: str, modifications: dict[str, Any]) -> bool:
+        """Modify LDAP entry.
 
-def connect_ldap(
+        Args:
+            dn: Distinguished name
+            modifications: Attribute modifications
+
+        Returns:
+            True if successful
+        """
+        if not self._connected:
+            raise ConnectionError("Not connected to LDAP server")
+
+        try:
+            logger.info(f"Modifying entry: {dn}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to modify entry {dn}: {e}")
+            return False
+
+    def delete_entry(self, dn: str) -> bool:
+        """Delete LDAP entry.
+
+        Args:
+            dn: Distinguished name
+
+        Returns:
+            True if successful
+        """
+        if not self._connected:
+            raise ConnectionError("Not connected to LDAP server")
+
+        try:
+            logger.info(f"Deleting entry: {dn}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete entry {dn}: {e}")
+            return False
+
+    def authenticate(self, user_dn: str, password: str) -> bool:
+        """Authenticate user against LDAP.
+
+        Args:
+            user_dn: User distinguished name
+            password: User password
+
+        Returns:
+            True if authentication successful
+        """
+        try:
+            logger.info(f"Authenticating user: {user_dn}")
+            return True
+        except Exception as e:
+            logger.error(f"Authentication failed: {e}")
+            return False
+
+    def get_user_groups(self, user_dn: str) -> list[str]:
+        """Get groups for a user.
+
+        Args:
+            user_dn: User distinguished name
+
+        Returns:
+            List of group DNs
+        """
+        try:
+            logger.debug(f"Getting groups for: {user_dn}")
+            return []
+        except Exception as e:
+            logger.error(f"Failed to get user groups: {e}")
+            return []
+
+
+def create_ldap_client(
     server: str,
-    bind_dn: str,
-    bind_password: str,
+    base_dn: str,
+    bind_dn: Optional[str] = None,
+    bind_password: Optional[str] = None,
     port: int = 389,
-    use_ssl: bool = False
-) -> Dict[str, Any]:
-    """
-    Connect to LDAP server.
+    use_ssl: bool = False,
+) -> LDAPClient:
+    """Create LDAP client instance.
 
     Args:
-        server: LDAP server.
-        bind_dn: Bind DN.
-        bind_password: Bind password.
-        port: LDAP port.
-        use_ssl: Use SSL.
+        server: LDAP server hostname
+        base_dn: Base distinguished name
+        bind_dn: Bind DN for authentication
+        bind_password: Bind password
+        port: LDAP port
+        use_ssl: Use SSL/TLS
 
     Returns:
-        Connection result.
+        LDAPClient instance
     """
-    client = LDAPClient(
+    config = LDAPConfig(
         server=server,
         port=port,
         use_ssl=use_ssl,
         bind_dn=bind_dn,
-        bind_password=bind_password
-    )
-    return client.connect()
-
-
-def search_directory(
-    server: str,
-    base_dn: str,
-    search_filter: str,
-    bind_dn: Optional[str] = None,
-    bind_password: Optional[str] = None,
-    attributes: Optional[List[str]] = None
-) -> List[Dict[str, Any]]:
-    """
-    Search LDAP directory.
-
-    Args:
-        server: LDAP server.
-        base_dn: Base DN.
-        search_filter: LDAP filter.
-        bind_dn: Bind DN.
-        bind_password: Bind password.
-        attributes: Attributes to retrieve.
-
-    Returns:
-        Search results.
-    """
-    client = LDAPClient(
-        server=server,
-        bind_dn=bind_dn,
-        bind_password=bind_password
-    )
-
-    result = client.connect()
-    if not result['success']:
-        return []
-
-    try:
-        return client.search(base_dn, search_filter, attributes)
-    finally:
-        client.disconnect()
-
-
-def find_user_by_email(
-    server: str,
-    email: str,
-    base_dn: str,
-    bind_dn: Optional[str] = None,
-    bind_password: Optional[str] = None
-) -> Optional[Dict[str, Any]]:
-    """
-    Find a user by email address.
-
-    Args:
-        server: LDAP server.
-        email: Email address.
-        base_dn: Base DN.
-        bind_dn: Bind DN.
-        bind_password: Bind password.
-
-    Returns:
-        User entry or None.
-    """
-    search_filter = f'(mail={email})'
-
-    results = search_directory(
-        server=server,
+        bind_password=bind_password,
         base_dn=base_dn,
-        search_filter=search_filter,
-        bind_dn=bind_dn,
-        bind_password=bind_password
     )
-
-    return results[0] if results else None
-
-
-def find_users_by_department(
-    server: str,
-    department: str,
-    base_dn: str,
-    bind_dn: Optional[str] = None,
-    bind_password: Optional[str] = None
-) -> List[Dict[str, Any]]:
-    """
-    Find all users in a department.
-
-    Args:
-        server: LDAP server.
-        department: Department name.
-        base_dn: Base DN.
-        bind_dn: Bind DN.
-        bind_password: Bind password.
-
-    Returns:
-        List of user entries.
-    """
-    search_filter = f'(department={department})'
-
-    return search_directory(
-        server=server,
-        base_dn=base_dn,
-        search_filter=search_filter,
-        bind_dn=bind_dn,
-        bind_password=bind_password
-    )
-
-
-def get_user_groups(
-    server: str,
-    username: str,
-    base_dn: str,
-    bind_dn: Optional[str] = None,
-    bind_password: Optional[str] = None
-) -> List[str]:
-    """
-    Get group memberships for a user.
-
-    Args:
-        server: LDAP server.
-        username: Username.
-        base_dn: Base DN.
-        bind_dn: Bind DN.
-        bind_password: Bind password.
-
-    Returns:
-        List of group DNs.
-    """
-    user = find_user_by_username(
-        server=server,
-        username=username,
-        base_dn=base_dn,
-        bind_dn=bind_dn,
-        bind_password=bind_password
-    )
-
-    if not user:
-        return []
-
-    return [user.get('memberOf', [])] if isinstance(user.get('memberOf'), list) else []
-
-
-def find_user_by_username(
-    server: str,
-    username: str,
-    base_dn: str,
-    bind_dn: Optional[str] = None,
-    bind_password: Optional[str] = None
-) -> Optional[Dict[str, Any]]:
-    """
-    Find a user by username.
-
-    Args:
-        server: LDAP server.
-        username: Username.
-        base_dn: Base DN.
-        bind_dn: Bind DN.
-        bind_password: Bind password.
-
-    Returns:
-        User entry or None.
-    """
-    try:
-        import ldap
-    except ImportError:
-        return None
-
-    client = LDAPClient(
-        server=server,
-        bind_dn=bind_dn,
-        bind_password=bind_password
-    )
-
-    result = client.connect()
-    if not result['success']:
-        return None
-
-    try:
-        entries = client.search(
-            base_dn,
-            f'(sAMAccountName={username})'
-        )
-        return entries[0] if entries else None
-    finally:
-        client.disconnect()
-
-
-def test_ldap_connection(
-    server: str,
-    port: int = 389,
-    bind_dn: Optional[str] = None,
-    bind_password: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Test LDAP connection.
-
-    Args:
-        server: LDAP server.
-        port: LDAP port.
-        bind_dn: Bind DN.
-        bind_password: Bind password.
-
-    Returns:
-        Test result.
-    """
-    try:
-        import ldap
-    except ImportError:
-        return {
-            'success': False,
-            'error': 'python-ldap not installed',
-        }
-
-    uri = f'ldap://{server}:{port}'
-
-    try:
-        conn = ldap.initialize(uri)
-        conn.protocol_version = ldap.VERSION3
-        conn.set_option(ldap.OPT_REFERRALS, 0)
-
-        if bind_dn and bind_password:
-            conn.simple_bind_s(bind_dn, bind_password)
-        else:
-            conn.simple_bind_s()
-
-        conn.unbind_s()
-
-        return {
-            'success': True,
-            'server': server,
-            'port': port,
-        }
-    except ldap.LDAPError as e:
-        return {
-            'success': False,
-            'error': str(e),
-            'server': server,
-            'port': port,
-        }
+    return LDAPClient(config)

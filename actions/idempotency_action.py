@@ -1,281 +1,145 @@
-"""Idempotency action module for RabAI AutoClick.
+"""Idempotency Action Module.
 
-Provides idempotency handling:
-- IdempotencyStore: Store and check idempotency keys
-- IdempotencyChecker: Verify if operation was already executed
-- IdempotencyGuard: Guard operations with idempotency keys
-- IdempotencyTTLManager: Manage TTL for idempotency keys
+Ensure operations are idempotent with deduplication and caching.
 """
 
 from __future__ import annotations
 
-import json
-import sys
-import os
-import time
+import asyncio
 import hashlib
-import threading
-from typing import Any, Callable, Dict, List, Optional, Union
+import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any, Callable, Generic, TypeVar
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+T = TypeVar("T")
+R = TypeVar("R")
 
 
-try:
-    import redis
-    REDIS_AVAILABLE = True
-except ImportError:
-    REDIS_AVAILABLE = False
+class IdempotencyStatus(Enum):
+    """Idempotency check status."""
+    NEW = "new"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 @dataclass
-class IdempotencyRecord:
+class IdempotencyEntry:
     """Idempotency record."""
     key: str
-    status: str
-    result: Optional[Any] = None
+    status: IdempotencyStatus
+    result: Any = None
+    error: str | None = None
     created_at: float = 0.0
-    expires_at: float = 0.0
-    execution_count: int = 0
+    completed_at: float | None = None
+    expires_at: float | None = None
 
 
-class IdempotencyStoreAction(BaseAction):
-    """Store and manage idempotency keys."""
-    action_type = "idempotency_store"
-    display_name = "幂等性存储"
-    description = "存储和管理幂等性Key"
+class IdempotencyStore(Generic[T, R]):
+    """Store for idempotency keys with result caching."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "check")
-            store_path = params.get("store_path", "/tmp/idempotency")
-            key = params.get("key", "")
-            ttl_seconds = params.get("ttl_seconds", 86400)
-            result_data = params.get("result_data", None)
-            redis_url = params.get("redis_url", "redis://localhost:6379/0")
-            use_redis = params.get("use_redis", False) and REDIS_AVAILABLE
+    def __init__(self, ttl_seconds: float = 3600, cleanup_interval: float = 300) -> None:
+        self.ttl = ttl_seconds
+        self._store: dict[str, IdempotencyEntry] = {}
+        self._lock = asyncio.Lock()
+        self._cleanup_task: asyncio.Task | None = None
+        self._cleanup_interval = cleanup_interval
 
-            if not key:
-                return ActionResult(success=False, message="key is required")
+    async def start(self) -> None:
+        """Start cleanup task."""
+        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
 
-            key_hash = hashlib.sha256(key.encode()).hexdigest()[:32]
-            os.makedirs(store_path, exist_ok=True)
-            key_file = os.path.join(store_path, f"{key_hash}.json")
+    async def stop(self) -> None:
+        """Stop cleanup task."""
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
 
-            if use_redis:
-                client = redis.from_url(redis_url, decode_responses=False)
+    async def check(self, key: str) -> IdempotencyStatus | None:
+        """Check idempotency status."""
+        async with self._lock:
+            entry = self._store.get(key)
+            if not entry:
+                return None
+            if entry.expires_at and time.time() > entry.expires_at:
+                del self._store[key]
+                return None
+            return entry.status
 
-            if operation == "check":
-                if use_redis:
-                    exists = client.exists(key)
-                    if exists:
-                        val = client.get(key)
-                        record = json.loads(val.decode()) if val else {}
-                        return ActionResult(
-                            success=True,
-                            message="Key exists",
-                            data={"key": key, "status": record.get("status"), "result": record.get("result")}
-                        )
-                    return ActionResult(success=True, message="Key not found", data={"key": key, "exists": False})
-
-                if os.path.exists(key_file):
-                    with open(key_file) as f:
-                        record = json.load(f)
-                    if record.get("expires_at", 0) > time.time():
-                        return ActionResult(
-                            success=True,
-                            message="Key exists",
-                            data={"key": key, "status": record.get("status"), "result": record.get("result")}
-                        )
-                    else:
-                        os.remove(key_file)
-                return ActionResult(success=True, message="Key not found", data={"key": key, "exists": False})
-
-            elif operation == "store":
-                status = params.get("status", "completed")
-                created_at = time.time()
-                expires_at = created_at + ttl_seconds
-
-                record = {
-                    "key": key,
-                    "key_hash": key_hash,
-                    "status": status,
-                    "result": result_data,
-                    "created_at": created_at,
-                    "expires_at": expires_at,
-                    "execution_count": 1,
-                }
-
-                if use_redis:
-                    client.setex(key, ttl_seconds, json.dumps(record))
-                else:
-                    with open(key_file, "w") as f:
-                        json.dump(record, f)
-
-                return ActionResult(success=True, message=f"Stored: {key}", data={"key": key, "expires_at": expires_at})
-
-            elif operation == "delete":
-                if use_redis:
-                    client.delete(key)
-                elif os.path.exists(key_file):
-                    os.remove(key_file)
-
-                return ActionResult(success=True, message=f"Deleted: {key}")
-
-            elif operation == "list":
-                records = []
-                if use_redis:
-                    keys = client.keys("*")
-                    for k in keys:
-                        val = client.get(k)
-                        if val:
-                            rec = json.loads(val.decode())
-                            records.append({"key": rec.get("key"), "status": rec.get("status"), "expires_at": rec.get("expires_at")})
-                else:
-                    for filename in os.listdir(store_path):
-                        if filename.endswith(".json"):
-                            with open(os.path.join(store_path, filename)) as f:
-                                record = json.load(f)
-                                if record.get("expires_at", 0) > time.time():
-                                    records.append({"key": record.get("key"), "status": record.get("status"), "expires_at": record.get("expires_at")})
-
-                return ActionResult(success=True, message=f"{len(records)} active keys", data={"records": records, "count": len(records)})
-
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-
-
-class IdempotencyGuardAction(BaseAction):
-    """Guard operations with idempotency key checking."""
-    action_type = "idempotency_guard"
-    display_name = "幂等性保护"
-    description = "基于幂等性Key保护操作"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            key = params.get("key", "")
-            operation_fn = params.get("operation_fn", None)
-            ttl_seconds = params.get("ttl_seconds", 3600)
-            store_path = params.get("store_path", "/tmp/idempotency")
-            redis_url = params.get("redis_url", "redis://localhost:6379/0")
-            use_redis = params.get("use_redis", False) and REDIS_AVAILABLE
-
-            if not key:
-                return ActionResult(success=False, message="key is required")
-
-            key_hash = hashlib.sha256(key.encode()).hexdigest()[:32]
-            os.makedirs(store_path, exist_ok=True)
-
-            if use_redis:
-                client = redis.from_url(redis_url, decode_responses=True)
-
-                existing = client.get(key)
-                if existing:
-                    record = json.loads(existing)
-                    return ActionResult(
-                        success=True,
-                        message="Operation already executed (idempotent)",
-                        data={"key": key, "status": record.get("status"), "cached_result": record.get("result")}
-                    )
-
-                client.setex(key, ttl_seconds, json.dumps({"status": "in_progress", "key": key}))
-            else:
-                key_file = os.path.join(store_path, f"{key_hash}.json")
-                if os.path.exists(key_file):
-                    with open(key_file) as f:
-                        record = json.load(f)
-                    if record.get("expires_at", 0) > time.time():
-                        return ActionResult(
-                            success=True,
-                            message="Operation already executed (idempotent)",
-                            data={"key": key, "status": record.get("status"), "cached_result": record.get("result")}
-                        )
-
-                record = {
-                    "key": key,
-                    "status": "in_progress",
-                    "created_at": time.time(),
-                    "expires_at": time.time() + ttl_seconds,
-                }
-                with open(key_file, "w") as f:
-                    json.dump(record, f)
-
-            return ActionResult(
-                success=True,
-                message=f"Idempotency key acquired: {key}",
-                data={"key": key, "acquired": True}
+    async def start_operation(self, key: str) -> IdempotencyEntry:
+        """Mark operation as in progress."""
+        async with self._lock:
+            entry = IdempotencyEntry(
+                key=key,
+                status=IdempotencyStatus.IN_PROGRESS,
+                created_at=time.time(),
+                expires_at=time.time() + self.ttl
             )
+            self._store[key] = entry
+            return entry
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
+    async def complete_operation(
+        self,
+        key: str,
+        result: R | None = None,
+        error: str | None = None
+    ) -> None:
+        """Mark operation as completed."""
+        async with self._lock:
+            entry = self._store.get(key)
+            if entry:
+                entry.status = IdempotencyStatus.COMPLETED if error is None else IdempotencyStatus.FAILED
+                entry.result = result
+                entry.error = error
+                entry.completed_at = time.time()
 
+    async def execute_idempotent(
+        self,
+        key: str,
+        operation: Callable[[], T | asyncio.coroutine],
+        *args,
+        **kwargs
+    ) -> tuple[T | None, IdempotencyStatus, bool]:
+        """Execute operation idempotently.
 
-class IdempotencyTTLManagerAction(BaseAction):
-    """Manage TTL for idempotency keys."""
-    action_type = "idempotency_ttl_manager"
-    display_name = "幂等性TTL管理"
-    description = "管理幂等性Key的TTL"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        Returns: (result, status, was_executed)
+        """
+        status = await self.check(key)
+        if status == IdempotencyStatus.COMPLETED:
+            entry = self._store.get(key)
+            return entry.result, IdempotencyStatus.COMPLETED, False
+        if status == IdempotencyStatus.IN_PROGRESS:
+            entry = self._store.get(key)
+            return None, IdempotencyStatus.IN_PROGRESS, False
+        await self.start_operation(key)
         try:
-            operation = params.get("operation", "cleanup")
-            store_path = params.get("store_path", "/tmp/idempotency")
-            redis_url = params.get("redis_url", "redis://localhost:6379/0")
-            use_redis = params.get("use_redis", False) and REDIS_AVAILABLE
-            key = params.get("key", "")
-            new_ttl = params.get("new_ttl", 86400)
-
-            if operation == "cleanup":
-                cleaned = 0
-                if use_redis:
-                    client = redis.from_url(redis_url, decode_responses=True)
-                    keys = client.keys("*")
-                    for k in keys:
-                        val = client.get(k)
-                        if val:
-                            record = json.loads(val)
-                            if record.get("expires_at", 0) < time.time():
-                                client.delete(k)
-                                cleaned += 1
-                else:
-                    for filename in os.listdir(store_path):
-                        if filename.endswith(".json"):
-                            filepath = os.path.join(store_path, filename)
-                            with open(filepath) as f:
-                                record = json.load(f)
-                            if record.get("expires_at", 0) < time.time():
-                                os.remove(filepath)
-                                cleaned += 1
-
-                return ActionResult(success=True, message=f"Cleaned {cleaned} expired keys")
-
-            elif operation == "extend":
-                if not key:
-                    return ActionResult(success=False, message="key required")
-
-                key_hash = hashlib.sha256(key.encode()).hexdigest()[:32]
-                key_file = os.path.join(store_path, f"{key_hash}.json")
-
-                if not os.path.exists(key_file):
-                    return ActionResult(success=False, message=f"Key not found: {key}")
-
-                with open(key_file) as f:
-                    record = json.load(f)
-
-                record["expires_at"] = time.time() + new_ttl
-                with open(key_file, "w") as f:
-                    json.dump(record, f)
-
-                return ActionResult(success=True, message=f"Extended TTL for: {key}")
-
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
+            result = operation(*args, **kwargs)
+            if asyncio.iscoroutine(result):
+                result = await result
+            await self.complete_operation(key, result=result)
+            return result, IdempotencyStatus.COMPLETED, True
         except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
+            await self.complete_operation(key, error=str(e))
+            raise
+
+    def generate_key(self, *args, **kwargs) -> str:
+        """Generate idempotency key from arguments."""
+        content = str(args) + str(sorted(kwargs.items()))
+        return hashlib.sha256(content.encode()).hexdigest()
+
+    async def _cleanup_loop(self) -> None:
+        """Periodically clean up expired entries."""
+        while True:
+            await asyncio.sleep(self._cleanup_interval)
+            async with self._lock:
+                now = time.time()
+                expired = [
+                    k for k, v in self._store.items()
+                    if v.expires_at and now > v.expires_at
+                ]
+                for k in expired:
+                    del self._store[k]
