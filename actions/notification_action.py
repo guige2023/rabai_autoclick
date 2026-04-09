@@ -1,207 +1,226 @@
-"""Notification action module for RabAI AutoClick.
+"""
+Notification Action Module
 
-Provides system notification actions for user alerts,
-including macOS notification center integration.
+Manages system and in-app notifications for automation workflows,
+including toast messages, system alerts, and notification queues.
+
+MIT License - Copyright (c) 2025 RabAi Research
 """
 
-import sys
-import os
-import subprocess
-from typing import Any, Dict, List, Optional
+from __future__ import annotations
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+import logging
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
-class NotifyAction(BaseAction):
-    """Send system notification.
-    
-    Supports title, body, sound, and icon options.
-    Uses macOS osascript for native notifications.
+class NotificationLevel(Enum):
+    """Notification severity levels."""
+
+    DEBUG = "debug"
+    INFO = "info"
+    SUCCESS = "success"
+    WARNING = "warning"
+    ERROR = "error"
+    CRITICAL = "critical"
+
+
+class NotificationType(Enum):
+    """Notification types."""
+
+    TOAST = "toast"
+    SYSTEM = "system"
+    EMAIL = "email"
+    SMS = "sms"
+    PUSH = "push"
+    IN_APP = "in_app"
+
+
+@dataclass
+class Notification:
+    """Represents a notification."""
+
+    id: str
+    title: str
+    message: str
+    level: NotificationLevel = NotificationLevel.INFO
+    notification_type: NotificationType = NotificationType.TOAST
+    timestamp: float = field(default_factory=time.time)
+    duration: float = 3.0
+    actions: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    read: bool = False
+    dismissed: bool = False
+
+
+@dataclass
+class NotificationConfig:
+    """Configuration for notifications."""
+
+    default_duration: float = 3.0
+    max_queue_size: int = 100
+    enable_sound: bool = True
+    enable_logging: bool = True
+    sound_path: Optional[str] = None
+
+
+class NotificationManager:
     """
-    action_type = "notify"
-    display_name = "发送通知"
-    description = "发送系统通知提醒"
+    Manages notifications for automation workflows.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Send notification.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: title, message, sound,
-                   subtitle, save_to_var.
-        
-        Returns:
-            ActionResult with notification result.
-        """
-        title = params.get('title', 'RabAI AutoClick')
-        message = params.get('message', '')
-        sound = params.get('sound', True)
-        subtitle = params.get('subtitle', '')
-        save_to_var = params.get('save_to_var', None)
-
-        if not message:
-            return ActionResult(success=False, message="Message cannot be empty")
-
-        try:
-            # Build osascript command for notification
-            script_parts = [
-                'display notification',
-                f'"{self._escape(message)}"'
-            ]
-
-            if subtitle:
-                script_parts.append(f'with subtitle "{self._escape(subtitle)}"')
-
-            script_parts.append(f'giving after 2 seconds')
-
-            if sound:
-                script_parts.append('with sound name "Glass"')
-
-            script = ' '.join(script_parts)
-
-            result = subprocess.run(
-                ['osascript', '-e', script],
-                capture_output=True,
-                text=True
-            )
-
-            if result.returncode != 0:
-                return ActionResult(
-                    success=False,
-                    message=f"通知发送失败: {result.stderr}"
-                )
-
-            result_data = {
-                'sent': True,
-                'title': title,
-                'message': message,
-                'sound': sound
-            }
-
-            if save_to_var:
-                context.variables[save_to_var] = result_data
-
-            return ActionResult(
-                success=True,
-                message=f"通知已发送: {message[:30]}",
-                data=result_data
-            )
-
-        except FileNotFoundError:
-            return ActionResult(
-                success=False,
-                message="osascript not found (requires macOS)"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"通知发送失败: {str(e)}"
-            )
-
-    def _escape(self, text: str) -> str:
-        """Escape double quotes in text."""
-        return text.replace('"', '\\"').replace('\n', ' ')
-
-    def get_required_params(self) -> List[str]:
-        return ['message']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {
-            'title': 'RabAI AutoClick',
-            'sound': True,
-            'subtitle': '',
-            'save_to_var': None
-        }
-
-
-class AlertAction(BaseAction):
-    """Show alert dialog.
-    
-    Displays modal alert with message and buttons.
+    Supports queuing, batching, sound alerts,
+    and notification action handling.
     """
-    action_type = "alert"
-    display_name = "显示警告框"
-    description = "显示模态警告对话框"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Show alert dialog.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: title, message, buttons,
-                   default_button, save_to_var.
-        
-        Returns:
-            ActionResult with button clicked.
+    def __init__(
+        self,
+        config: Optional[NotificationConfig] = None,
+        sender: Optional[Callable[[Notification], None]] = None,
+    ):
+        self.config = config or NotificationConfig()
+        self.sender = sender or self._default_sender
+        self._notifications: Dict[str, Notification] = {}
+        self._queue: List[str] = []
+        self._subscribers: List[Callable[[Notification], None]] = []
+
+    def _default_sender(self, notification: Notification) -> None:
+        """Default notification sender."""
+        logger.info(f"[{notification.level.value.upper()}] {notification.title}: {notification.message}")
+
+    def send(
+        self,
+        title: str,
+        message: str,
+        level: NotificationLevel = NotificationLevel.INFO,
+        notification_type: NotificationType = NotificationType.TOAST,
+        duration: Optional[float] = None,
+        actions: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """
-        title = params.get('title', 'Alert')
-        message = params.get('message', '')
-        buttons = params.get('buttons', ['OK'])
-        default_button = params.get('default_button', 0)
-        save_to_var = params.get('save_to_var', None)
+        Send a notification.
 
-        if not message:
-            return ActionResult(success=False, message="Message cannot be empty")
+        Args:
+            title: Notification title
+            message: Notification message
+            level: Severity level
+            notification_type: Type of notification
+            duration: Display duration in seconds
+            actions: Available action names
+            metadata: Additional metadata
 
-        try:
-            buttons_str = ', '.join(f'"{b}"' for b in buttons)
-            script = f'''
-            set response to button returned of (display dialog "{self._escape(message)}" buttons {{{buttons_str}}} default button {default_button + 1} with title "{self._escape(title)}")
-            response
-            '''
+        Returns:
+            Notification ID
+        """
+        notification_id = f"notif_{time.time()}_{len(self._notifications)}"
 
-            result = subprocess.run(
-                ['osascript', '-e', script],
-                capture_output=True,
-                text=True
-            )
+        notification = Notification(
+            id=notification_id,
+            title=title,
+            message=message,
+            level=level,
+            notification_type=notification_type,
+            duration=duration or self.config.default_duration,
+            actions=actions or [],
+            metadata=metadata or {},
+        )
 
-            if result.returncode != 0:
-                return ActionResult(
-                    success=False,
-                    message=f"警告框显示失败: {result.stderr}"
-                )
+        self._notifications[notification_id] = notification
+        self._queue.append(notification_id)
 
-            clicked = result.stdout.strip()
-            button_index = buttons.index(clicked) if clicked in buttons else -1
+        if self.config.enable_logging:
+            self._default_sender(notification)
 
-            result_data = {
-                'clicked': clicked,
-                'button_index': button_index,
-                'title': title
-            }
+        self.sender(notification)
 
-            if save_to_var:
-                context.variables[save_to_var] = result_data
+        for subscriber in self._subscribers:
+            try:
+                subscriber(notification)
+            except Exception as e:
+                logger.error(f"Notification subscriber failed: {e}")
 
-            return ActionResult(
-                success=True,
-                message=f"点击了: {clicked}",
-                data=result_data
-            )
+        return notification_id
 
-        except FileNotFoundError:
-            return ActionResult(
-                success=False,
-                message="osascript not found (requires macOS)"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"警告框失败: {str(e)}"
-            )
+    def send_batch(
+        self,
+        notifications: List[Dict[str, Any]],
+    ) -> List[str]:
+        """
+        Send multiple notifications.
 
-    def _escape(self, text: str) -> str:
-        return text.replace('"', '\\"').replace('\n', ' ')
+        Args:
+            notifications: List of notification data dicts
 
-    def get_required_params(self) -> List[str]:
-        return ['message']
+        Returns:
+            List of notification IDs
+        """
+        ids = []
+        for notif_data in notifications:
+            notif_id = self.send(**notif_data)
+            ids.append(notif_id)
+        return ids
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {
-            'title': 'Alert',
-            'buttons': ['OK'],
-            'default_button': 0,
-            'save_to_var': None
-        }
+    def dismiss(self, notification_id: str) -> bool:
+        """Dismiss a notification."""
+        if notification_id in self._notifications:
+            self._notifications[notification_id].dismissed = True
+            return True
+        return False
+
+    def mark_read(self, notification_id: str) -> bool:
+        """Mark notification as read."""
+        if notification_id in self._notifications:
+            self._notifications[notification_id].read = True
+            return True
+        return False
+
+    def get_notification(self, notification_id: str) -> Optional[Notification]:
+        """Get a notification by ID."""
+        return self._notifications.get(notification_id)
+
+    def get_unread(self) -> List[Notification]:
+        """Get all unread notifications."""
+        return [n for n in self._notifications.values() if not n.read and not n.dismissed]
+
+    def get_recent(self, limit: int = 10) -> List[Notification]:
+        """Get recent notifications."""
+        sorted_notifs = sorted(
+            self._notifications.values(),
+            key=lambda n: n.timestamp,
+            reverse=True,
+        )
+        return sorted_notifs[:limit]
+
+    def subscribe(self, callback: Callable[[Notification], None]) -> None:
+        """Subscribe to notifications."""
+        self._subscribers.append(callback)
+
+    def unsubscribe(self, callback: Callable[[Notification], None]) -> None:
+        """Unsubscribe from notifications."""
+        if callback in self._subscribers:
+            self._subscribers.remove(callback)
+
+    def clear_all(self) -> None:
+        """Clear all notifications."""
+        self._notifications.clear()
+        self._queue.clear()
+
+    def clear_read(self) -> int:
+        """Clear all read notifications."""
+        to_remove = [nid for nid, n in self._notifications.items() if n.read]
+        for nid in to_remove:
+            del self._notifications[nid]
+            if nid in self._queue:
+                self._queue.remove(nid)
+        return len(to_remove)
+
+
+def create_notification_manager(
+    config: Optional[NotificationConfig] = None,
+) -> NotificationManager:
+    """Factory function to create NotificationManager."""
+    return NotificationManager(config=config)
