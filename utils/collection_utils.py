@@ -1,11 +1,12 @@
-"""Collection utilities for RabAI AutoClick.
+"""Collection and data structure utilities.
 
-Provides:
-- Collection operations and helpers
-- Advanced data structure manipulations
+Provides specialized collection types, transformations,
+and operations for lists, dicts, and nested structures.
 """
 
-from typing import Any, Callable, Dict, Iterator, List, Optional, Set, TypeVar, Tuple
+from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Generator, Iterator, List, Optional, Tuple, TypeVar, Union
 
 
 T = TypeVar("T")
@@ -13,474 +14,363 @@ K = TypeVar("K")
 V = TypeVar("V")
 
 
-def unique(items: List[T]) -> List[T]:
-    """Get unique items preserving order.
+class TwoWayDict(dict):
+    """Dictionary with bidirectional lookup.
 
-    Args:
-        items: List of items.
-
-    Returns:
-        List with duplicates removed.
+    Example:
+        d = TwoWayDict({"red": "rot", "green": "gruen"})
+        d["red"]  # "rot"
+        d["rot"]  # "red"
     """
-    seen: Set[T] = set()
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        dict.__setitem__(self, key, value)
+        dict.__setitem__(self, value, key)
+
+    def __delitem__(self, key: Any) -> None:
+        value = self[key]
+        dict.__delitem__(self, key)
+        dict.__delitem__(self, value)
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        if key in self:
+            del self[self[key]]
+        if value in self:
+            del self[value]
+        dict.__setitem__(self, key, value)
+        dict.__setitem__(self, value, key)
+
+
+class OrderedDefaultDict(defaultdict):
+    """Default dict that maintains insertion order.
+
+    Example:
+        d = OrderedDefaultDict(list)
+        d["items"].append(1)
+    """
+
+    def __init__(self, default_factory: Callable = None, **kwargs: Any) -> None:
+        defaultdict.__init__(self, default_factory, **kwargs)
+        self._order: List = []
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        if key not in self:
+            self._order.append(key)
+        defaultdict.__setitem__(self, key, value)
+
+    def __delitem__(self, key: Any) -> None:
+        if key in self:
+            self._order.remove(key)
+        defaultdict.__delitem__(self, key)
+
+    def order(self) -> List:
+        """Return keys in insertion order."""
+        return list(self._order)
+
+
+@dataclass
+class TreeNode(Generic[T]):
+    """Tree node with children."""
+    value: T
+    children: List["TreeNode[T]"] = field(default_factory=list)
+    parent: Optional["TreeNode[T]"] = None
+
+    def add_child(self, value: T) -> "TreeNode[T]":
+        """Add child node."""
+        child = TreeNode(value=value, parent=self)
+        self.children.append(child)
+        return child
+
+    def is_leaf(self) -> bool:
+        """Check if node is leaf."""
+        return len(self.children) == 0
+
+    def depth(self) -> int:
+        """Get depth of node."""
+        d = 0
+        node = self
+        while node.parent:
+            d += 1
+            node = node.parent
+        return d
+
+
+class Tree(Generic[T]):
+    """Tree data structure.
+
+    Example:
+        tree = Tree("root")
+        child = tree.root.add_child("child")
+        grandchild = child.add_child("grandchild")
+        for node in tree:
+            print(node.value)
+    """
+
+    def __init__(self, root_value: T) -> None:
+        self.root = TreeNode(root_value)
+
+    def __iter__(self) -> Generator[TreeNode[T], None, None]:
+        """Iterate over all nodes in tree."""
+        def traverse(node: TreeNode[T]) -> Generator[TreeNode[T], None, None]:
+            yield node
+            for child in node.children:
+                yield from traverse(child)
+
+        yield from traverse(self.root)
+
+    def find(self, predicate: Callable[[T], bool]) -> Optional[TreeNode[T]]:
+        """Find node where predicate returns True."""
+        for node in self:
+            if predicate(node.value):
+                return node
+        return None
+
+
+class Stack(List[T]):
+    """Stack implementation using list.
+
+    Example:
+        stack = Stack()
+        stack.push(1)
+        stack.push(2)
+        stack.pop()  # 2
+    """
+
+    def push(self, item: T) -> None:
+        """Push item onto stack."""
+        self.append(item)
+
+    def pop(self) -> T:
+        """Pop item from stack."""
+        return list.pop(self)
+
+    def peek(self) -> T:
+        """Get top item without removing."""
+        return self[-1]
+
+    def is_empty(self) -> bool:
+        """Check if stack is empty."""
+        return len(self) == 0
+
+
+class Queue(List[T]):
+    """Queue implementation using list.
+
+    Example:
+        queue = Queue()
+        queue.enqueue(1)
+        queue.enqueue(2)
+        queue.dequeue()  # 1
+    """
+
+    def enqueue(self, item: T) -> None:
+        """Add item to queue."""
+        self.append(item)
+
+    def dequeue(self) -> T:
+        """Remove and return first item."""
+        return self.pop(0)
+
+    def peek(self) -> T:
+        """Get first item without removing."""
+        return self[0]
+
+    def is_empty(self) -> bool:
+        """Check if queue is empty."""
+        return len(self) == 0
+
+
+def flatten(nested: List[Any], depth: Optional[int] = None) -> List[Any]:
+    """Flatten nested list.
+
+    Example:
+        flatten([1, [2, [3, 4]], 5])  # [1, 2, 3, 4, 5]
+    """
     result = []
-    for item in items:
-        if item not in seen:
-            seen.add(item)
-            result.append(item)
+
+    def _flatten(items: List[Any], current_depth: int = 0) -> None:
+        for item in items:
+            if isinstance(item, list) and (depth is None or current_depth < depth):
+                _flatten(item, current_depth + 1)
+            else:
+                result.append(item)
+
+    _flatten(nested)
     return result
 
 
-def unique_by(items: List[T], key_func: Callable[[T], K]) -> List[T]:
-    """Get unique items by key function.
+def group_by_key(
+    items: List[Dict[K, V]],
+    key: str,
+) -> Dict[K, List[Dict[K, V]]]:
+    """Group items by key value.
 
-    Args:
-        items: List of items.
-        key_func: Function to extract key.
-
-    Returns:
-        List with duplicates removed.
+    Example:
+        group_by_key([{"type": "a", "v": 1}, {"type": "b", "v": 2}, {"type": "a", "v": 3}])
+        # {"a": [{"type": "a", "v": 1}, {"type": "a", "v": 3}], "b": [{"type": "b", "v": 2}]}
     """
-    seen: Set[K] = set()
-    result = []
+    groups: Dict[K, List[Dict[K, V]]] = defaultdict(list)
     for item in items:
-        key = key_func(item)
-        if key not in seen:
-            seen.add(key)
-            result.append(item)
-    return result
-
-
-def partition(
-    items: List[T],
-    predicate: Callable[[T], bool],
-) -> Tuple[List[T], List[T]]:
-    """Partition items by predicate.
-
-    Args:
-        items: List of items.
-        predicate: Function to partition by.
-
-    Returns:
-        Tuple of (matching, non-matching).
-    """
-    matching = []
-    non_matching = []
-    for item in items:
-        if predicate(item):
-            matching.append(item)
-        else:
-            non_matching.append(item)
-    return matching, non_matching
-
-
-def first(items: List[T], default: T = None) -> Optional[T]:
-    """Get first item from list.
-
-    Args:
-        items: List of items.
-        default: Default if empty.
-
-    Returns:
-        First item or default.
-    """
-    return items[0] if items else default
-
-
-def last(items: List[T], default: T = None) -> Optional[T]:
-    """Get last item from list.
-
-    Args:
-        items: List of items.
-        default: Default if empty.
-
-    Returns:
-        Last item or default.
-    """
-    return items[-1] if items else default
-
-
-def sample(items: List[T], count: int) -> List[T]:
-    """Sample items from list.
-
-    Args:
-        items: List of items.
-        count: Number of items to sample.
-
-    Returns:
-        List of sampled items.
-    """
-    if count >= len(items):
-        return items.copy()
-    result = []
-    remaining = items.copy()
-    for _ in range(count):
-        idx = hash(remaining[0]) % len(remaining)
-        result.append(remaining.pop(idx))
-    return result
+        k = item.get(key)
+        groups[k].append(item)
+    return dict(groups)
 
 
 def transpose(matrix: List[List[T]]) -> List[List[T]]:
-    """Transpose a matrix (list of lists).
+    """Transpose matrix (swap rows and columns).
 
-    Args:
-        matrix: 2D list.
-
-    Returns:
-        Transposed matrix.
+    Example:
+        transpose([[1, 2], [3, 4]])  # [[1, 3], [2, 4]]
     """
     if not matrix:
         return []
     return list(map(list, zip(*matrix)))
 
 
-def zip_with(func: Callable[[T, T], V], a: List[T], b: List[T]) -> List[V]:
-    """Zip two lists with function.
+def zip_longest(
+    *iterables: List[T],
+    fillvalue: Any = None,
+) -> Iterator[List[T]]:
+    """Zip iterables of different lengths.
 
-    Args:
-        func: Function to combine elements.
-        a: First list.
-        b: Second list.
-
-    Returns:
-        List of combined elements.
+    Example:
+        list(zip_longest([1, 2], [3, 4, 5], fillvalue=0))
+        # [[1, 3], [2, 4], [0, 5]]
     """
-    min_len = min(len(a), len(b))
-    return [func(a[i], b[i]) for i in range(min_len)]
+    from itertools import zip_longest
+    return zip_longest(*iterables, fillvalue=fillvalue)
 
 
-def batch(items: List[T], size: int) -> Iterator[List[T]]:
-    """Batch items into chunks.
+def get_in(
+    nested: Dict[str, Any],
+    path: List[str],
+    default: Any = None,
+) -> Any:
+    """Get value from nested dict using path.
 
-    Args:
-        items: List of items.
-        size: Batch size.
-
-    Yields:
-        Batches of items.
+    Example:
+        d = {"a": {"b": {"c": 1}}}
+        get_in(d, ["a", "b", "c"])  # 1
+        get_in(d, ["a", "x"], "default")  # "default"
     """
-    for i in range(0, len(items), size):
-        yield items[i:i + size]
+    current = nested
+    for key in path:
+        if isinstance(current, dict) and key in current:
+            current = current[key]
+        else:
+            return default
+    return current
 
 
-def sliding_window(items: List[T], size: int) -> Iterator[List[T]]:
-    """Create sliding window over items.
+def set_in(
+    nested: Dict[str, Any],
+    path: List[str],
+    value: Any,
+) -> Dict[str, Any]:
+    """Set value in nested dict creating path if needed.
 
-    Args:
-        items: List of items.
-        size: Window size.
-
-    Yields:
-        Windows of items.
+    Example:
+        d = {}
+        set_in(d, ["a", "b", "c"], 1)
+        # {"a": {"b": {"c": 1}}}
     """
-    for i in range(len(items) - size + 1):
-        yield items[i:i + size]
+    current = nested
+    for key in path[:-1]:
+        if key not in current:
+            current[key] = {}
+        current = current[key]
+    current[path[-1]] = value
+    return nested
 
 
-def count_by(items: List[T], key_func: Callable[[T], K]) -> Dict[K, int]:
-    """Count items by key function.
+def update_recursive(base: Dict, update: Dict) -> Dict:
+    """Recursively update nested dict.
 
-    Args:
-        items: List of items.
-        key_func: Function to extract key.
-
-    Returns:
-        Dictionary mapping keys to counts.
+    Example:
+        base = {"a": {"b": 1}}
+        update = {"a": {"c": 2}}
+        update_recursive(base, update)  # {"a": {"b": 1, "c": 2}}
     """
-    result: Dict[K, int] = {}
-    for item in items:
-        key = key_func(item)
-        result[key] = result.get(key, 0) + 1
+    for key, value in update.items():
+        if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+            base[key] = update_recursive(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+def deep_merge(*dicts: Dict) -> Dict:
+    """Deep merge multiple dicts.
+
+    Example:
+        deep_merge({"a": 1}, {"b": 2}, {"a": 3})
+        # {"a": 3, "b": 2}
+    """
+    result = {}
+    for d in dicts:
+        result = update_recursive(result, d)
     return result
 
 
-def group_by_to_dict(
+def list_to_dict(
     items: List[T],
     key_func: Callable[[T], K],
-) -> Dict[K, List[T]]:
-    """Group items by key function.
+) -> Dict[K, T]:
+    """Convert list to dict using key function.
 
-    Args:
-        items: List of items.
-        key_func: Function to extract key.
-
-    Returns:
-        Dictionary mapping keys to item lists.
-    """
-    result: Dict[K, List[T]] = {}
-    for item in items:
-        key = key_func(item)
-        if key not in result:
-            result[key] = []
-        result[key].append(item)
-    return result
-
-
-def intersection(*lists: List[T]) -> List[T]:
-    """Get intersection of lists.
-
-    Args:
-        *lists: Lists to intersect.
-
-    Returns:
-        List of items in all lists.
-    """
-    if not lists:
-        return []
-    result = set(lists[0])
-    for lst in lists[1:]:
-        result &= set(lst)
-    return list(result)
-
-
-def union(*lists: List[T]) -> List[T]:
-    """Get union of lists.
-
-    Args:
-        *lists: Lists to union.
-
-    Returns:
-        List of unique items from all lists.
-    """
-    result: Set[T] = set()
-    for lst in lists:
-        result |= set(lst)
-    return list(result)
-
-
-def difference(a: List[T], b: List[T]) -> List[T]:
-    """Get difference of two lists.
-
-    Args:
-        a: First list.
-        b: Second list.
-
-    Returns:
-        Items in a but not in b.
-    """
-    b_set = set(b)
-    return [item for item in a if item not in b_set]
-
-
-def symmetric_difference(a: List[T], b: List[T]) -> List[T]:
-    """Get symmetric difference of two lists.
-
-    Args:
-        a: First list.
-        b: Second list.
-
-    Returns:
-        Items in either list but not both.
-    """
-    a_set = set(a)
-    b_set = set(b)
-    return list((a_set | b_set) - (a_set & b_set))
-
-
-def update_in(
-    data: Dict[K, V],
-    key: K,
-    func: Callable[[V], V],
-    default: V = None,
-) -> None:
-    """Update dict value using function.
-
-    Args:
-        data: Dictionary to update.
-        key: Key to update.
-        func: Update function.
-        default: Default value if key not present.
-    """
-    if key in data:
-        data[key] = func(data[key])
-    elif default is not None:
-        data[key] = func(default)
-
-
-def map_keys(data: Dict[K, V], func: Callable[[K], K]) -> Dict[K, V]:
-    """Map dictionary keys.
-
-    Args:
-        data: Dictionary to map.
-        func: Function to transform keys.
-
-    Returns:
-        New dictionary with transformed keys.
-    """
-    return {func(k): v for k, v in data.items()}
-
-
-def map_items(
-    data: Dict[K, V],
-    key_func: Callable[[K, V], K],
-    value_func: Callable[[K, V], V],
-) -> Dict[K, V]:
-    """Map dictionary keys and values.
-
-    Args:
-        data: Dictionary to map.
-        key_func: Function to transform keys.
-        value_func: Function to transform values.
-
-    Returns:
-        New dictionary with transformed keys and values.
-    """
-    return {key_func(k, v): value_func(k, v) for k, v in data.items()}
-
-
-def filter_dict(
-    data: Dict[K, V],
-    predicate: Callable[[K, V], bool],
-) -> Dict[K, V]:
-    """Filter dictionary by predicate.
-
-    Args:
-        data: Dictionary to filter.
-        predicate: Function to filter by.
-
-    Returns:
-        Filtered dictionary.
-    """
-    return {k: v for k, v in data.items() if predicate(k, v)}
-
-
-def key_by(items: List[T], key_func: Callable[[T], K]) -> Dict[K, T]:
-    """Index items by key function.
-
-    Args:
-        items: List of items.
-        key_func: Function to extract key.
-
-    Returns:
-        Dictionary mapping keys to items.
+    Example:
+        list_to_dict(["apple", "banana"], len)
+        # {5: "apple", 6: "banana"}
     """
     return {key_func(item): item for item in items}
 
 
-def key_by_list(items: List[T], key_func: Callable[[T], K]) -> Dict[K, List[T]]:
-    """Index items by key function, allowing duplicates.
+def dict_from_tuples(
+    tuples: List[Tuple[K, V]],
+) -> Dict[K, V]:
+    """Create dict from list of tuples.
 
-    Args:
-        items: List of items.
-        key_func: Function to extract key.
-
-    Returns:
-        Dictionary mapping keys to item lists.
+    Example:
+        dict_from_tuples([("a", 1), ("b", 2)])
+        # {"a": 1, "b": 2}
     """
-    result: Dict[K, List[T]] = {}
-    for item in items:
-        key = key_func(item)
-        if key not in result:
-            result[key] = []
-        result[key].append(item)
-    return result
+    return dict(tuples)
 
 
-def find(items: List[T], predicate: Callable[[T], bool]) -> Optional[T]:
-    """Find item in list.
+def invert_dict(d: Dict[K, V]) -> Dict[V, K]:
+    """Invert dict keys and values.
 
-    Args:
-        items: List of items.
-        predicate: Function to find by.
-
-    Returns:
-        First matching item or None.
+    Example:
+        invert_dict({"a": 1, "b": 2})
+        # {1: "a", 2: "b"}
     """
-    for item in items:
-        if predicate(item):
-            return item
-    return None
+    return {v: k for k, v in d.items()}
 
 
-def find_index(items: List[T], predicate: Callable[[T], bool]) -> int:
-    """Find index of item in list.
+def filter_dict(
+    d: Dict[K, V],
+    predicate: Callable[[K, V], bool],
+) -> Dict[K, V]:
+    """Filter dict by predicate.
 
-    Args:
-        items: List of items.
-        predicate: Function to find by.
-
-    Returns:
-        Index of first match or -1.
+    Example:
+        filter_dict({"a": 1, "b": 2, "c": 3}, lambda k, v: v > 1)
+        # {"b": 2, "c": 3}
     """
-    for i, item in enumerate(items):
-        if predicate(item):
-            return i
-    return -1
+    return {k: v for k, v in d.items() if predicate(k, v)}
 
 
-def contains(items: List[T], predicate: Callable[[T], bool]) -> bool:
-    """Check if list contains item matching predicate.
+def map_dict(
+    d: Dict[K, V],
+    func: Callable[[K, V], Tuple[Any, Any]],
+) -> Dict:
+    """Map dict entries to new dict.
 
-    Args:
-        items: List of items.
-        predicate: Function to check by.
-
-    Returns:
-        True if found.
+    Example:
+        map_dict({"a": 1, "b": 2}, lambda k, v: (k.upper(), v * 2))
+        # {"A": 2, "B": 4}
     """
-    return any(predicate(item) for item in items)
+    return dict(func(k, v) for k, v in d.items())
 
 
-def all_match(items: List[T], predicate: Callable[[T], bool]) -> bool:
-    """Check if all items match predicate.
-
-    Args:
-        items: List of items.
-        predicate: Function to check by.
-
-    Returns:
-        True if all match.
-    """
-    return all(predicate(item) for item in items)
-
-
-def none_match(items: List[T], predicate: Callable[[T], bool]) -> bool:
-    """Check if no items match predicate.
-
-    Args:
-        items: List of items.
-        predicate: Function to check by.
-
-    Returns:
-        True if none match.
-    """
-    return not any(predicate(item) for item in items)
-
-
-def sort_by(items: List[T], key_func: Callable[[T], Any], reverse: bool = False) -> List[T]:
-    """Sort items by key function.
-
-    Args:
-        items: List of items.
-        key_func: Function to extract sort key.
-        reverse: If True, sort descending.
-
-    Returns:
-        Sorted list.
-    """
-    return sorted(items, key=key_func, reverse=reverse)
-
-
-def chunk_list(items: List[T], size: int) -> List[List[T]]:
-    """Split list into chunks.
-
-    Args:
-        items: List to chunk.
-        size: Chunk size.
-
-    Returns:
-        List of chunks.
-    """
-    return [items[i:i + size] for i in range(0, len(items), size)]
-
-
-def deduplicate(items: List[T]) -> List[T]:
-    """Remove duplicates from list.
-
-    Args:
-        items: List to deduplicate.
-
-    Returns:
-        Deduplicated list.
-    """
-    return list(dict.fromkeys(items))
+from typing import Generic, TypeVar
