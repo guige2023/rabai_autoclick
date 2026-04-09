@@ -1,345 +1,507 @@
-"""UI state machine for managing UI automation workflows.
+"""
+UI State Machine Module.
 
-Provides a state machine model for complex UI automation scenarios,
-supporting hierarchical states, guards, and transitions.
+Provides utilities for implementing state machine patterns for UI automation,
+including state transitions, guards, actions, and history tracking.
 """
 
 from __future__ import annotations
 
-import uuid
+import logging
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 
-class StateMachineEvent(Enum):
-    """Events that can trigger transitions."""
-    ENTER = auto()
-    EXIT = auto()
-    UPDATE = auto()
-    TIMEOUT = auto()
-    CUSTOM = auto()
+logger = logging.getLogger(__name__)
 
 
 @dataclass
-class StateTransition:
-    """A transition between two states.
-
-    Attributes:
-        source: Source state ID.
-        target: Target state ID.
-        event: Event that triggers this transition.
-        guard: Optional guard condition function.
-        action: Optional action to execute during transition.
-        description: Human-readable description.
-    """
-    source: str
-    target: str
-    event: StateMachineEvent = StateMachineEvent.CUSTOM
-    guard: Optional[Callable[[], bool]] = None
-    action: Optional[Callable[[], Any]] = None
-    description: str = ""
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
-
-    def can_transition(self) -> bool:
-        """Return True if guard allows this transition."""
-        if self.guard is None:
-            return True
-        try:
-            return self.guard()
-        except Exception:
-            return False
-
-
-@dataclass
-class UIState:
-    """A state in the UI state machine.
-
-    Attributes:
-        state_id: Unique identifier for this state.
-        name: Human-readable name.
-        is_active: Whether this state is currently active.
-        is_final: Whether this is a final/terminal state.
-        parent: Parent state ID for hierarchical states.
-        entry_action: Action to run when entering this state.
-        exit_action: Action to run when exiting this state.
-        update_action: Action to run while in this state.
-        timeout: Optional timeout in seconds (fires TIMEOUT event).
-        metadata: Additional state metadata.
-    """
-    state_id: str
+class State:
+    """Represents a state in the state machine."""
     name: str
-    is_active: bool = False
-    is_final: bool = False
-    parent: Optional[str] = None
-    entry_action: Optional[Callable[[], Any]] = None
-    exit_action: Optional[Callable[[], Any]] = None
-    update_action: Optional[Callable[[], Any]] = None
-    timeout: Optional[float] = None
-    metadata: dict = field(default_factory=dict)
-
-    def enter(self) -> Any:
-        """Execute entry action."""
-        if self.entry_action:
-            return self.entry_action()
-        return None
-
-    def exit(self) -> Any:
-        """Execute exit action."""
-        if self.exit_action:
-            return self.exit_action()
-        return None
-
-    def update(self) -> Any:
-        """Execute update action."""
-        if self.update_action:
-            return self.update_action()
-        return None
+    entry_action: Callable[[], None] | None = None
+    exit_action: Callable[[], None] | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class StateMachineContext:
-    """Shared context for state machine execution."""
-    current_state_id: str = ""
-    previous_state_id: str = ""
-    event_history: list[tuple[str, StateMachineEvent]] = field(default_factory=list)
-    state_data: dict[str, Any] = field(default_factory=dict)
-    metadata: dict = field(default_factory=dict)
+class Transition:
+    """Represents a transition between states."""
+    from_state: str
+    to_state: str
+    event: str
+    guard: Callable[[], bool] | None = None
+    action: Callable[[], None] | None = None
 
-    def get_state_data(self, key: str, default: Any = None) -> Any:
-        """Get data for current state."""
-        return self.state_data.get(self.current_state_id, default)
 
-    def set_state_data(self, key: str, value: Any) -> None:
-        """Set data for current state."""
-        self.state_data[self.current_state_id] = value
+class StateMachineError(Exception):
+    """Exception raised for state machine errors."""
+    pass
+
+
+class InvalidTransitionError(StateMachineError):
+    """Raised when an invalid transition is attempted."""
+    pass
+
+
+class GuardFailedError(StateMachineError):
+    """Raised when a transition guard fails."""
+    pass
 
 
 class UIStateMachine:
-    """A state machine for managing UI automation workflows.
+    """
+    A state machine for managing UI states and transitions.
 
-    Supports:
-    - Hierarchical states
-    - Guard conditions on transitions
-    - Entry/exit/update actions per state
-    - Event-driven transitions
-    - Timeout transitions
+    Example:
+        >>> sm = UIStateMachine("Idle")
+        >>> sm.add_state(State("Loading"))
+        >>> sm.add_transition(Transition("Idle", "Loading", "start"))
+        >>> sm.send_event("start")
     """
 
-    def __init__(self, initial_state: str = "") -> None:
-        """Initialize state machine with optional initial state."""
-        self._states: dict[str, UIState] = {}
-        self._transitions: dict[str, list[StateTransition]] = {}
-        self._initial_state = initial_state
-        self._current_state: Optional[UIState] = None
-        self._context = StateMachineContext()
-        self._is_running = False
-        self._transition_callbacks: list[Callable[[StateTransition], None]] = []
-
-    def add_state(
-        self,
-        state_id: str,
-        name: str = "",
-        is_final: bool = False,
-        parent: Optional[str] = None,
-        entry_action: Optional[Callable[[], Any]] = None,
-        exit_action: Optional[Callable[[], Any]] = None,
-        update_action: Optional[Callable[[], Any]] = None,
-        timeout: Optional[float] = None,
-    ) -> UIState:
-        """Register a state in the machine."""
-        state = UIState(
-            state_id=state_id,
-            name=name or state_id,
-            is_final=is_final,
-            parent=parent,
-            entry_action=entry_action,
-            exit_action=exit_action,
-            update_action=update_action,
-            timeout=timeout,
-        )
-        self._states[state_id] = state
-        self._transitions.setdefault(state_id, [])
-        return state
-
-    def add_transition(
-        self,
-        source: str,
-        target: str,
-        event: StateMachineEvent = StateMachineEvent.CUSTOM,
-        guard: Optional[Callable[[], bool]] = None,
-        action: Optional[Callable[[], Any]] = None,
-        description: str = "",
-    ) -> Optional[StateTransition]:
-        """Add a transition between states.
-
-        Returns the created transition, or None if states don't exist.
+    def __init__(self, initial_state: str) -> None:
         """
-        if source not in self._states or target not in self._states:
-            return None
-        transition = StateTransition(
-            source=source,
-            target=target,
-            event=event,
-            guard=guard,
-            action=action,
-            description=description,
-        )
-        self._transitions[source].append(transition)
-        return transition
+        Initialize the state machine.
 
-    def start(self, state_id: Optional[str] = None) -> None:
-        """Start the state machine in the initial or specified state."""
-        target_id = state_id or self._initial_state
-        if target_id not in self._states:
-            raise ValueError(f"State '{target_id}' does not exist")
-        self._is_running = True
-        self._context.current_state_id = target_id
-        self._context.previous_state_id = ""
-        self._enter_state(target_id)
-
-    def stop(self) -> None:
-        """Stop the state machine."""
-        if self._current_state:
-            self._current_state.exit()
-        self._is_running = False
-        if self._current_state:
-            self._current_state.is_active = False
-        self._current_state = None
-
-    def send_event(self, event: StateMachineEvent, event_data: Any = None) -> bool:
-        """Send an event to the state machine.
-
-        Returns True if a transition occurred.
+        Args:
+            initial_state: Name of the initial state.
         """
-        if not self._current_state:
-            return False
+        self._states: dict[str, State] = {}
+        self._transitions: dict[str, list[Transition]] = {}
+        self._current_state: str = initial_state
+        self._history: list[str] = []
+        self._max_history: int = 100
+        self._listeners: list[Callable[[str, str, str], None]] = []
 
-        self._context.event_history.append(
-            (self._current_state.state_id, event)
+    def add_state(self, state: State) -> None:
+        """
+        Add a state to the machine.
+
+        Args:
+            state: State to add.
+        """
+        self._states[state.name] = state
+        logger.debug(f"Added state: {state.name}")
+
+    def add_transition(self, transition: Transition) -> None:
+        """
+        Add a transition to the machine.
+
+        Args:
+            transition: Transition to add.
+        """
+        if transition.from_state not in self._states:
+            raise StateMachineError(
+                f"Unknown from_state: {transition.from_state}"
+            )
+
+        if transition.to_state not in self._states:
+            raise StateMachineError(
+                f"Unknown to_state: {transition.to_state}"
+            )
+
+        if transition.from_state not in self._transitions:
+            self._transitions[transition.from_state] = []
+
+        self._transitions[transition.from_state].append(transition)
+        logger.debug(
+            f"Added transition: {transition.from_state} -> {transition.to_state}"
         )
 
-        transitions = self._transitions.get(
-            self._current_state.state_id, []
-        )
+    def send_event(self, event: str) -> bool:
+        """
+        Send an event to trigger a transition.
+
+        Args:
+            event: Event name.
+
+        Returns:
+            True if transition occurred.
+
+        Raises:
+            InvalidTransitionError: If no valid transition exists.
+        """
+        current_state = self._states[self._current_state]
+        current_state.exit_action and current_state.exit_action()
+
+        transitions = self._transitions.get(self._current_state, [])
 
         for transition in transitions:
-            if transition.event != event:
-                continue
-            if not transition.can_transition():
-                continue
+            if transition.event == event:
+                if transition.guard and not transition.guard():
+                    logger.debug(
+                        f"Guard failed for transition {self._current_state} -> "
+                        f"{transition.to_state} on event {event}"
+                    )
+                    raise GuardFailedError(
+                        f"Guard failed for {event} transition"
+                    )
 
-            prev = self._current_state
-            next_state = self._states.get(transition.target)
-            if not next_state:
-                continue
+                old_state = self._current_state
+                self._current_state = transition.to_state
 
-            prev.exit()
-            if transition.action:
-                transition.action()
-            self._context.previous_state_id = prev.state_id
-            self._enter_state(transition.target)
-            self._notify_transition(transition)
-            return True
+                self._add_history(old_state)
 
-        return False
+                if transition.action:
+                    transition.action()
 
-    def update(self) -> Any:
-        """Run the update action for the current state.
+                new_state = self._states[self._current_state]
+                new_state.entry_action and new_state.entry_action()
 
-        Returns the result of the update action, if any.
-        """
-        if not self._current_state:
-            return None
-        return self._current_state.update()
+                self._notify_listeners(old_state, self._current_state, event)
 
-    def _enter_state(self, state_id: str) -> None:
-        """Enter a state and run its entry action."""
-        state = self._states[state_id]
-        state.is_active = True
-        self._current_state = state
-        self._context.current_state_id = state_id
-        state.enter()
+                logger.info(
+                    f"Transition: {old_state} -> {self._current_state} [{event}]"
+                )
+                return True
 
-    def get_current_state(self) -> Optional[UIState]:
-        """Return the currently active state."""
-        return self._current_state
-
-    def get_state(self, state_id: str) -> Optional[UIState]:
-        """Return a state by ID."""
-        return self._states.get(state_id)
-
-    def is_in_state(self, state_id: str) -> bool:
-        """Return True if currently in the given state."""
-        return (
-            self._current_state is not None
-            and self._current_state.state_id == state_id
+        logger.warning(f"No transition for event '{event}' in state '{self._current_state}'")
+        raise InvalidTransitionError(
+            f"No transition from '{self._current_state}' on event '{event}'"
         )
 
-    def get_active_states(self) -> list[UIState]:
-        """Return list of currently active states (for hierarchy)."""
-        active = []
-        current = self._current_state
-        while current:
-            active.append(current)
-            if current.parent:
-                current = self._states.get(current.parent)
-            else:
-                break
-        return active
+    def try_send_event(self, event: str) -> bool:
+        """
+        Try to send an event, returning False if invalid.
 
-    def on_transition(
-        self, callback: Callable[[StateTransition], None]
+        Args:
+            event: Event name.
+
+        Returns:
+            True if transition occurred, False otherwise.
+        """
+        try:
+            self.send_event(event)
+            return True
+        except (InvalidTransitionError, GuardFailedError):
+            return False
+
+    def _add_history(self, old_state: str) -> None:
+        """Add state to history."""
+        self._history.append(f"{old_state} -> {self._current_state}")
+        if len(self._history) > self._max_history:
+            self._history.pop(0)
+
+    def get_current_state(self) -> str:
+        """
+        Get the current state name.
+
+        Returns:
+            Current state name.
+        """
+        return self._current_state
+
+    def get_history(self) -> list[str]:
+        """
+        Get state transition history.
+
+        Returns:
+            List of transition descriptions.
+        """
+        return list(self._history)
+
+    def add_listener(
+        self,
+        listener: Callable[[str, str, str], None]
     ) -> None:
-        """Register a callback for state transitions."""
-        self._transition_callbacks.append(callback)
+        """
+        Add a state change listener.
 
-    def _notify_transition(self, transition: StateTransition) -> None:
-        """Notify all transition callbacks."""
-        for cb in self._transition_callbacks:
+        Args:
+            listener: Callback(old_state, new_state, event).
+        """
+        if listener not in self._listeners:
+            self._listeners.append(listener)
+
+    def remove_listener(
+        self,
+        listener: Callable[[str, str, str], None]
+    ) -> None:
+        """
+        Remove a state change listener.
+
+        Args:
+            listener: Callback to remove.
+        """
+        if listener in self._listeners:
+            self._listeners.remove(listener)
+
+    def _notify_listeners(
+        self,
+        old_state: str,
+        new_state: str,
+        event: str
+    ) -> None:
+        """Notify all listeners of state change."""
+        for listener in self._listeners:
             try:
-                cb(transition)
-            except Exception:
-                pass
-
-    @property
-    def context(self) -> StateMachineContext:
-        """Return the state machine context."""
-        return self._context
-
-    @property
-    def is_running(self) -> bool:
-        """Return True if state machine is running."""
-        return self._is_running
-
-    @property
-    def all_states(self) -> list[UIState]:
-        """Return all registered states."""
-        return list(self._states.values())
+                listener(old_state, new_state, event)
+            except Exception as e:
+                logger.error(f"State listener error: {e}")
 
 
-# Helper to create a simple linear workflow state machine
-def create_linear_workflow(
-    states: list[str],
-    transitions: Optional[list[tuple[str, str]]] = None,
-) -> UIStateMachine:
-    """Create a linear workflow state machine.
-
-    Args:
-        states: Ordered list of state IDs.
-        transitions: Optional list of (from, to) transition pairs.
-                    If None, transitions are sequential (states[i] -> states[i+1]).
+class HierarchicalStateMachine(UIStateMachine):
     """
-    sm = UIStateMachine(initial_state=states[0] if states else "")
+    A hierarchical state machine supporting nested states.
 
-    for state_id in states:
-        sm.add_state(state_id)
+    Example:
+        >>> sm = HierarchicalStateMachine("Root")
+        >>> sm.add_submachine("Parent", child_sm)
+    """
 
-    if transitions:
-        for source, target in transitions:
-            sm.add_transition(source, target)
-    else:
-        for i in range(len(states) - 1):
-            sm.add_transition(states[i], states[i + 1])
+    def __init__(self, initial_state: str) -> None:
+        """Initialize the hierarchical state machine."""
+        super().__init__(initial_state)
+        self._submachines: dict[str, UIStateMachine] = {}
+        self._parent_states: dict[str, str] = {}
 
-    return sm
+    def add_submachine(
+        self,
+        parent_state: str,
+        submachine: UIStateMachine
+    ) -> None:
+        """
+        Add a submachine to a state.
+
+        Args:
+            parent_state: Parent state name.
+            submachine: Submachine to add.
+        """
+        self._submachines[parent_state] = submachine
+
+        for state_name in submachine._states:
+            self._parent_states[state_name] = parent_state
+
+        logger.debug(
+            f"Added submachine to state '{parent_state}'"
+        )
+
+    def send_event(self, event: str) -> bool:
+        """Send event handling hierarchical submachines."""
+        try:
+            return super().send_event(event)
+        except InvalidTransitionError:
+            current_sm = self._get_current_submachine()
+            if current_sm and current_sm != self:
+                return current_sm.try_send_event(event)
+
+            raise
+
+
+class StateMachineBuilder:
+    """
+    Builder for creating state machines fluently.
+
+    Example:
+        >>> sm = (StateMachineBuilder("Idle")
+        ...     .with_state("Loading")
+        ...     .with_transition("Idle", "Loading", "start")
+        ...     .build())
+    """
+
+    def __init__(self, initial_state: str) -> None:
+        """Initialize the builder."""
+        self._initial_state = initial_state
+        self._states: list[State] = []
+        self._transitions: list[Transition] = []
+
+    def with_state(
+        self,
+        name: str,
+        entry_action: Callable[[], None] | None = None,
+        exit_action: Callable[[], None] | None = None
+    ) -> StateMachineBuilder:
+        """Add a state."""
+        self._states.append(State(name, entry_action, exit_action))
+        return self
+
+    def with_transition(
+        self,
+        from_state: str,
+        to_state: str,
+        event: str,
+        guard: Callable[[], bool] | None = None,
+        action: Callable[[], None] | None = None
+    ) -> StateMachineBuilder:
+        """Add a transition."""
+        self._transitions.append(
+            Transition(from_state, to_state, event, guard, action)
+        )
+        return self
+
+    def build(self) -> UIStateMachine:
+        """Build the state machine."""
+        if not self._states:
+            raise StateMachineError("No states defined")
+
+        initial = self._initial_state
+        if not any(s.name == initial for s in self._states):
+            raise StateMachineError(f"Initial state '{initial}' not defined")
+
+        sm = UIStateMachine(initial)
+
+        for state in self._states:
+            sm.add_state(state)
+
+        for transition in self._transitions:
+            sm.add_transition(transition)
+
+        return sm
+
+
+@dataclass
+class TransitionGuard:
+    """A guard condition for state transitions."""
+    name: str
+    condition: Callable[[], bool]
+    description: str = ""
+
+
+class GuardedStateMachine(UIStateMachine):
+    """
+    A state machine with named transition guards.
+
+    Example:
+        >>> sm = GuardedStateMachine("Idle")
+        >>> sm.add_guard(TransitionGuard("can_load", lambda: True))
+        >>> sm.add_transition_with_guard("Idle", "Loading", "start", "can_load")
+    """
+
+    def __init__(self, initial_state: str) -> None:
+        """Initialize the guarded state machine."""
+        super().__init__(initial_state)
+        self._guards: dict[str, TransitionGuard] = {}
+
+    def add_guard(self, guard: TransitionGuard) -> None:
+        """
+        Add a named guard.
+
+        Args:
+            guard: TransitionGuard to add.
+        """
+        self._guards[guard.name] = guard
+
+    def add_transition_with_guard(
+        self,
+        from_state: str,
+        to_state: str,
+        event: str,
+        guard_name: str,
+        action: Callable[[], None] | None = None
+    ) -> None:
+        """
+        Add a transition with a named guard.
+
+        Args:
+            from_state: Source state.
+            to_state: Target state.
+            event: Event name.
+            guard_name: Name of guard to use.
+            action: Optional action.
+        """
+        guard = self._guards.get(guard_name)
+
+        def wrapped_guard() -> bool:
+            if not guard:
+                return False
+            result = guard.condition()
+            logger.debug(
+                f"Guard '{guard_name}': {result}"
+            )
+            return result
+
+        self.add_transition(
+            Transition(from_state, to_state, event, wrapped_guard, action)
+        )
+
+
+@dataclass
+class StateMetrics:
+    """Metrics for state machine operations."""
+    state_name: str
+    entry_count: int = 0
+    exit_count: int = 0
+    total_time_ms: float = 0.0
+
+
+class StateMachineWithMetrics(UIStateMachine):
+    """
+    A state machine that collects transition and timing metrics.
+
+    Example:
+        >>> sm = StateMachineWithMetrics("Idle")
+        >>> stats = sm.get_metrics()
+    """
+
+    def __init__(self, initial_state: str) -> None:
+        """Initialize the state machine with metrics."""
+        super().__init__(initial_state)
+        self._state_metrics: dict[str, StateMetrics] = {}
+        self._state_entry_time: dict[str, float] = {}
+
+    def send_event(self, event: str) -> bool:
+        """Send event and update metrics."""
+        old_state = self._current_state
+
+        if old_state in self._state_entry_time:
+            entry_time = self._state_entry_time[old_state]
+            elapsed = (time.time() - entry_time) * 1000
+
+            if old_state not in self._state_metrics:
+                self._state_metrics[old_state] = StateMetrics(old_state)
+
+            self._state_metrics[old_state].total_time_ms += elapsed
+            self._state_metrics[old_state].exit_count += 1
+
+        result = super().send_event(event)
+
+        new_state = self._current_state
+        self._state_entry_time[new_state] = time.time()
+
+        if new_state not in self._state_metrics:
+            self._state_metrics[new_state] = StateMetrics(new_state)
+
+        self._state_metrics[new_state].entry_count += 1
+
+        return result
+
+    def get_metrics(self) -> dict[str, StateMetrics]:
+        """
+        Get metrics for all states.
+
+        Returns:
+            Dictionary of StateMetrics by state name.
+        """
+        return dict(self._state_metrics)
+
+    def get_state_summary(self, state_name: str) -> dict[str, Any]:
+        """
+        Get summary for a specific state.
+
+        Args:
+            state_name: State to summarize.
+
+        Returns:
+            Summary dictionary.
+        """
+        metrics = self._state_metrics.get(state_name, StateMetrics(state_name))
+
+        avg_time = (
+            metrics.total_time_ms / metrics.exit_count
+            if metrics.exit_count > 0
+            else 0.0
+        )
+
+        return {
+            "state": state_name,
+            "entry_count": metrics.entry_count,
+            "exit_count": metrics.exit_count,
+            "total_time_ms": metrics.total_time_ms,
+            "avg_time_ms": avg_time,
+            "current": state_name == self._current_state
+        }
+
+
+import time
