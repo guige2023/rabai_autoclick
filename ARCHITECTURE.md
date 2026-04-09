@@ -1,85 +1,266 @@
-# Architecture Overview
+# RabAI AutoClick Architecture
 
-This document describes the high-level architecture of RabAI AutoClick.
+## System Overview
 
-## System Design
-
-RabAI AutoClick follows a modular, layered architecture:
+RabAI AutoClick is a desktop automation tool that allows users to record, edit, and replay mouse and keyboard actions. The system consists of a GUI layer, execution engine, and extensible action system.
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    GUI Layer (PyQt5)                     │
-│  MainWindow │ ActionEditor │ RegionSelector │ Dialogs  │
-├─────────────────────────────────────────────────────────┤
-│                   CLI Layer (Click)                      │
-│       Main CLI │ predict │ heal │ scene │ diag        │
-├─────────────────────────────────────────────────────────┤
-│                 Core Engine Layer                       │
-│   FlowEngine │ ContextManager │ ActionLoader │ Actions  │
-├─────────────────────────────────────────────────────────┤
-│                v22 Advanced Features                    │
-│  PredictiveEngine │ SelfHealing │ Diagnostics │ Share  │
-├─────────────────────────────────────────────────────────┤
-│                   Utils Layer                           │
-│  Hotkey │ Logger │ Memory │ Recording │ History       │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                         GUI Layer                               │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
+│  │ MainWindow  │  │ WorkflowView │  │ ActionEditor           │ │
+│  └─────────────┘  └─────────────┘  └─────────────────────────┘ │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+┌───────────────────────────▼─────────────────────────────────────┐
+│                      Core Engine                                 │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
+│  │   Engine    │  │  Context    │  │  ActionLoader          │ │
+│  └─────────────┘  └─────────────┘  └─────────────────────────┘ │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+┌───────────────────────────▼─────────────────────────────────────┐
+│                      Action System (34+ Actions)                 │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐  │
+│  │  Mouse  │ │ Keyboard│ │   OCR   │ │  Image  │ │Control  │  │
+│  └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘  │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+---
 
 ## Core Components
 
-### 1. Flow Engine (`core/engine.py`)
+### 1. Execution Engine (`core/engine.py`)
 
-The central execution engine that orchestrates workflow execution:
+The central component that orchestrates workflow execution.
 
-- **Workflow Loading**: Loads workflows from JSON/dict format
-- **Step Execution**: Executes steps in sequence or based on conditions
-- **Flow Control**: Handles loops, conditions, and jumps
-- **State Management**: Manages execution state and context
+**Responsibilities:**
+- Parse and validate workflows
+- Execute actions in sequence or parallel
+- Manage execution state (running, paused, stopped)
+- Handle exceptions and retries
+- Coordinate with self-healing and predictive systems
 
-### 2. Context Manager (`core/context.py`)
+**Key Classes:**
+```python
+class Engine:
+    def __init__(self):
+        self.context = ExecutionContext()
+        self.action_loader = ActionLoader()
+        self.self_healing = SelfHealingSystem()
+        self.predictive = PredictiveEngine()
 
-Manages workflow execution state:
+    def execute(self, workflow: Workflow) -> ExecutionResult:
+        """Execute a complete workflow."""
+        pass
 
-- **Variable Storage**: Key-value store for workflow variables
-- **Variable Resolution**: Resolves `{{variable}}` and `{{expression}}` references
-- **Safe Execution**: Sandboxed Python code execution
-- **History Tracking**: Tracks all variable changes
+    def execute_step(self, action: Action) -> ActionResult:
+        """Execute a single action step."""
+        pass
+
+    def pause(self):
+        """Pause execution."""
+        pass
+
+    def resume(self):
+        """Resume execution."""
+        pass
+
+    def stop(self):
+        """Stop execution."""
+        pass
+```
+
+### 2. Execution Context (`core/context.py`)
+
+Maintains state during workflow execution.
+
+**Responsibilities:**
+- Store variables and their values
+- Track execution history
+- Manage loop counters and conditions
+- Provide access to runtime environment
+
+**Key Classes:**
+```python
+class ExecutionContext:
+    def __init__(self):
+        self.variables: Dict[str, Any] = {}
+        self.loop_counters: Dict[str, int] = {}
+        self.execution_history: List[ActionResult] = []
+        self.metadata: Dict[str, Any] = {}
+
+    def set_variable(self, name: str, value: Any):
+        """Set a variable value."""
+        pass
+
+    def get_variable(self, name: str) -> Any:
+        """Get a variable value."""
+        pass
+```
 
 ### 3. Action Loader (`core/action_loader.py`)
 
-Dynamic action module loader:
+Dynamically loads and registers action implementations.
 
-- **Dynamic Discovery**: Auto-discovers action modules in `actions/` directory
-- **Module Loading**: Loads and initializes action classes
-- **Action Registry**: Maintains registry of available actions
+**Responsibilities:**
+- Discover action implementations
+- Validate action schemas
+- Provide action metadata
+- Manage action lifecycle
 
-### 4. Actions (`actions/`)
+**Key Classes:**
+```python
+class ActionLoader:
+    def __init__(self):
+        self.actions: Dict[str, Type[BaseAction]] = {}
 
-Individual automation actions:
+    def load_actions(self):
+        """Load all actions from the actions directory."""
+        pass
 
-| Action | File | Description |
-|--------|------|-------------|
-| Click | `click.py` | Mouse click at coordinates |
-| Type | `keyboard.py` | Keyboard text input |
-| KeyPress | `keyboard.py` | Special key combinations |
-| ImageMatch | `image_match.py` | Template-based image matching |
-| OCR | `ocr.py` | Text recognition and clicking |
-| Delay | `script.py` | Wait for specified seconds |
-| Condition | `script.py` | Conditional branching |
-| Loop | `script.py` | Loop control |
-| SetVariable | `script.py` | Variable assignment |
-| Screenshot | `system.py` | Screen capture |
-| GetMousePos | `system.py` | Get current mouse position |
+    def get_action(self, action_type: str) -> BaseAction:
+        """Get an action instance by type."""
+        pass
 
-### 5. UI Components (`ui/`)
+    def list_actions(self) -> List[ActionMetadata]:
+        """List all available actions."""
+        pass
+```
 
-PyQt5-based graphical interface:
+---
 
-- **MainWindow**: Primary application window
-- **ActionEditor**: Step configuration editor
-- **RegionSelector**: Screen region selection tool
-- **HotkeyDialog**: Hotkey configuration
-- **MessageManager**: Notification system
+## Action System Design
+
+### Base Action (`core/base_action.py`)
+
+All actions inherit from `BaseAction`:
+
+```python
+from abc import ABC, abstractmethod
+from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+
+@dataclass
+class ActionResult:
+    success: bool
+    message: str
+    data: Optional[Dict[str, Any]] = None
+    screenshot: Optional[str] = None
+
+class BaseAction(ABC):
+    action_type: str = ""
+    display_name: str = ""
+    description: str = ""
+    category: str = "general"
+
+    @abstractmethod
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute the action with given parameters."""
+        pass
+
+    def get_required_params(self) -> List[str]:
+        """Return list of required parameter names."""
+        return []
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        """Return dict of optional parameters with defaults."""
+        return {}
+
+    def validate_params(self, params: Dict[str, Any]) -> bool:
+        """Validate parameters before execution."""
+        return True
+```
+
+### Action Categories
+
+| Category | Description | Actions |
+|----------|-------------|---------|
+| `mouse` | Mouse operations | click, mouse_click, double_click, scroll, mouse_move, drag |
+| `keyboard` | Keyboard operations | type_text, key_press |
+| `ocr` | OCR and text recognition | ocr |
+| `image` | Image matching | click_image, find_image |
+| `control` | Flow control | loop, loop_while, condition, try_catch, goto, label |
+| `system` | System operations | screenshot, get_mouse_pos, alert, set_variable, delay |
+| `wait` | Wait operations | wait_for_image, wait_for_text, wait_for_element |
+
+### Action Execution Flow
+
+```
+┌─────────────┐
+│   Engine    │
+└──────┬──────┘
+       │
+       ▼
+┌─────────────┐     ┌─────────────────┐
+│ ActionLoader│────►│  BaseAction     │
+└─────────────┘     │  .execute()     │
+                    └────────┬────────┘
+                             │
+                             ▼
+                    ┌─────────────────┐
+                    │   Validation    │
+                    └────────┬────────┘
+                             │
+              ┌──────────────┼──────────────┐
+              │              │              │
+              ▼              ▼              ▼
+        ┌──────────┐  ┌──────────┐  ┌──────────┐
+        │ Success  │  │  Retry   │  │ Failure  │
+        └──────────┘  └──────────┘  └──────────┘
+                                         │
+                                         ▼
+                                 ┌──────────────────┐
+                                 │ SelfHealingSystem │
+                                 └──────────────────┘
+```
+
+---
+
+## Extension Points
+
+### 1. Custom Actions
+
+Extend the system with custom actions:
+
+```python
+# actions/custom/my_custom_action.py
+from core.base_action import BaseAction, ActionResult
+
+class MyCustomAction(BaseAction):
+    action_type = "my_custom_action"
+    display_name = "My Custom Action"
+    description = "A custom action for..."
+    category = "custom"
+
+    def execute(self, context, params):
+        # Custom implementation
+        return ActionResult(success=True, message="Done")
+```
+
+### 2. Plugins
+
+The system supports plugins via entry points:
+
+```toml
+# pyproject.toml
+[project.entry-points."rabai.plugins"]
+my_plugin = "rabai_plugins.my_plugin:register"
+```
+
+### 3. Action Decorators
+
+Use decorators to add functionality:
+
+```python
+@retry(max_attempts=3, delay=1.0)
+@log_action
+def execute(self, context, params):
+    pass
+```
+
+---
 
 ## Data Flow
 
@@ -89,217 +270,219 @@ PyQt5-based graphical interface:
 User Input (GUI/CLI)
        │
        ▼
-┌─────────────────┐
-│  FlowEngine    │
-│  load_workflow │
-└────────┬───────┘
-         │
-         ▼
-┌─────────────────┐
-│ ContextManager  │
-│   (variables)   │
-└────────┬───────┘
-         │
-         ▼
-┌─────────────────┐     ┌──────────────────┐
-│  ActionLoader   │────▶│  Action.execute()│
-│  get_action()   │     │  (ContextManager)│
-└─────────────────┘     └────────┬─────────┘
-                                 │
-                                 ▼
-                        ┌──────────────────┐
-                        │   ActionResult   │
-                        │ (success/error)  │
-                        └──────────────────┘
-```
-
-### Recording Flow
-
-```
-User Actions (Mouse/Keyboard)
+┌──────────────┐
+│   Workflow   │
+│   (JSON/YAML)│
+└──────┬───────┘
        │
        ▼
+┌──────────────┐     ┌──────────────┐
+│    Engine    │────►│   Context    │
+│  Validation  │     │  (State)     │
+└──────┬───────┘     └──────────────┘
+       │
+       ▼
+┌─────────────────────────────────────┐
+│         Action Execution Loop        │
+│  ┌───────┐  ┌───────┐  ┌───────┐   │
+│  │Action1│→ │Action2│→ │Action3│→...│
+│  └───┬───┘  └───┬───┘  └───┬───┘   │
+│      │          │          │        │
+│      ▼          ▼          ▼        │
+│  ┌───────┐  ┌───────┐  ┌───────┐   │
+│  │Result1│  │Result2│  │Result3│   │
+│  └───────┘  └───────┘  └───────┘   │
+└─────────────────────────────────────┘
+       │
+       ▼
+┌──────────────┐
+│  Execution   │
+│    Result    │
+└──────────────┘
+```
+
+### Context Data Flow
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    ExecutionContext                      │
+├─────────────────────────────────────────────────────────┤
+│  Variables    │  Loop Counters  │  History  │ Metadata │
+│  ─────────    │  ─────────────  │  ───────  │ ──────── │
+│  x = 100      │  loop_1 = 5     │ [r1,r2]   │ app_name │
+│  name = "test"│                 │           │ start_time│
+└─────────────────────────────────────────────────────────┘
+                           ▲
+                           │
+                    ┌──────┴──────┐
+                    │ Set/Get     │
+                    │ Variables   │
+                    └─────────────┘
+```
+
+---
+
+## Self-Healing System (`src/self_healing_system.py`)
+
+Automatic recovery from action failures.
+
+```
+Action Fails
+     │
+     ▼
 ┌─────────────────┐
-│ RecordingManager│
-│ (pynput listener)│
-└────────┬───────┘
+│ Failure Detect  │
+└────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│ RecordedAction  │
-│ (timestamp,type,│
-│  params)        │
-└────────┬───────┘
-         │
-         ▼
-┌─────────────────┐
-│ to_workflow()   │
-│ (conversion)    │
-└─────────────────┘
+│ Retry Strategy  │◄──────┐
+│ (max_attempts)  │       │
+└────────┬────────┘       │
+         │                │
+    ┌────┴────┐          │
+    │         │          │
+    ▼         ▼          │
+┌───────┐ ┌───────┐      │
+│ Success│ │ Fail  │──────┘
+└───────┘ └───────┘
 ```
 
-## v22 Advanced Features
+**Recovery Strategies:**
+1. Retry with same parameters
+2. Retry with adjusted parameters
+3. Skip action and continue
+4. Fallback to alternative action
+5. Stop workflow with error
 
-### Predictive Engine (`src/predictive_engine.py`)
+---
 
-Learns from user behavior to predict next actions:
+## Predictive Engine (`src/predictive_engine.py`)
 
-- **Action Recording**: Records user actions with context
-- **Pattern Recognition**: Identifies recurring action sequences
-- **Prediction**: Predicts next likely action
+Predicts and pre-executes likely next actions.
 
-### Self-Healing System (`src/self_healing_system.py`)
-
-Automatically recovers from execution failures:
-
-- **Error Detection**: Identifies failure patterns
-- **Root Cause Analysis**: Determines failure causes
-- **Recovery Strategies**: Implements retry/alternative approaches
-
-### Diagnostics (`src/workflow_diagnostics.py`)
-
-Health monitoring and analysis:
-
-- **Trend Analysis**: Tracks success rate over time
-- **Anomaly Detection**: Identifies unusual patterns
-- **Health Scoring**: Rates workflow health
-
-### Workflow Sharing (`src/workflow_share.py`)
-
-No-code workflow sharing:
-
-- **Link Generation**: Creates shareable workflow URLs
-- **Import/Export**: JSON and Base64 format support
-- **Version Control**: Tracks workflow versions
-
-### Pipeline Mode (`src/pipeline_mode.py`)
-
-CLI pipeline integration:
-
-- **Chain Management**: Creates action chains
-- **Linear/Branch/Parallel**: Multiple execution modes
-- **Data Passing**: Chains can pass data between steps
-
-### Screen Recorder (`src/screen_recorder.py`)
-
-Records screen actions for workflow generation:
-
-- **Action Recording**: Captures mouse/keyboard actions
-- **Workflow Conversion**: Converts recordings to executable workflows
-- **Element Detection**: Image/text/coordinate detection modes
-
-## Design Patterns
-
-### Singleton Pattern
-
-Used for managers that should have only one instance:
-
-```python
-class MemoryManager:
-    _instance = None
-    
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+```
+┌─────────────────────────────────────────────────────┐
+│              Predictive Engine                       │
+├─────────────────────────────────────────────────────┤
+│  ┌───────────┐   ┌───────────┐   ┌───────────┐    │
+│  │ History   │ → │  Pattern  │ → │ Prediction│    │
+│  │ Analysis  │   │ Matching  │   │  Output   │    │
+│  └───────────┘   └───────────┘   └───────────┘    │
+│                                         │          │
+│                                         ▼          │
+│                               ┌──────────────────┐ │
+│                               │ Pre-execution    │ │
+│                               │ (if confident)   │ │
+│                               └──────────────────┘ │
+└─────────────────────────────────────────────────────┘
 ```
 
-Applied to: `MemoryManager`, `AppLogger`, `MessageManager`
+---
 
-### Factory Pattern
+## Workflow Diagnostics (`src/workflow_diagnostics.py`)
 
-Action creation uses factory-like initialization:
+Real-time monitoring and analysis.
 
-```python
-class ActionLoader:
-    def get_action(self, action_type: str) -> BaseAction:
-        action_class = self._actions.get(action_type)
-        if action_class:
-            return action_class()
+**Metrics Tracked:**
+- Action execution time
+- Success/failure rate
+- Memory usage
+- CPU usage
+- Error frequency
+
+**Output:**
+- Real-time dashboard (GUI)
+- Log files
+- Execution reports
+
+---
+
+## File Structure
+
+```
+rabai_autoclick/
+├── actions/                    # Action implementations
+│   ├── __init__.py            # Action registration
+│   ├── base_action.py         # Base class (may be in core)
+│   ├── click.py               # Basic click action
+│   ├── mouse.py               # Mouse actions (6 actions)
+│   ├── keyboard.py            # Keyboard actions (2 actions)
+│   ├── ocr.py                 # OCR action
+│   ├── image_match.py         # Image matching (2 actions)
+│   ├── script.py              # Script/condition/loop (6 actions)
+│   ├── loop_while.py          # While loop controls (4 actions)
+│   ├── try_catch.py           # Exception handling (4 actions)
+│   ├── wait_for.py            # Wait actions (3 actions)
+│   ├── system.py              # System actions (3 actions)
+│   └── comment.py             # Label/goto/comment (4 actions)
+│
+├── cli/                        # CLI implementation
+│   └── main.py                # CLI entry points
+│
+├── core/                       # Core engine
+│   ├── engine.py              # Main execution engine
+│   ├── context.py             # Execution context
+│   └── action_loader.py       # Action loading
+│
+├── gui/                        # GUI components
+│
+├── src/                        # Advanced features
+│   ├── self_healing_system.py
+│   ├── predictive_engine.py
+│   ├── workflow_diagnostics.py
+│   ├── pipeline_mode.py
+│   ├── screen_recorder.py
+│   ├── workflow_share.py
+│   └── workflow_package.py
+│
+├── tests/                      # Test suite
+│   ├── test_core/
+│   ├── test_actions/
+│   └── conftest.py
+│
+├── ui/                         # PyQt5 UI
+│
+├── utils/                      # Utilities
+│   ├── hotkey.py
+│   └── logging.py
+│
+├── main.py                     # GUI entry point
+├── pyproject.toml
+└── README.md
 ```
 
-### Strategy Pattern
+---
 
-Different recovery strategies in SelfHealingSystem:
+## Dependencies
 
-```python
-class SelfHealingSystem:
-    def _apply_recovery(self, strategy: RecoveryStrategy):
-        if strategy == RecoveryStrategy.RETRY:
-            return self._retry()
-        elif strategy == RecoveryStrategy.RELOCATE:
-            return self._relocate()
-        # ...
-```
+| Package | Purpose | Version |
+|---------|---------|---------|
+| PyQt5 | GUI framework | >=5.15.0 |
+| pyautogui | Cross-platform GUI automation | >=0.9.53 |
+| opencv-python | Image processing | >=4.5.0 |
+| pynput | Global hotkeys | >=1.7.0 |
+| rapidocr-onnxruntime | OCR engine | >=1.3.0 |
+| numpy | Numerical operations | >=1.19.0 |
+| psutil | System info | >=5.8.0 |
+| Pillow | Image processing | >=8.0.0 |
+| click | CLI framework | >=8.1.0 |
 
-### Observer Pattern
+---
 
-Event handling in FlowEngine:
+## Platform-Specific Considerations
 
-```python
-class FlowEngine:
-    def add_listener(self, listener):
-        self._listeners.append(listener)
-    
-    def _notify(self, event):
-        for listener in self._listeners:
-            listener.on_event(event)
-```
+### Windows
+- Uses `pyautogui` for automation
+- Win32 API for window management
+- Global hotkeys via `pynput`
 
-## Error Handling
+### macOS
+- Requires Accessibility permissions
+- Uses ` CGEvent` for mouse/keyboard
+- Cocoa APIs for window management
 
-### Layered Error Handling
-
-1. **Action Level**: Each action validates params and catches own errors
-2. **Engine Level**: FlowEngine catches action failures and implements recovery
-3. **System Level**: SelfHealingSystem analyzes patterns and suggests fixes
-
-### Safe Execution Sandbox
-
-The `safe_exec()` method in ContextManager provides a sandboxed Python execution:
-
-- **Allowed**: Basic operations, context variables, math functions
-- **Blocked**: `import`, file I/O, network, system commands
-
-## Threading Model
-
-- **Main Thread**: GUI event loop (PyQt5)
-- **Worker Threads**: Action execution via QThread
-- **pynput Listener**: Separate process on macOS to avoid Qt conflicts
-
-## Performance Considerations
-
-1. **Action Caching**: Action instances are reused across executions
-2. **Lazy Loading**: Actions loaded on-demand, not all at startup
-3. **Memory Management**: Max history limits prevent unbounded growth
-4. **Image Caching**: Cached template images for faster matching
-
-## Extensibility
-
-### Adding New Actions
-
-1. Create `actions/my_action.py`:
-   ```python
-   from core.base_action import BaseAction, ActionResult
-   
-   class MyAction(BaseAction):
-       action_type = "my_action"
-       # ... implement methods
-   ```
-
-2. Export in `actions/__init__.py`
-
-### Adding CLI Commands
-
-1. Add to `cli/main.py`:
-   ```python
-   @cli.command('my-command')
-   def my_command():
-       # implementation
-   ```
-
-### Adding v22 Features
-
-1. Create `src/my_feature.py`
-2. Export in `src/__init__.py`
-3. Add CLI commands if needed
+### Linux
+- X11 automation support
+- XRecord for hotkeys
+- (Limited platform support)

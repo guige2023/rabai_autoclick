@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rabai-autoclick"
-version = "22.0.0"
+version = "2.4.0"
 description = "RabAI AutoClick - 智能桌面自动化工具，支持操作录制、OCR文字识别、图像匹配与可视化编辑"
 readme = "README.md"
 requires-python = ">=3.8"
