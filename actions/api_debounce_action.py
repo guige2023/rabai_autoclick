@@ -1,248 +1,347 @@
-"""API debounce action module for RabAI AutoClick.
+"""
+API Debounce Action Module.
 
-Provides debouncing for API request operations:
-- ApiRequestDebouncer: Debounce rapid API requests
-- ApiRequestCoalescer: Coalesce multiple API requests
-- ApiRequestBatcher: Batch similar API requests together
+Provides debouncing functionality for API requests, coalescing
+multiple rapid requests into single operations.
 """
 
-from typing import Any, Callable, Dict, List, Optional, Tuple, Set
-import time
-import threading
-import hashlib
-import logging
+from typing import Any, Callable, Dict, List, Optional, Set
 from dataclasses import dataclass, field
-from enum import Enum
-from collections import defaultdict
+from datetime import datetime, timezone
+import asyncio
+import logging
+import time
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
-
-
-class ApiDebounceMode(Enum):
-    """API debounce modes."""
-    REQUEST = "request"
-    RESPONSE = "response"
-    COMBINED = "combined"
-    CACHING = "caching"
+logger = logging.getLogger(__name__)
 
 
 @dataclass
-class ApiDebounceConfig:
-    """Configuration for API debouncing."""
-    mode: ApiDebounceMode = ApiDebounceMode.REQUEST
-    delay: float = 0.5
-    max_pending: int = 100
-    cache_ttl: float = 30.0
-    dedup_enabled: bool = True
-    dedup_key_fields: List[str] = field(default_factory=lambda: ["url", "method"])
-    coalesce_by: Optional[str] = None
-    batch_size: int = 5
-    batch_timeout: float = 1.0
+class DebounceCall:
+    """Represents a debounced function call."""
+    call_id: str
+    key: str
+    args: tuple
+    kwargs: dict
+    created_at: float
+    scheduled_at: Optional[float] = None
+    executed_at: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "call_id": self.call_id,
+            "key": self.key,
+            "created_at": self.created_at,
+            "scheduled_at": self.scheduled_at,
+            "executed_at": self.executed_at,
+        }
 
 
-class RequestDeduplicator:
-    """Deduplicate identical API requests."""
-    
-    def __init__(self):
-        self._pending: Dict[str, Tuple[Any, threading.Event]] = {}
-        self._results: Dict[str, Any] = {}
-        self._lock = threading.RLock()
-        self._stats = {"dedup_hits": 0, "dedup_misses": 0}
-    
-    def _make_key(self, request: Dict[str, Any], fields: List[str]) -> str:
-        """Generate dedup key from request."""
-        parts = []
-        for field in fields:
-            val = request.get(field, "")
-            parts.append(f"{field}={val}")
-        return "|".join(parts)
-    
-    def register(self, request: Dict[str, Any]) -> Tuple[Optional[Any], bool]:
-        """Register a request. Returns (existing_result, was_deduped)."""
-        key = self._make_key(request, ["url", "method", "params", "data"])
-        
-        with self._lock:
-            if key in self._results:
-                age = time.time() - self._results[key][1]
-                if age < 30.0:
-                    self._stats["dedup_hits"] += 1
-                    return self._results[key][0], True
-            
-            if key in self._pending:
-                event = threading.Event()
-                self._pending[key] = (self._pending[key][0], event)
-                self._stats["dedup_hits"] += 1
-                return None, True
-            
-            event = threading.Event()
-            self._pending[key] = (None, event)
-            self._stats["dedup_misses"] += 1
-            return None, False
-    
-    def complete(self, request: Dict[str, Any], result: Any):
-        """Mark request as complete and notify waiters."""
-        key = self._make_key(request, ["url", "method", "params", "data"])
-        
-        with self._lock:
-            self._results[key] = (result, time.time())
-            
-            if key in self._pending:
-                _, event = self._pending.pop(key)
-                event.set()
-    
-    def wait(self, request: Dict[str, Any], timeout: float = 5.0) -> Optional[Any]:
-        """Wait for existing request to complete."""
-        key = self._make_key(request, ["url", "method", "params", "data"])
-        
-        with self._lock:
-            if key not in self._pending:
-                return None
-            _, event = self._pending[key]
-        
-        if event.wait(timeout):
-            with self._lock:
-                if key in self._results:
-                    return self._results[key][0]
+@dataclass
+class DebounceStats:
+    """Statistics for debounce operations."""
+    total_calls: int = 0
+    coalesced_calls: int = 0
+    executed_calls: int = 0
+    dropped_calls: int = 0
+    active_keys: int = 0
+
+    def coalesce_rate(self) -> float:
+        """Calculate coalesce rate."""
+        if self.total_calls == 0:
+            return 0.0
+        return (self.coalesced_calls / self.total_calls) * 100
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "total_calls": self.total_calls,
+            "coalesced_calls": self.coalesced_calls,
+            "executed_calls": self.executed_calls,
+            "dropped_calls": self.dropped_calls,
+            "active_keys": self.active_keys,
+            "coalesce_rate_percent": self.coalesce_rate(),
+        }
+
+
+class ApiDebounceAction:
+    """
+    Provides debouncing for API requests.
+
+    This action implements debounce functionality that delays function
+    execution until after a specified wait time has elapsed since the
+    last call. Useful for rate limiting and coalescing rapid requests.
+
+    Example:
+        >>> debouncer = ApiDebounceAction(wait_ms=500)
+        >>> debouncer.debounce("fetch_user", fetch_user_data, user_id=123)
+        >>> # Multiple calls within 500ms are coalesced into one
+    """
+
+    def __init__(
+        self,
+        wait_ms: float = 300,
+        max_wait_ms: Optional[float] = None,
+        leading: bool = True,
+        trailing: bool = True,
+        max_coalesce: Optional[int] = None,
+    ):
+        """
+        Initialize the API Debounce Action.
+
+        Args:
+            wait_ms: Wait time in milliseconds before executing.
+            max_wait_ms: Maximum wait time.
+            leading: Execute on leading edge (immediately on first call).
+            trailing: Execute on trailing edge (after wait time).
+            max_coalesce: Maximum calls to coalesce before forcing execution.
+        """
+        self.wait_seconds = wait_ms / 1000
+        self.max_wait_seconds = max_wait_ms / 1000 if max_wait_ms else None
+        self.leading = leading
+        self.trailing = trailing
+        self.max_coalesce = max_coalesce
+
+        self._pending: Dict[str, DebounceCall] = {}
+        self._timers: Dict[str, asyncio.TimerHandle] = {}
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._lock = asyncio.Lock()
+
+        self._stats = DebounceStats()
+
+    async def debounce(
+        self,
+        key: str,
+        func: Callable,
+        *args,
+        **kwargs,
+    ) -> Optional[Any]:
+        """
+        Debounce a function call.
+
+        Args:
+            key: Unique key for this debounce group.
+            func: Function to call.
+            *args: Positional arguments for function.
+            **kwargs: Keyword arguments for function.
+
+        Returns:
+            Function result if executed, None otherwise.
+        """
+        import uuid
+
+        self._stats.total_calls += 1
+
+        call = DebounceCall(
+            call_id=str(uuid.uuid4()),
+            key=key,
+            args=args,
+            kwargs=kwargs,
+            created_at=time.time(),
+        )
+
+        existing = self._pending.get(key)
+
+        if existing:
+            self._stats.coalesced_calls += 1
+            call.scheduled_at = existing.scheduled_at
+
+            if self.max_coalesce:
+                coalesce_count = getattr(existing, "_coalesce_count", 0) + 1
+                call._coalesce_count = coalesce_count  # type: ignore
+
+                if coalesce_count >= self.max_coalesce:
+                    await self._execute(key, func)
+                    return None
+
+        else:
+            if self.leading:
+                call.scheduled_at = time.time()
+                call.executed_at = time.time()
+                self._stats.executed_calls += 1
+
+                try:
+                    result = await self._safe_execute(func, *args, **kwargs)
+                    return result
+                except Exception as e:
+                    logger.error(f"Debounce leading edge error: {e}")
+                    return None
+
+        self._pending[key] = call
+
+        await self._schedule_timer(key, func)
+
         return None
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get deduplication statistics."""
-        with self._lock:
-            return dict(self._stats)
 
+    async def _schedule_timer(self, key: str, func: Callable) -> None:
+        """Schedule a timer for debounced execution."""
+        if key in self._timers:
+            self._timers[key].cancel()
 
-class ApiRequestDebouncer:
-    """Debounce API requests."""
-    
-    def __init__(self, config: Optional[ApiDebounceConfig] = None):
-        self.config = config or ApiDebounceConfig()
-        self._timers: Dict[str, Any] = {}
-        self._pending_requests: Dict[str, Tuple[Any, ...]] = {}
-        self._deduplicator = RequestDeduplicator()
-        self._lock = threading.RLock()
-        self._stats = {"total_requests": 0, "debounced": 0, "batched": 0, "executed": 0}
-    
-    def _make_request_key(self, request: Dict[str, Any]) -> str:
-        """Generate key for request grouping."""
-        if self.config.coalesce_by:
-            return f"{request.get(self.config.coalesce_by, 'default')}"
-        
-        url = request.get("url", "")
-        method = request.get("method", "GET")
-        params_hash = hashlib.md5(str(request.get("params", "")).encode()).hexdigest()[:8]
-        return f"{method}:{url}:{params_hash}"
-    
-    def schedule(self, request: Dict[str, Any], operation: Callable, *args, **kwargs) -> bool:
-        """Schedule a debounced API request."""
-        with self._lock:
-            self._stats["total_requests"] += 1
-            key = self._make_request_key(request)
-            
-            existing_timer = self._timers.get(key)
-            if existing_timer:
-                existing_timer.cancel()
-            
-            self._pending_requests[key] = (operation, args, kwargs)
-            
-            timer = threading.Timer(self.config.delay, self._execute_pending, args=(key,))
-            self._timers[key] = timer
-            timer.start()
-            
-            self._stats["debounced"] += 1
-            return True
-    
-    def _execute_pending(self, key: str):
-        """Execute pending requests for key."""
-        with self._lock:
-            pending = self._pending_requests.pop(key, None)
-            timer = self._timers.pop(key, None)
-        
-        if pending:
-            operation, args, kwargs = pending
+        loop = asyncio.get_running_loop()
+
+        wait_time = self.wait_seconds
+        if self.max_wait_seconds and self._pending.get(key):
+            elapsed = time.time() - self._pending[key].created_at
+            wait_time = min(wait_time, self.max_wait_seconds - elapsed)
+
+        timer = loop.call_later(
+            wait_time,
+            lambda: asyncio.create_task(self._execute(key, func)),
+        )
+
+        self._timers[key] = timer
+
+    async def _execute(self, key: str, func: Callable) -> None:
+        """Execute the debounced function."""
+        async with self._lock:
+            call = self._pending.pop(key, None)
+
+        if call is None:
+            return
+
+        if key in self._timers:
             try:
-                operation(*args, **kwargs)
-                self._stats["executed"] += 1
-            except Exception as e:
-                logging.error(f"ApiRequestDebouncer execution error: {e}")
-    
-    def flush(self, key: Optional[str] = None):
-        """Flush pending requests."""
-        with self._lock:
-            if key:
-                timer = self._timers.pop(key, None)
-                if timer:
-                    timer.cancel()
-                self._pending_requests.pop(key, None)
-            else:
-                for timer in self._timers.values():
-                    timer.cancel()
-                self._timers.clear()
-                self._pending_requests.clear()
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get debounce statistics."""
-        with self._lock:
-            dedup_stats = self._deduplicator.get_stats()
-            return {
-                **dict(self._stats),
-                "deduplicator": dedup_stats,
-            }
+                del self._timers[key]
+            except KeyError:
+                pass
 
+        if not self.trailing:
+            return
 
-class ApiDebounceAction(BaseAction):
-    """API debounce action."""
-    action_type = "api_debounce"
-    display_name = "API防抖"
-    description = "API请求防抖与去重"
-    
-    def __init__(self):
-        super().__init__()
-        self._debouncers: Dict[str, ApiRequestDebouncer] = {}
-        self._lock = threading.Lock()
-    
-    def _get_debouncer(self, name: str, config: Optional[ApiDebounceConfig] = None) -> ApiRequestDebouncer:
-        """Get or create debouncer."""
-        with self._lock:
-            if name not in self._debouncers:
-                self._debouncers[name] = ApiRequestDebouncer(config)
-            return self._debouncers[name]
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute debounced API operation."""
+        call.executed_at = time.time()
+        self._stats.executed_calls += 1
+
+        await self._safe_execute(func, *call.args, **call.kwargs)
+
+    async def _safe_execute(self, func: Callable, *args, **kwargs) -> Any:
+        """Safely execute a function."""
         try:
-            name = params.get("name", "default")
-            operation = params.get("operation")
-            request = params.get("request", {})
-            command = params.get("command", "schedule")
-            
-            config = ApiDebounceConfig(
-                mode=ApiDebounceMode[params.get("mode", "request").upper()],
-                delay=params.get("delay", 0.5),
-                max_pending=params.get("max_pending", 100),
-                cache_ttl=params.get("cache_ttl", 30.0),
-                coalesce_by=params.get("coalesce_by"),
-            )
-            
-            debouncer = self._get_debouncer(name, config)
-            
-            if command == "schedule" and operation:
-                success = debouncer.schedule(request, operation)
-                return ActionResult(success=success)
-            
-            elif command == "flush":
-                debouncer.flush()
-                return ActionResult(success=True)
-            
-            elif command == "stats":
-                stats = debouncer.get_stats()
-                return ActionResult(success=True, data={"stats": stats})
-            
-            return ActionResult(success=False, message=f"Unknown command: {command}")
-            
+            if asyncio.iscoroutinefunction(func):
+                return await func(*args, **kwargs)
+            return func(*args, **kwargs)
         except Exception as e:
-            return ActionResult(success=False, message=f"ApiDebounceAction error: {str(e)}")
+            logger.error(f"Debounce execution error: {e}")
+            raise
+
+    async def cancel(self, key: str) -> bool:
+        """
+        Cancel a pending debounced call.
+
+        Args:
+            key: Key of the call to cancel.
+
+        Returns:
+            True if cancelled.
+        """
+        async with self._lock:
+            if key in self._pending:
+                del self._pending[key]
+
+            if key in self._timers:
+                self._timers[key].cancel()
+                del self._timers[key]
+                return True
+
+        return False
+
+    async def cancel_all(self) -> int:
+        """Cancel all pending debounced calls."""
+        count = 0
+
+        async with self._lock:
+            count = len(self._pending)
+
+            for timer in self._timers.values():
+                timer.cancel()
+
+            self._pending.clear()
+            self._timers.clear()
+
+        return count
+
+    def flush(self, key: Optional[str] = None) -> None:
+        """
+        Immediately execute pending calls.
+
+        Args:
+            key: Optional specific key to flush.
+        """
+        keys = [key] if key else list(self._pending.keys())
+
+        for k in keys:
+            if k in self._timers:
+                self._timers[k].cancel()
+
+    def get_pending(self, key: str) -> Optional[DebounceCall]:
+        """Get pending call for a key."""
+        return self._pending.get(key)
+
+    def get_pending_count(self, key: str) -> int:
+        """Get number of coalesced calls pending for a key."""
+        call = self._pending.get(key)
+        if call is None:
+            return 0
+        return getattr(call, "_coalesce_count", 1)
+
+    def get_stats(self) -> DebounceStats:
+        """Get debounce statistics."""
+        stats = DebounceStats(
+            total_calls=self._stats.total_calls,
+            coalesced_calls=self._stats.coalesced_calls,
+            executed_calls=self._stats.executed_calls,
+            dropped_calls=self._stats.dropped_calls,
+            active_keys=len(self._pending),
+        )
+        return stats
+
+    def reset_stats(self) -> None:
+        """Reset statistics."""
+        self._stats = DebounceStats()
+
+
+class ThrottleDebounce(ApiDebounceAction):
+    """Combined throttle and debounce implementation."""
+
+    def __init__(
+        self,
+        rate_limit: float,
+        period_ms: float = 1000,
+        **kwargs,
+    ):
+        """
+        Initialize throttle-debounce.
+
+        Args:
+            rate_limit: Maximum calls per period.
+            period_ms: Period in milliseconds.
+            **kwargs: Additional debounce arguments.
+        """
+        super().__init__(**kwargs)
+        self.rate_limit = rate_limit
+        self.period_seconds = period_ms / 1000
+        self._call_times: Dict[str, List[float]] = {}
+
+    async def _check_rate_limit(self, key: str) -> bool:
+        """Check if rate limit allows execution."""
+        now = time.time()
+        cutoff = now - self.period_seconds
+
+        if key not in self._call_times:
+            self._call_times[key] = []
+
+        self._call_times[key] = [t for t in self._call_times[key] if t > cutoff]
+
+        if len(self._call_times[key]) >= self.rate_limit:
+            return False
+
+        self._call_times[key].append(now)
+        return True
+
+
+def create_debounce_action(
+    wait_ms: float = 300,
+    **kwargs,
+) -> ApiDebounceAction:
+    """Factory function to create an ApiDebounceAction."""
+    return ApiDebounceAction(wait_ms=wait_ms, **kwargs)
