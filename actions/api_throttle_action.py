@@ -1,379 +1,365 @@
 """
-API request throttling and priority queue scheduler.
+API Throttle Action Module
 
-This module provides sophisticated request throttling with priority-based
-scheduling, request queuing, and configurable rate limiting policies.
+Rate limiting with token bucket, sliding window, and leaky bucket algorithms.
+Per-client throttling, burst handling, and quota management.
 
-Author: RabAiBot
-License: MIT
+MIT License - Copyright (c) 2025 RabAi Research
 """
 
 from __future__ import annotations
 
 import asyncio
-import heapq
 import logging
 import time
-from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import Any, Callable, Dict, List, Optional, Tuple
 from collections import defaultdict
-import threading
-import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
-class Priority(Enum):
-    """Request priority levels."""
-    CRITICAL = 0
-    HIGH = 1
-    NORMAL = 2
-    LOW = 3
-    BULK = 4
+class ThrottleAlgorithm(Enum):
+    """Rate limiting algorithms."""
+    
+    TOKEN_BUCKET = "token_bucket"
+    SLIDING_WINDOW = "sliding_window"
+    LEAKY_BUCKET = "leaky_bucket"
+    FIXED_WINDOW = "fixed_window"
 
 
 @dataclass
-class ThrottleRequest:
-    """Represents a throttled API request."""
-    priority: Priority
-    func: Callable[..., Any]
-    args: tuple = field(default_factory=tuple)
-    kwargs: Dict[str, Any] = field(default_factory=dict)
-    created_at: float = field(default_factory=time.time)
-    delay: float = 0.0
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    result: Any = field(default=None, init=False)
-    error: Optional[Exception] = field(default=None, init=False)
-    completed: bool = False
-
-    @property
-    def effective_priority(self) -> Tuple[int, float]:
-        """Get effective priority (lower is higher priority)."""
-        return (self.priority.value, self.created_at)
-
-    def __lt__(self, other: "ThrottleRequest") -> bool:
-        return self.effective_priority < other.effective_priority
+class ThrottleConfig:
+    """Configuration for rate limiting."""
+    
+    algorithm: ThrottleAlgorithm = ThrottleAlgorithm.TOKEN_BUCKET
+    rate: float = 100
+    burst: float = 200
+    window_seconds: float = 60
+    per_client: bool = True
+    block_duration_seconds: float = 60
+    quota: Optional[float] = None
+    quota_window_hours: float = 24
 
 
 @dataclass
-class RateLimitPolicy:
-    """Defines rate limits for a specific context."""
-    requests_per_second: float
-    burst_size: int
-    max_queue_size: int = 100
-    priority_weights: Dict[Priority, float] = field(default_factory=lambda: {
-        Priority.CRITICAL: 1.0,
-        Priority.HIGH: 0.8,
-        Priority.NORMAL: 0.5,
-        Priority.LOW: 0.2,
-        Priority.BULK: 0.1,
-    })
+class ThrottleResult:
+    """Result of throttle check."""
+    
+    allowed: bool
+    remaining: float
+    reset_at: float
+    retry_after: Optional[float] = None
 
 
 @dataclass
-class ThrottleStats:
-    """Statistics for the throttle manager."""
-    total_requests: int = 0
-    completed_requests: int = 0
-    rejected_requests: int = 0
-    avg_wait_time: float = 0.0
-    total_wait_time: float = 0.0
-    avg_processing_time: float = 0.0
+class ClientState:
+    """State for a single client."""
+    
+    client_id: str
+    tokens: float = 0
+    last_update: float = field(default_factory=time.time)
+    requests_made: int = 0
+    blocked_until: float = 0
+    quota_used: float = 0
+    quota_reset: float = 0
 
-    def record_completion(self, wait_time: float, processing_time: float) -> None:
-        """Record a completed request."""
-        self.completed_requests += 1
-        self.total_wait_time += wait_time
-        self.avg_wait_time = self.total_wait_time / self.completed_requests
-        self.avg_processing_time = (
-            (self.avg_processing_time * (self.completed_requests - 1) + processing_time)
-            / self.completed_requests
+
+class TokenBucketThrottler:
+    """Token bucket rate limiter."""
+    
+    def __init__(self, rate: float, burst: float):
+        self.rate = rate
+        self.burst = burst
+    
+    def allow(self, state: ClientState) -> ThrottleResult:
+        """Check if request is allowed."""
+        now = time.time()
+        elapsed = now - state.last_update
+        
+        state.tokens = min(self.burst, state.tokens + elapsed * self.rate)
+        state.last_update = now
+        
+        if state.tokens >= 1:
+            state.tokens -= 1
+            state.requests_made += 1
+            return ThrottleResult(
+                allowed=True,
+                remaining=state.tokens,
+                reset_at=now + self.burst / self.rate
+            )
+        
+        retry_after = (1 - state.tokens) / self.rate
+        return ThrottleResult(
+            allowed=False,
+            remaining=state.tokens,
+            reset_at=now + self.burst / self.rate,
+            retry_after=retry_after
         )
 
 
-class TokenBucket:
-    """Token bucket for rate limiting."""
+class SlidingWindowThrottler:
+    """Sliding window rate limiter."""
+    
+    def __init__(self, rate: float, window_seconds: float):
+        self.rate = rate
+        self.window_seconds = window_seconds
+        self._requests: Dict[str, List[float]] = defaultdict(list)
+    
+    def allow(self, state: ClientState) -> ThrottleResult:
+        """Check if request is allowed."""
+        now = time.time()
+        window_start = now - self.window_seconds
+        
+        client_requests = self._requests[state.client_id]
+        client_requests[:] = [t for t in client_requests if t > window_start]
+        
+        if len(client_requests) < self.rate:
+            client_requests.append(now)
+            state.requests_made += 1
+            return ThrottleResult(
+                allowed=True,
+                remaining=self.rate - len(client_requests),
+                reset_at=now + self.window_seconds
+            )
+        
+        oldest = client_requests[0]
+        retry_after = oldest + self.window_seconds - now
+        
+        return ThrottleResult(
+            allowed=False,
+            remaining=0,
+            reset_at=now + self.window_seconds,
+            retry_after=retry_after
+        )
 
+
+class LeakyBucketThrottler:
+    """Leaky bucket rate limiter."""
+    
     def __init__(self, rate: float, capacity: float):
         self.rate = rate
         self.capacity = capacity
-        self._tokens = capacity
-        self._last_refill = time.monotonic()
-        self._lock = threading.Lock()
+        self._buckets: Dict[str, float] = defaultdict(float)
+    
+    def allow(self, state: ClientState) -> ThrottleResult:
+        """Check if request is allowed."""
+        now = time.time()
+        elapsed = now - state.last_update
+        
+        self._buckets[state.client_id] = max(
+            0,
+            self._buckets[state.client_id] - elapsed * self.rate
+        )
+        
+        if self._buckets[state.client_id] < self.capacity:
+            self._buckets[state.client_id] += 1
+            state.requests_made += 1
+            return ThrottleResult(
+                allowed=True,
+                remaining=self.capacity - self._buckets[state.client_id],
+                reset_at=now + self.capacity / self.rate
+            )
+        
+        leak_time = 1 / self.rate
+        return ThrottleResult(
+            allowed=False,
+            remaining=0,
+            reset_at=now + self.capacity * leak_time,
+            retry_after=leak_time
+        )
 
-    def _refill(self) -> None:
-        now = time.monotonic()
-        elapsed = now - self._last_refill
-        self._tokens = min(self.capacity, self._tokens + elapsed * self.rate)
-        self._last_refill = now
 
-    def try_acquire(self, tokens: float = 1.0) -> bool:
-        with self._lock:
-            self._refill()
-            if self._tokens >= tokens:
-                self._tokens -= tokens
+class FixedWindowThrottler:
+    """Fixed window rate limiter."""
+    
+    def __init__(self, rate: float, window_seconds: float):
+        self.rate = rate
+        self.window_seconds = window_seconds
+        self._windows: Dict[str, tuple[float, int]] = {}
+    
+    def allow(self, state: ClientState) -> ThrottleResult:
+        """Check if request is allowed."""
+        now = time.time()
+        window_key = int(now / self.window_seconds)
+        window_start = window_key * self.window_seconds
+        
+        client_window = self._windows.get(state.client_id)
+        
+        if not client_window or client_window[0] != window_key:
+            self._windows[state.client_id] = (window_key, 1)
+            state.requests_made += 1
+            return ThrottleResult(
+                allowed=True,
+                remaining=self.rate - 1,
+                reset_at=window_start + self.window_seconds
+            )
+        
+        count = client_window[1]
+        
+        if count < self.rate:
+            self._windows[state.client_id] = (window_key, count + 1)
+            state.requests_made += 1
+            return ThrottleResult(
+                allowed=True,
+                remaining=self.rate - count - 1,
+                reset_at=window_start + self.window_seconds
+            )
+        
+        return ThrottleResult(
+            allowed=False,
+            remaining=0,
+            reset_at=window_start + self.window_seconds,
+            retry_after=self.window_seconds
+        )
+
+
+class APIThrottleAction:
+    """
+    Main API throttle action handler.
+    
+    Provides rate limiting with multiple algorithms,
+    per-client tracking, and quota management.
+    """
+    
+    def __init__(self, config: Optional[ThrottleConfig] = None):
+        self.config = config or ThrottleConfig()
+        self._throttler = self._create_throttler()
+        self._client_states: Dict[str, ClientState] = {}
+        self._lock = asyncio.Lock()
+        self._middleware: List[Callable] = []
+    
+    def _create_throttler(self):
+        """Create throttler based on algorithm."""
+        if self.config.algorithm == ThrottleAlgorithm.TOKEN_BUCKET:
+            return TokenBucketThrottler(self.config.rate, self.config.burst)
+        elif self.config.algorithm == ThrottleAlgorithm.SLIDING_WINDOW:
+            return SlidingWindowThrottler(self.config.rate, self.config.window_seconds)
+        elif self.config.algorithm == ThrottleAlgorithm.LEAKY_BUCKET:
+            return LeakyBucketThrottler(self.config.rate, self.config.burst)
+        elif self.config.algorithm == ThrottleAlgorithm.FIXED_WINDOW:
+            return FixedWindowThrottler(self.config.rate, self.config.window_seconds)
+        return TokenBucketThrottler(self.config.rate, self.config.burst)
+    
+    def _get_client_id(self, request: Dict) -> str:
+        """Extract client ID from request."""
+        if not self.config.per_client:
+            return "_global_"
+        
+        headers = request.get("headers", {})
+        api_key = headers.get("X-API-Key") or headers.get("api_key")
+        if api_key:
+            return f"key:{api_key[:16]}"
+        
+        client_ip = headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        if not client_ip:
+            client_ip = request.get("client_ip", "unknown")
+        
+        return f"ip:{client_ip}"
+    
+    async def _get_client_state(self, client_id: str) -> ClientState:
+        """Get or create client state."""
+        async with self._lock:
+            if client_id not in self._client_states:
+                self._client_states[client_id] = ClientState(client_id=client_id)
+            return self._client_states[client_id]
+    
+    async def check(self, request: Dict) -> ThrottleResult:
+        """Check if request is allowed."""
+        client_id = self._get_client_id(request)
+        state = await self._get_client_state(client_id)
+        
+        now = time.time()
+        
+        if state.blocked_until > now:
+            return ThrottleResult(
+                allowed=False,
+                remaining=0,
+                reset_at=state.blocked_until,
+                retry_after=state.blocked_until - now
+            )
+        
+        if self.config.quota:
+            if state.quota_reset < now:
+                state.quota_used = 0
+                state.quota_reset = now + self.config.quota_window_hours * 3600
+            
+            if state.quota_used >= self.config.quota:
+                return ThrottleResult(
+                    allowed=False,
+                    remaining=0,
+                    reset_at=state.quota_reset,
+                    retry_after=state.quota_reset - now
+                )
+        
+        result = self._throttler.allow(state)
+        
+        if not result.allowed and self.config.block_duration_seconds > 0:
+            state.blocked_until = now + self.config.block_duration_seconds
+        
+        if result.allowed and self.config.quota:
+            state.quota_used += 1
+        
+        for mw in self._middleware:
+            await mw(request, result)
+        
+        return result
+    
+    async def check_and_update(
+        self,
+        request: Dict,
+        handler: Callable
+    ) -> tuple[bool, Any, ThrottleResult]:
+        """Check throttle and execute handler if allowed."""
+        result = await self.check(request)
+        
+        if not result.allowed:
+            return False, {"error": "Rate limit exceeded", "retry_after": result.retry_after}, result
+        
+        try:
+            if asyncio.iscoroutinefunction(handler):
+                response = await handler(request)
+            else:
+                response = handler(request)
+            return True, response, result
+        except Exception as e:
+            return False, {"error": str(e)}, result
+    
+    async def reset_client(self, client_id: str) -> bool:
+        """Reset throttle state for a client."""
+        async with self._lock:
+            if client_id in self._client_states:
+                del self._client_states[client_id]
                 return True
             return False
-
-    @property
-    def available(self) -> float:
-        with self._lock:
-            self._refill()
-            return self._tokens
-
-
-class ThrottleManager:
-    """
-    Manages API request throttling with priority scheduling.
-
-    Features:
-    - Priority-based request queuing
-    - Token bucket rate limiting
-    - Configurable policies per endpoint
-    - Request coalescing
-    - Automatic retry with backoff
-    - Statistics tracking
-
-    Example:
-        >>> manager = ThrottleManager()
-        >>> manager.set_policy("api.example.com", rate=10, burst=20)
-        >>>
-        >>> async def make_request():
-        ...     return await manager.execute(Priority.NORMAL, my_api_call)
-    """
-
-    def __init__(self):
-        """Initialize the throttle manager."""
-        self._policies: Dict[str, RateLimitPolicy] = {}
-        self._buckets: Dict[str, TokenBucket] = {}
-        self._queues: Dict[str, List[ThrottleRequest]] = defaultdict(list)
-        self._processing_flags: Dict[str, bool] = defaultdict(bool)
-        self._lock = threading.RLock()
-        self._stats = ThrottleStats()
-        self._default_policy = RateLimitPolicy(
-            requests_per_second=10.0,
-            burst_size=20,
-        )
-        logger.info("ThrottleManager initialized")
-
-    def set_policy(self, endpoint: str, policy: RateLimitPolicy) -> None:
-        """
-        Set rate limit policy for an endpoint.
-
-        Args:
-            endpoint: API endpoint identifier
-            policy: Rate limit policy
-        """
-        with self._lock:
-            self._policies[endpoint] = policy
-            self._buckets[endpoint] = TokenBucket(
-                rate=policy.requests_per_second,
-                capacity=policy.burst_size,
-            )
-            logger.info(
-                f"Policy set for {endpoint}: "
-                f"rps={policy.requests_per_second}, burst={policy.burst_size}"
-            )
-
-    def get_policy(self, endpoint: str) -> RateLimitPolicy:
-        """Get policy for endpoint or default."""
-        return self._policies.get(endpoint, self._default_policy)
-
-    def _get_bucket(self, endpoint: str) -> TokenBucket:
-        """Get or create bucket for endpoint."""
-        if endpoint not in self._buckets:
-            policy = self.get_policy(endpoint)
-            self._buckets[endpoint] = TokenBucket(
-                rate=policy.requests_per_second,
-                capacity=policy.burst_size,
-            )
-        return self._buckets[endpoint]
-
-    async def execute(
-        self,
-        priority: Priority,
-        func: Callable[..., Any],
-        *args,
-        endpoint: str = "default",
-        **kwargs,
-    ) -> Any:
-        """
-        Execute a function with throttling.
-
-        Args:
-            priority: Request priority
-            func: Function to execute
-            *args: Positional arguments
-            endpoint: Endpoint identifier for rate limiting
-            **kwargs: Keyword arguments
-
-        Returns:
-            Function result
-        """
-        request = ThrottleRequest(
-            priority=priority,
-            func=func,
-            args=args,
-            kwargs=kwargs,
-        )
-
-        policy = self.get_policy(endpoint)
-        bucket = self._get_bucket(endpoint)
-
-        with self._lock:
-            self._stats.total_requests += 1
-            if len(self._queues[endpoint]) >= policy.max_queue_size:
-                self._stats.rejected_requests += 1
-                raise RuntimeError(f"Queue full for {endpoint}")
-
-            heapq.heappush(self._queues[endpoint], request)
-
-        wait_start = time.time()
-
-        while True:
-            bucket_refill_needed = not bucket.try_acquire(1.0)
-            if not bucket_refill_needed:
-                async with asyncio.Lock():
-                    if self._queues[endpoint] and self._queues[endpoint][0].id == request.id:
-                        heapq.heappop(self._queues[endpoint])
-                        break
-
-            await asyncio.sleep(0.01)
-
-        wait_time = time.time() - wait_start
-        self._stats.record_completion(wait_time, 0.0)
-
-        try:
-            if asyncio.iscoroutinefunction(func):
-                result = await func(*args, **kwargs)
-            else:
-                loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(None, lambda: func(*args, **kwargs))
-            request.result = result
-            return result
-        except Exception as e:
-            request.error = e
-            raise
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Get throttle manager statistics."""
+    
+    async def get_client_status(self, client_id: str) -> Optional[Dict]:
+        """Get throttle status for a client."""
+        state = await self._get_client_state(client_id)
         return {
-            "total_requests": self._stats.total_requests,
-            "completed_requests": self._stats.completed_requests,
-            "rejected_requests": self._stats.rejected_requests,
-            "avg_wait_time": self._stats.avg_wait_time,
-            "avg_processing_time": self._stats.avg_processing_time,
-            "policies": {
-                ep: {
-                    "requests_per_second": p.requests_per_second,
-                    "burst_size": p.burst_size,
-                    "queue_size": len(self._queues[ep]),
-                }
-                for ep, p in self._policies.items()
-            },
+            "client_id": state.client_id,
+            "requests_made": state.requests_made,
+            "blocked": state.blocked_until > time.time(),
+            "blocked_until": state.blocked_until if state.blocked_until > time.time() else None,
+            "quota_used": state.quota_used,
+            "quota_reset": state.quota_reset if state.quota_reset > time.time() else None
         }
-
-    def get_queue_size(self, endpoint: str = "default") -> int:
-        """Get current queue size for endpoint."""
-        with self._lock:
-            return len(self._queues[endpoint])
-
-
-class PriorityThrottler:
-    """
-    Priority-based request throttler.
-
-    Manages multiple priority queues and ensures higher priority
-    requests are processed first while respecting rate limits.
-    """
-
-    def __init__(
-        self,
-        rate: float = 10.0,
-        burst: int = 20,
-        priority_weights: Optional[Dict[Priority, float]] = None,
-    ):
-        """
-        Initialize priority throttler.
-
-        Args:
-            rate: Base requests per second
-            burst: Burst capacity
-            priority_weights: Multiplier for each priority level
-        """
-        self.base_rate = rate
-        self.base_burst = burst
-        self.priority_weights = priority_weights or {
-            Priority.CRITICAL: 1.0,
-            Priority.HIGH: 0.8,
-            Priority.NORMAL: 0.5,
-            Priority.LOW: 0.2,
-            Priority.BULK: 0.1,
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get throttle statistics."""
+        return {
+            "algorithm": self.config.algorithm.value,
+            "rate": self.config.rate,
+            "burst": self.config.burst,
+            "total_clients": len(self._client_states),
+            "blocked_clients": sum(
+                1 for s in self._client_states.values()
+                if s.blocked_until > time.time()
+            )
         }
-
-        self._buckets: Dict[Priority, TokenBucket] = {
-            p: TokenBucket(rate * self.priority_weights[p], burst * self.priority_weights[p])
-            for p in Priority
-        }
-        self._queues: Dict[Priority, List[ThrottleRequest]] = {
-            p: [] for p in Priority
-        }
-        self._lock = threading.Lock()
-        logger.info(f"PriorityThrottler initialized (rate={rate}, burst={burst})")
-
-    def _effective_rate(self, priority: Priority) -> Tuple[int, float]:
-        """Get effective priority tuple."""
-        return (priority.value, time.time())
-
-    async def submit(
-        self,
-        priority: Priority,
-        func: Callable[..., Any],
-        *args,
-        **kwargs,
-    ) -> ThrottleRequest:
-        """Submit a request for throttled execution."""
-        request = ThrottleRequest(
-            priority=priority,
-            func=func,
-            args=args,
-            kwargs=kwargs,
-        )
-
-        with self._lock:
-            heapq.heappush(self._queues[priority], request)
-
-        return request
-
-    async def process_next(self) -> Optional[Any]:
-        """Process the next available request."""
-        for priority in Priority:
-            queue = self._queues[priority]
-            if not queue:
-                continue
-
-            bucket = self._buckets[priority]
-            if bucket.try_acquire(1.0):
-                request = heapq.heappop(queue)
-                try:
-                    if asyncio.iscoroutinefunction(request.func):
-                        result = await request.func(*request.args, **request.kwargs)
-                    else:
-                        loop = asyncio.get_event_loop()
-                        result = await loop.run_in_executor(
-                            None,
-                            lambda: request.func(*request.args, **request.kwargs)
-                        )
-                    request.result = result
-                    request.completed = True
-                    return result
-                except Exception as e:
-                    request.error = e
-                    raise
-
-        return None
-
-    def get_queue_depths(self) -> Dict[str, int]:
-        """Get depth of each priority queue."""
-        return {p.name: len(q) for p, q in self._queues.items()}
+    
+    def add_middleware(self, func: Callable) -> None:
+        """Add throttle middleware."""
+        self._middleware.append(func)
