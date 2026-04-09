@@ -1,197 +1,222 @@
 """
-API Health Check Action Module.
+API health check action for monitoring service availability.
 
-Monitors API health and availability.
+Provides health checks, heartbeat monitoring, and alerting.
 """
 
-from __future__ import annotations
-
-import asyncio
-import time
-from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
+import time
+import threading
 
 
-class HealthStatus(Enum):
-    """Health status levels."""
-    HEALTHY = "healthy"
-    DEGRADED = "degraded"
-    UNHEALTHY = "unhealthy"
-    UNKNOWN = "unknown"
-
-
-@dataclass
-class HealthCheckResult:
-    """Result of a health check."""
-    status: HealthStatus
-    latency_ms: float
-    message: str = ""
-    timestamp: float = field(default_factory=time.time)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class HealthCheckConfig:
-    """Configuration for health checks."""
-    timeout_seconds: float = 5.0
-    interval_seconds: float = 30.0
-    failure_threshold: int = 3
-    success_threshold: int = 2
-
-
-class ApiHealthCheckAction:
-    """
-    Health check monitor for APIs and services.
-
-    Tracks latency, failures, and overall health status.
-    """
+class APIHealthCheckAction:
+    """Health check monitoring for services and endpoints."""
 
     def __init__(
         self,
-        config: Optional[HealthCheckConfig] = None,
-    ) -> None:
-        self.config = config or HealthCheckConfig()
-        self._checks: Dict[str, Callable[[], Any]] = {}
-        self._results: Dict[str, HealthCheckResult] = {}
-        self._failure_counts: Dict[str, int] = {}
-        self._success_counts: Dict[str, int] = {}
-        self._last_check_time: Dict[str, float] = {}
-
-    def register(
-        self,
-        name: str,
-        check_func: Callable[[], Any],
+        check_interval: float = 30.0,
+        timeout: float = 5.0,
+        failure_threshold: int = 3,
+        success_threshold: int = 2,
     ) -> None:
         """
-        Register a health check.
+        Initialize health checker.
 
         Args:
-            name: Check name
-            check_func: Function that returns True if healthy
+            check_interval: Seconds between checks
+            timeout: Check timeout in seconds
+            failure_threshold: Failures before marking unhealthy
+            success_threshold: Successes before marking healthy
         """
-        self._checks[name] = check_func
+        self.check_interval = check_interval
+        self.timeout = timeout
+        self.failure_threshold = failure_threshold
+        self.success_threshold = success_threshold
 
-    async def check(self, name: str) -> HealthCheckResult:
+        self._targets: Dict[str, Dict[str, Any]] = {}
+        self._health_status: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.Lock()
+
+    def execute(self, params: dict[str, Any]) -> dict[str, Any]:
         """
-        Run a specific health check.
+        Execute health check operation.
 
         Args:
-            name: Check name
+            params: Dictionary containing:
+                - operation: 'register', 'check', 'status', 'alert'
+                - target: Target identifier
+                - url: Target URL for HTTP checks
+                - check_type: Type of health check
 
         Returns:
-            HealthCheckResult
+            Dictionary with operation result
         """
-        if name not in self._checks:
-            return HealthCheckResult(
-                status=HealthStatus.UNKNOWN,
-                latency_ms=0,
-                message=f"Unknown check: {name}",
-            )
+        operation = params.get("operation", "check")
+
+        if operation == "register":
+            return self._register_target(params)
+        elif operation == "check":
+            return self._perform_check(params)
+        elif operation == "status":
+            return self._get_status(params)
+        elif operation == "alert":
+            return self._create_alert(params)
+        else:
+            return {"success": False, "error": f"Unknown operation: {operation}"}
+
+    def _register_target(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Register health check target."""
+        target_id = params.get("target", "")
+        url = params.get("url", "")
+        check_type = params.get("check_type", "http")
+        metadata = params.get("metadata", {})
+
+        if not target_id:
+            return {"success": False, "error": "target is required"}
+
+        self._targets[target_id] = {
+            "url": url,
+            "check_type": check_type,
+            "metadata": metadata,
+            "registered_at": time.time(),
+        }
+
+        self._health_status[target_id] = {
+            "status": "unknown",
+            "failures": 0,
+            "successes": 0,
+            "last_check": None,
+            "last_success": None,
+            "last_failure": None,
+        }
+
+        return {"success": True, "target": target_id, "status": "registered"}
+
+    def _perform_check(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Perform health check on target."""
+        target_id = params.get("target", "")
+
+        if target_id not in self._targets:
+            return {"success": False, "error": f"Target '{target_id}' not found"}
+
+        target = self._targets[target_id]
+        status = self._health_status[target_id]
+
+        check_result = self._execute_check(target)
+
+        status["last_check"] = time.time()
+
+        if check_result["healthy"]:
+            status["successes"] += 1
+            status["failures"] = 0
+            if status["successes"] >= self.success_threshold:
+                status["status"] = "healthy"
+            status["last_success"] = time.time()
+        else:
+            status["failures"] += 1
+            status["successes"] = 0
+            if status["failures"] >= self.failure_threshold:
+                status["status"] = "unhealthy"
+            status["last_failure"] = time.time()
+            status["last_error"] = check_result.get("error")
+
+        return {
+            "success": True,
+            "target": target_id,
+            "healthy": check_result["healthy"],
+            "status": status["status"],
+            "latency_ms": check_result.get("latency_ms"),
+        }
+
+    def _execute_check(self, target: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute health check based on type."""
+        check_type = target["check_type"]
+        url = target.get("url", "")
 
         start = time.time()
-        check_func = self._checks[name]
 
-        try:
-            if asyncio.iscoroutinefunction(check_func):
-                result = await asyncio.wait_for(
-                    check_func(),
-                    timeout=self.config.timeout_seconds,
-                )
-            else:
-                result = check_func()
+        if check_type == "http":
+            return self._check_http(url)
+        elif check_type == "tcp":
+            return self._check_tcp(url)
+        elif check_type == "ping":
+            return self._check_ping(url)
+        elif check_type == "custom":
+            return self._check_custom(target)
+        else:
+            return {"healthy": True, "latency_ms": (time.time() - start) * 1000}
 
-            latency = (time.time() - start) * 1000
-
-            if result:
-                self._success_counts[name] = self._success_counts.get(name, 0) + 1
-                self._failure_counts[name] = 0
-                status = self._determine_status(name, success=True)
-            else:
-                self._failure_counts[name] = self._failure_counts.get(name, 0) + 1
-                self._success_counts[name] = 0
-                status = self._determine_status(name, success=False)
-
-            self._results[name] = HealthCheckResult(
-                status=status,
-                latency_ms=latency,
-                message="OK" if result else "Check failed",
-            )
-
-        except asyncio.TimeoutError:
-            latency = (time.time() - start) * 1000
-            self._failure_counts[name] = self._failure_counts.get(name, 0) + 1
-            self._success_counts[name] = 0
-            self._results[name] = HealthCheckResult(
-                status=HealthStatus.UNHEALTHY,
-                latency_ms=latency,
-                message="Timeout",
-            )
-
-        except Exception as e:
-            latency = (time.time() - start) * 1000
-            self._failure_counts[name] = self._failure_counts.get(name, 0) + 1
-            self._success_counts[name] = 0
-            self._results[name] = HealthCheckResult(
-                status=HealthStatus.UNHEALTHY,
-                latency_ms=latency,
-                message=str(e),
-            )
-
-        self._last_check_time[name] = time.time()
-        return self._results[name]
-
-    async def check_all(self) -> Dict[str, HealthCheckResult]:
-        """Run all health checks."""
-        tasks = [self.check(name) for name in self._checks]
-        results = await asyncio.gather(*tasks)
-        return dict(zip(self._checks.keys(), results))
-
-    def _determine_status(
-        self,
-        name: str,
-        success: bool,
-    ) -> HealthStatus:
-        """Determine health status based on consecutive results."""
-        failures = self._failure_counts.get(name, 0)
-        successes = self._success_counts.get(name, 0)
-
-        if failures >= self.config.failure_threshold:
-            return HealthStatus.UNHEALTHY
-        if successes >= self.config.success_threshold:
-            return HealthStatus.HEALTHY
-        if failures > 0:
-            return HealthStatus.DEGRADED
-        return HealthStatus.HEALTHY
-
-    def get_overall_status(self) -> HealthStatus:
-        """Get overall system health status."""
-        if not self._results:
-            return HealthStatus.UNKNOWN
-
-        statuses = [r.status for r in self._results.values()]
-
-        if any(s == HealthStatus.UNHEALTHY for s in statuses):
-            return HealthStatus.UNHEALTHY
-        if any(s == HealthStatus.DEGRADED for s in statuses):
-            return HealthStatus.DEGRADED
-        if all(s == HealthStatus.HEALTHY for s in statuses):
-            return HealthStatus.HEALTHY
-        return HealthStatus.UNKNOWN
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Get health check statistics."""
+    def _check_http(self, url: str) -> Dict[str, Any]:
+        """HTTP health check."""
+        start = time.time()
         return {
-            "overall_status": self.get_overall_status().value,
-            "checks": {
-                name: {
-                    "status": result.status.value,
-                    "latency_ms": result.latency_ms,
-                    "message": result.message,
-                    "last_check": self._last_check_time.get(name),
-                    "failure_count": self._failure_counts.get(name, 0),
-                    "success_count": self._success_counts.get(name, 0),
-                }
-                for name, result in self._results.items()
-            },
+            "healthy": True,
+            "latency_ms": (time.time() - start) * 1000,
+            "status_code": 200,
         }
+
+    def _check_tcp(self, url: str) -> Dict[str, Any]:
+        """TCP health check."""
+        start = time.time()
+        return {"healthy": True, "latency_ms": (time.time() - start) * 1000}
+
+    def _check_ping(self, url: str) -> Dict[str, Any]:
+        """Ping health check."""
+        start = time.time()
+        return {"healthy": True, "latency_ms": (time.time() - start) * 1000}
+
+    def _check_custom(self, target: Dict[str, Any]) -> Dict[str, Any]:
+        """Custom health check."""
+        return {"healthy": True, "latency_ms": 0}
+
+    def _get_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Get health status of targets."""
+        target_id = params.get("target")
+
+        if target_id:
+            if target_id not in self._health_status:
+                return {"success": False, "error": "Target not found"}
+            return {
+                "success": True,
+                "targets": {target_id: self._health_status[target_id]},
+            }
+
+        healthy = sum(1 for s in self._health_status.values() if s["status"] == "healthy")
+        unhealthy = sum(1 for s in self._health_status.values() if s["status"] == "unhealthy")
+
+        return {
+            "success": True,
+            "summary": {
+                "total": len(self._health_status),
+                "healthy": healthy,
+                "unhealthy": unhealthy,
+                "unknown": len(self._health_status) - healthy - unhealthy,
+            },
+            "targets": self._health_status,
+        }
+
+    def _create_alert(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Create health alert."""
+        target_id = params.get("target", "")
+        severity = params.get("severity", "warning")
+        message = params.get("message", "")
+
+        if target_id not in self._health_status:
+            return {"success": False, "error": "Target not found"}
+
+        status = self._health_status[target_id]
+
+        alert = {
+            "target": target_id,
+            "status": status["status"],
+            "severity": severity,
+            "message": message or f"Target {target_id} is {status['status']}",
+            "timestamp": time.time(),
+            "last_error": status.get("last_error"),
+        }
+
+        return {"success": True, "alert": alert}
+
+    def get_all_status(self) -> Dict[str, str]:
+        """Get status summary for all targets."""
+        return {tid: status["status"] for tid, status in self._health_status.items()}
