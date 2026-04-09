@@ -1,156 +1,275 @@
-"""Data Serializer Action Module.
+"""Data serializer action module.
 
-Serialize/deserialize data with support for multiple formats.
+Provides serialization and deserialization:
+- DataSerializer: Serialize/deserialize data
+- CompactSerializer: Compact binary serialization
+- SchemaSerializer: Schema-based serialization
+- SerializerRegistry: Registry for serializers
 """
 
 from __future__ import annotations
 
-import base64
 import json
+import base64
 import pickle
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, is_dataclass
-from datetime import datetime, timezone
+import zlib
+from typing import Any, Callable, Dict, List, Optional, Type
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Generic, TypeVar
-import yaml
+import logging
 
-T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 
 class SerializationFormat(Enum):
-    """Supported serialization formats."""
+    """Serialization format."""
     JSON = "json"
-    YAML = "yaml"
+    BINARY = "binary"
+    COMPACT = "compact"
+    BASE64 = "base64"
     PICKLE = "pickle"
-    MSGPACK = "msgpack"
-    BASE64_JSON = "base64_json"
 
 
-class SerializerError(Exception):
-    """Serializer error."""
-    pass
+@dataclass
+class SerializationResult:
+    """Result of a serialization operation."""
+    success: bool
+    data: Any
+    format: SerializationFormat
+    size_bytes: int = 0
+    error: Optional[str] = None
 
 
-class Serializer(ABC, Generic[T]):
-    """Abstract serializer interface."""
+class DataSerializer:
+    """General-purpose data serializer."""
 
-    @abstractmethod
-    def serialize(self, data: T) -> str | bytes:
-        """Serialize data to string or bytes."""
-        pass
+    def __init__(
+        self,
+        default_format: SerializationFormat = SerializationFormat.JSON,
+        compression: bool = False,
+        compression_level: int = 6,
+    ):
+        self.default_format = default_format
+        self.compression = compression
+        self.compression_level = compression_level
+        self._encoders: Dict[SerializationFormat, Callable] = {}
+        self._decoders: Dict[SerializationFormat, Callable] = {}
+        self._register_default_handlers()
 
-    @abstractmethod
-    def deserialize(self, data: str | bytes) -> T:
-        """Deserialize data from string or bytes."""
-        pass
+    def _register_default_handlers(self) -> None:
+        """Register default serialization handlers."""
+        self._encoders[SerializationFormat.JSON] = lambda d: json.dumps(d, ensure_ascii=False).encode("utf-8")
+        self._decoders[SerializationFormat.JSON] = lambda d: json.loads(d.decode("utf-8"))
 
+        self._encoders[SerializationFormat.BINARY] = lambda d: str(d).encode("utf-8")
+        self._decoders[SerializationFormat.BINARY] = lambda d: d.decode("utf-8")
 
-class JSONSerializer(Serializer[Any]):
-    """JSON serializer with datetime support."""
+        self._encoders[SerializationFormat.BASE64] = lambda d: base64.b64encode(json.dumps(d).encode("utf-8"))
+        self._decoders[SerializationFormat.BASE64] = lambda d: json.loads(base64.b64decode(d).decode("utf-8"))
 
-    def __init__(self, indent: int | None = None, ensure_ascii: bool = False) -> None:
-        self.indent = indent
-        self.ensure_ascii = ensure_ascii
+        self._encoders[SerializationFormat.PICKLE] = lambda d: pickle.dumps(d)
+        self._decoders[SerializationFormat.PICKLE] = lambda d: pickle.loads(d)
 
-    def serialize(self, data: Any) -> str:
-        def default_handler(obj: Any) -> Any:
-            if isinstance(obj, datetime):
-                return {"__datetime__": True, "value": obj.isoformat()}
-            if isinstance(obj, bytes):
-                return {"__bytes__": True, "value": base64.b64encode(obj).decode()}
-            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+    def serialize(
+        self,
+        data: Any,
+        format: Optional[SerializationFormat] = None,
+    ) -> SerializationResult:
+        """Serialize data to specified format."""
+        fmt = format or self.default_format
         try:
-            return json.dumps(data, indent=self.indent, ensure_ascii=self.ensure_ascii, default=default_handler)
+            encoded = self._encoders[fmt](data)
+            if self.compression:
+                encoded = zlib.compress(encoded, level=self.compression_level)
+            return SerializationResult(
+                success=True,
+                data=encoded,
+                format=fmt,
+                size_bytes=len(encoded),
+            )
         except Exception as e:
-            raise SerializerError(f"JSON serialization failed: {e}") from e
+            return SerializationResult(
+                success=False,
+                data=None,
+                format=fmt,
+                error=str(e),
+            )
 
-    def deserialize(self, data: str | bytes) -> Any:
-        def object_hook(obj: dict) -> Any:
-            if "__datetime__" in obj:
-                return datetime.fromisoformat(obj["value"])
-            if "__bytes__" in obj:
-                return base64.b64decode(obj["value"])
-            return obj
+    def deserialize(
+        self,
+        data: Any,
+        format: SerializationFormat,
+    ) -> SerializationResult:
+        """Deserialize data from specified format."""
         try:
-            return json.loads(data, object_hook=object_hook)
+            decoded_data = data
+            if self.compression:
+                try:
+                    decoded_data = zlib.decompress(decoded_data)
+                except zlib.error:
+                    pass
+            result = self._decoders[format](decoded_data)
+            return SerializationResult(
+                success=True,
+                data=result,
+                format=format,
+            )
         except Exception as e:
-            raise SerializerError(f"JSON deserialization failed: {e}") from e
+            return SerializationResult(
+                success=False,
+                data=None,
+                format=format,
+                error=str(e),
+            )
+
+    def register_encoder(
+        self,
+        format: SerializationFormat,
+        encoder: Callable[[Any], bytes],
+    ) -> None:
+        """Register a custom encoder."""
+        self._encoders[format] = encoder
+
+    def register_decoder(
+        self,
+        format: SerializationFormat,
+        decoder: Callable[[bytes], Any],
+    ) -> None:
+        """Register a custom decoder."""
+        self._decoders[format] = decoder
 
 
-class YAMLSerializer(Serializer[Any]):
-    """YAML serializer."""
+class SchemaSerializer:
+    """Schema-based serializer with validation."""
 
-    def __init__(self) -> None:
-        self._yaml = yaml.SafeDumper
-        self._yaml_add_representer(datetime, lambda dumper, dt: dumper.represent_scalar("tag:yaml.org,2002:timestamp", dt.isoformat()))
+    def __init__(self, schema: Optional[Dict[str, Any]] = None):
+        self.schema = schema or {}
 
-    def serialize(self, data: Any) -> str:
+    def serialize(
+        self,
+        data: Dict[str, Any],
+        validate: bool = True,
+    ) -> SerializationResult:
+        """Serialize data with schema validation."""
+        if validate:
+            errors = self._validate(data)
+            if errors:
+                return SerializationResult(
+                    success=False,
+                    data=None,
+                    format=SerializationFormat.JSON,
+                    error=f"Validation errors: {errors}",
+                )
         try:
-            return yaml.dump(data, Dumper=self._yaml, default_flow_style=False, allow_unicode=True)
+            json_str = json.dumps(data, ensure_ascii=False)
+            return SerializationResult(
+                success=True,
+                data=json_str,
+                format=SerializationFormat.JSON,
+                size_bytes=len(json_str.encode("utf-8")),
+            )
         except Exception as e:
-            raise SerializerError(f"YAML serialization failed: {e}") from e
+            return SerializationResult(
+                success=False,
+                data=None,
+                format=SerializationFormat.JSON,
+                error=str(e),
+            )
 
-    def deserialize(self, data: str | bytes) -> Any:
+    def deserialize(
+        self,
+        data: str,
+        validate: bool = True,
+    ) -> SerializationResult:
+        """Deserialize data with schema validation."""
         try:
-            return yaml.safe_load(data)
+            parsed = json.loads(data)
+            if validate:
+                errors = self._validate(parsed)
+                if errors:
+                    return SerializationResult(
+                        success=False,
+                        data=None,
+                        format=SerializationFormat.JSON,
+                        error=f"Validation errors: {errors}",
+                    )
+            return SerializationResult(
+                success=True,
+                data=parsed,
+                format=SerializationFormat.JSON,
+            )
         except Exception as e:
-            raise SerializerError(f"YAML deserialization failed: {e}") from e
+            return SerializationResult(
+                success=False,
+                data=None,
+                format=SerializationFormat.JSON,
+                error=str(e),
+            )
+
+    def _validate(self, data: Dict[str, Any]) -> List[str]:
+        """Validate data against schema."""
+        errors = []
+        for field_name, field_schema in self.schema.items():
+            if field_schema.get("required", False) and field_name not in data:
+                errors.append(f"Missing required field: {field_name}")
+        return errors
 
 
-class PickleSerializer(Serializer[Any]):
-    """Pickle serializer for Python objects."""
+class SerializerRegistry:
+    """Registry for serializer instances."""
 
-    def __init__(self, protocol: int = pickle.HIGHEST_PROTOCOL) -> None:
-        self.protocol = protocol
+    _instance: Optional["SerializerRegistry"] = None
 
-    def serialize(self, data: Any) -> bytes:
-        try:
-            return pickle.dumps(data, protocol=self.protocol)
-        except Exception as e:
-            raise SerializerError(f"Pickle serialization failed: {e}") from e
-
-    def deserialize(self, data: str | bytes) -> Any:
-        try:
-            return pickle.loads(data)
-        except Exception as e:
-            raise SerializerError(f"Pickle deserialization failed: {e}") from e
-
-
-class Base64JSONSerializer(Serializer[Any]):
-    """JSON serializer wrapped in base64."""
-
-    def __init__(self) -> None:
-        self.json_serializer = JSONSerializer()
-
-    def serialize(self, data: Any) -> str:
-        json_str = self.json_serializer.serialize(data)
-        return base64.b64encode(json_str.encode()).decode()
-
-    def deserialize(self, data: str | bytes) -> Any:
-        decoded = base64.b64decode(data.encode()).decode()
-        return self.json_serializer.deserialize(decoded)
-
-
-class SerializerFactory:
-    """Factory for creating serializers."""
-
-    _serializers: dict[SerializationFormat, type[Serializer]] = {
-        SerializationFormat.JSON: JSONSerializer,
-        SerializationFormat.YAML: YAMLSerializer,
-        SerializationFormat.PICKLE: PickleSerializer,
-        SerializationFormat.BASE64_JSON: Base64JSONSerializer,
-    }
+    def __init__(self):
+        self._serializers: Dict[str, DataSerializer] = {}
+        self._schemas: Dict[str, SchemaSerializer] = {}
 
     @classmethod
-    def create(cls, format: SerializationFormat) -> Serializer:
-        """Create a serializer for the given format."""
-        serializer_class = cls._serializers.get(format)
-        if not serializer_class:
-            raise ValueError(f"Unknown format: {format}")
-        return serializer_class()
+    def get_instance(cls) -> "SerializerRegistry":
+        """Get singleton instance."""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
 
-    @classmethod
-    def register(cls, format: SerializationFormat, serializer_class: type[Serializer]) -> None:
-        """Register a custom serializer."""
-        cls._serializers[format] = serializer_class
+    def register_serializer(
+        self,
+        name: str,
+        serializer: DataSerializer,
+    ) -> None:
+        """Register a serializer."""
+        self._serializers[name] = serializer
+
+    def get_serializer(self, name: str) -> Optional[DataSerializer]:
+        """Get a registered serializer."""
+        return self._serializers.get(name)
+
+    def register_schema(
+        self,
+        name: str,
+        schema: Dict[str, Any],
+    ) -> SchemaSerializer:
+        """Register a schema."""
+        self._schemas[name] = SchemaSerializer(schema)
+        return self._schemas[name]
+
+    def get_schema_serializer(self, name: str) -> Optional[SchemaSerializer]:
+        """Get a schema serializer."""
+        return self._schemas.get(name)
+
+
+def serialize_json(data: Any, compress: bool = False) -> bytes:
+    """Convenience function to serialize to JSON."""
+    serializer = DataSerializer(compression=compress)
+    result = serializer.serialize(data, SerializationFormat.JSON)
+    if not result.success:
+        raise ValueError(result.error)
+    return result.data
+
+
+def deserialize_json(data: bytes, compressed: bool = False) -> Any:
+    """Convenience function to deserialize from JSON."""
+    serializer = DataSerializer(compression=compressed)
+    result = serializer.deserialize(data, SerializationFormat.JSON)
+    if not result.success:
+        raise ValueError(result.error)
+    return result.data
