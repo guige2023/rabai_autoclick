@@ -1,405 +1,421 @@
-"""
-API Load Balancer Action Module.
+"""API Load Balancer Action Module.
 
-Provides load balancing strategies including round-robin,
-weighted round-robin, least connections, IP hashing, and
-adaptive load balancing for API gateways.
+Provides intelligent load balancing for API requests with support for
+multiple algorithms, health checking, circuit breaking, and adaptive
+routing based on real-time metrics.
 """
 
-import random
+from __future__ import annotations
+
+import logging
 import threading
 import time
-from typing import Optional, Dict, Any, List, Callable
-from dataclasses import dataclass, field
-from enum import Enum
 from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
-class LoadBalancingStrategy(Enum):
+logger = logging.getLogger(__name__)
+
+
+class LoadBalancingAlgorithm(Enum):
     """Load balancing algorithm types."""
     ROUND_ROBIN = "round_robin"
-    WEIGHTED_ROUND_ROBIN = "weighted_round_robin"
     LEAST_CONNECTIONS = "least_connections"
-    LEAST_RESPONSE_TIME = "least_response_time"
     IP_HASH = "ip_hash"
+    WEIGHTED = "weighted"
     RANDOM = "random"
     ADAPTIVE = "adaptive"
+    THROTTLE = "throttle"
+
+
+class NodeState(Enum):
+    """API node states."""
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    UNHEALTHY = "unhealthy"
+    DRAINING = "draining"
 
 
 @dataclass
-class Server:
-    """Represents a backend server."""
-    id: str
-    host: str
-    port: int
-    weight: int = 1  # for weighted strategies
-    max_connections: int = 1000
-    is_healthy: bool = True
-    is_draining: bool = False  # for graceful shutdown
-
-    @property
-    def address(self) -> str:
-        return f"{self.host}:{self.port}"
-
-
-@dataclass
-class ServerStats:
-    """Statistics for a server."""
-    server_id: str
-    requests: int = 0
-    successes: int = 0
-    failures: int = 0
-    total_response_time: float = 0.0
-    current_connections: int = 0
-    last_used: float = field(default_factory=time.time)
-
-    @property
-    def avg_response_time(self) -> float:
-        if self.successes == 0:
-            return 0
-        return self.total_response_time / self.successes
-
-    @property
-    def failure_rate(self) -> float:
-        total = self.successes + self.failures
-        if total == 0:
-            return 0
-        return self.failures / total
+class APINode:
+    """An API endpoint node."""
+    node_id: str
+    url: str
+    weight: int = 1
+    max_connections: int = 100
+    state: NodeState = NodeState.HEALTHY
+    active_connections: int = 0
+    last_health_check: Optional[datetime] = None
+    consecutive_failures: int = 0
+    consecutive_successes: int = 0
+    avg_latency_ms: float = 0.0
+    total_requests: int = 0
+    total_errors: int = 0
 
 
 @dataclass
 class LoadBalancerConfig:
     """Configuration for load balancer."""
-    strategy: LoadBalancingStrategy = LoadBalancingStrategy.ROUND_ROBIN
-    health_check_interval: float = 30.0  # seconds
-    health_check_timeout: float = 5.0
-    max_failures: int = 3  # failures before marking unhealthy
-    circuit_breaker_threshold: int = 5  # failures to open circuit
-    circuit_breaker_timeout: float = 60.0  # seconds to try again
-    slow_start_time: float = 0.0  # seconds for slow start
-    health_check_url: Optional[str] = None
+    algorithm: LoadBalancingAlgorithm = LoadBalancingAlgorithm.ROUND_ROBIN
+    health_check_interval_seconds: int = 30
+    health_check_timeout_seconds: float = 5.0
+    health_check_path: str = "/health"
+    circuit_breaker_threshold: int = 5
+    circuit_breaker_timeout_seconds: float = 60.0
+    adaptive_weights_enabled: bool = True
+    weight_update_interval_seconds: int = 60
+    drain_timeout_seconds: float = 30.0
+
+
+@dataclass
+class RoutingDecision:
+    """Result of a routing decision."""
+    node: APINode
+    algorithm_used: LoadBalancingAlgorithm
+    routing_metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class HealthChecker:
+    """Health checking for API nodes."""
+
+    def __init__(self, timeout: float = 5.0, check_path: str = "/health"):
+        self._timeout = timeout
+        self._check_path = check_path
+
+    def check_node(self, node: APINode) -> bool:
+        """Perform health check on a node."""
+        try:
+            import urllib.request
+            import urllib.error
+
+            url = node.url.rstrip("/") + self._check_path
+            request = urllib.request.Request(url, method="GET")
+            response = urllib.request.urlopen(request, timeout=self._timeout)
+            return response.status == 200
+
+        except ImportError:
+            import http.client
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(node.url)
+                conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=self._timeout)
+                conn.request("GET", self._check_path)
+                resp = conn.getresponse()
+                conn.close()
+                return resp.status == 200
+            except Exception:
+                return False
+        except Exception as e:
+            logger.warning(f"Health check failed for {node.node_id}: {e}")
+            return False
 
 
 class CircuitBreaker:
-    """Circuit breaker for server protection."""
+    """Circuit breaker for node failure handling."""
 
-    def __init__(
-        self,
-        threshold: int = 5,
-        timeout: float = 60.0,
-    ):
-        self.threshold = threshold
-        self.timeout = timeout
-        self.failures = 0
-        self.last_failure_time: Optional[float] = None
-        self.state = "closed"  # closed, open, half_open
+    def __init__(self, threshold: int = 5, timeout: float = 60.0):
+        self._threshold = threshold
+        self._timeout = timeout
+        self._state: Dict[str, str] = defaultdict(lambda: "closed")
+        self._failure_count: Dict[str, int] = defaultdict(int)
+        self._last_failure_time: Dict[str, datetime] = {}
+        self._lock = threading.Lock()
 
-    def record_failure(self) -> None:
-        """Record a failure."""
-        self.failures += 1
-        self.last_failure_time = time.time()
-        if self.failures >= self.threshold:
-            self.state = "open"
+    def record_success(self, node_id: str):
+        """Record successful request."""
+        with self._lock:
+            self._failure_count[node_id] = 0
+            self._state[node_id] = "closed"
 
-    def record_success(self) -> None:
-        """Record a success."""
-        self.failures = 0
-        self.state = "closed"
+    def record_failure(self, node_id: str):
+        """Record failed request."""
+        with self._lock:
+            self._failure_count[node_id] += 1
+            self._last_failure_time[node_id] = datetime.now()
+            if self._failure_count[node_id] >= self._threshold:
+                self._state[node_id] = "open"
 
-    def can_attempt(self) -> bool:
-        """Check if request can be attempted."""
-        if self.state == "closed":
-            return True
-        if self.state == "open":
-            if time.time() - self.last_failure_time >= self.timeout:
-                self.state = "half_open"
+    def is_open(self, node_id: str) -> bool:
+        """Check if circuit is open for node."""
+        with self._lock:
+            if self._state[node_id] == "open":
+                last_failure = self._last_failure_time.get(node_id)
+                if last_failure:
+                    elapsed = (datetime.now() - last_failure).total_seconds()
+                    if elapsed >= self._timeout:
+                        self._state[node_id] = "half-open"
+                        return False
                 return True
             return False
-        return True  # half_open
+
+    def get_state(self, node_id: str) -> str:
+        """Get circuit state for node."""
+        return self._state[node_id]
 
 
-class APILoadBalancerAction:
-    """
-    Load balancing action with multiple strategies.
+class AdaptiveWeightCalculator:
+    """Calculate adaptive weights based on node performance."""
 
-    Provides intelligent request distribution across backend
-    servers with health checking and circuit breaker support.
-    """
+    @staticmethod
+    def calculate_weight(node: APINode, baseline_latency: float = 100.0) -> float:
+        """Calculate weight based on node health metrics."""
+        error_rate = node.total_errors / max(node.total_requests, 1)
+        latency_factor = baseline_latency / max(node.avg_latency_ms, 1)
+        health_factor = 1.0 - error_rate
 
-    def __init__(self, config: Optional[LoadBalancerConfig] = None):
-        self.config = config or LoadBalancerConfig()
-        self._servers: Dict[str, Server] = {}
-        self._server_stats: Dict[str, ServerStats] = {}
-        self._circuit_breakers: Dict[str, CircuitBreaker] = {}
-        self._lock = threading.RLock()
+        weight = health_factor * latency_factor * node.weight
+        return max(0.1, min(weight, 10.0))
+
+
+class ApiLoadBalancerAction(BaseAction):
+    """Action for load balancing API requests."""
+
+    def __init__(self):
+        super().__init__(name="api_load_balancer")
+        self._config = LoadBalancerConfig()
+        self._nodes: Dict[str, APINode] = {}
+        self._circuit_breaker = CircuitBreaker(
+            threshold=self._config.circuit_breaker_threshold,
+            timeout=self._config.circuit_breaker_timeout
+        )
+        self._health_checker = HealthChecker(
+            timeout=self._config.health_check_timeout_seconds,
+            check_path=self._config.health_check_path
+        )
+        self._lock = threading.Lock()
         self._round_robin_index: Dict[str, int] = defaultdict(int)
-        self._server_sequence: List[str] = []
+        self._request_counters: Dict[str, int] = defaultdict(int)
+        self._routing_history: List[RoutingDecision] = []
+        self._last_weight_update = datetime.now()
 
-    def add_server(
-        self,
-        server_id: str,
-        host: str,
-        port: int,
-        weight: int = 1,
-        max_connections: int = 1000,
-    ) -> "APILoadBalancerAction":
-        """Add a server to the pool."""
-        with self._lock:
-            server = Server(
-                id=server_id,
-                host=host,
-                port=port,
-                weight=weight,
-                max_connections=max_connections,
-            )
-            self._servers[server_id] = server
-            self._server_stats[server_id] = ServerStats(server_id=server_id)
-            self._circuit_breakers[server_id] = CircuitBreaker(
-                threshold=self.config.circuit_breaker_threshold,
-                timeout=self.config.circuit_breaker_timeout,
-            )
-            self._server_sequence = sorted(
-                self._servers.keys(),
-                key=lambda s: self._servers[s].weight,
-                reverse=True,
-            )
-        return self
-
-    def remove_server(self, server_id: str) -> "APILoadBalancerAction":
-        """Remove a server from the pool."""
-        with self._lock:
-            self._servers.pop(server_id, None)
-            self._server_stats.pop(server_id, None)
-            self._circuit_breakers.pop(server_id, None)
-        return self
-
-    def get_available_servers(self) -> List[str]:
-        """Get list of available server IDs."""
-        with self._lock:
-            return [
-                sid for sid, server in self._servers.items()
-                if server.is_healthy and not server.is_draining
-                and self._circuit_breakers[sid].can_attempt()
-                and self._server_stats[sid].current_connections < server.max_connections
-            ]
-
-    def _select_round_robin(self) -> Optional[str]:
-        """Select server using round-robin."""
-        available = self.get_available_servers()
-        if not available:
-            return None
-
-        # Find next index
-        while True:
-            idx = self._round_robin_index[self._server_sequence[0] if self._server_sequence else ""]
-            if idx >= len(self._server_sequence):
-                self._round_robin_index[self._server_sequence[0]] = 0
-                idx = 0
-
-            server_id = self._server_sequence[idx]
-            if server_id in available:
-                self._round_robin_index[self._server_sequence[0]] = idx + 1
-                return server_id
-            else:
-                self._round_robin_index[self._server_sequence[0]] = idx + 1
-
-    def _select_weighted_round_robin(self) -> Optional[str]:
-        """Select server using weighted round-robin."""
-        available = self.get_available_servers()
-        if not available:
-            return None
-
-        # Build weighted sequence
-        weighted_list = []
-        for sid in self._server_sequence:
-            if sid in available:
-                server = self._servers[sid]
-                weighted_list.extend([sid] * server.weight)
-
-        if not weighted_list:
-            return None
-
-        idx = self._round_robin_index["weighted"] % len(weighted_list)
-        self._round_robin_index["weighted"] = idx + 1
-        return weighted_list[idx]
-
-    def _select_least_connections(self) -> Optional[str]:
-        """Select server with least connections."""
-        available = self.get_available_servers()
-        if not available:
-            return None
-
-        return min(
-            available,
-            key=lambda sid: self._server_stats[sid].current_connections,
+    def configure(self, config: LoadBalancerConfig):
+        """Configure load balancer settings."""
+        self._config = config
+        self._circuit_breaker = CircuitBreaker(
+            threshold=config.circuit_breaker_threshold,
+            timeout=config.circuit_breaker_timeout_seconds
+        )
+        self._health_checker = HealthChecker(
+            timeout=config.health_check_timeout_seconds,
+            check_path=config.health_check_path
         )
 
-    def _select_least_response_time(self) -> Optional[str]:
-        """Select server with least average response time."""
-        available = self.get_available_servers()
-        if not available:
-            return None
+    def add_node(self, node_id: str, url: str, weight: int = 1) -> ActionResult:
+        """Add a node to the load balancer."""
+        try:
+            with self._lock:
+                if node_id in self._nodes:
+                    return ActionResult(success=False, error=f"Node {node_id} already exists")
 
-        return min(
-            available,
-            key=lambda sid: self._server_stats[sid].avg_response_time,
-        )
+                node = APINode(node_id=node_id, url=url, weight=weight)
+                self._nodes[node_id] = node
+                return ActionResult(success=True, data={"node_id": node_id, "url": url})
+        except Exception as e:
+            return ActionResult(success=False, error=str(e))
 
-    def _select_ip_hash(self, client_ip: str) -> Optional[str]:
-        """Select server using IP hash."""
-        available = self.get_available_servers()
-        if not available:
-            return None
+    def remove_node(self, node_id: str, drain: bool = True) -> ActionResult:
+        """Remove a node from the load balancer."""
+        try:
+            with self._lock:
+                if node_id not in self._nodes:
+                    return ActionResult(success=False, error=f"Node {node_id} not found")
 
-        hash_val = hash(client_ip) % len(available)
-        return available[hash_val]
+                if drain:
+                    self._nodes[node_id].state = NodeState.DRAINING
+                else:
+                    del self._nodes[node_id]
 
-    def _select_random(self) -> Optional[str]:
-        """Select random server."""
-        available = self.get_available_servers()
-        if not available:
-            return None
-        return random.choice(available)
+                return ActionResult(success=True)
+        except Exception as e:
+            return ActionResult(success=False, error=str(e))
 
-    def _select_adaptive(self) -> Optional[str]:
-        """Select server using adaptive algorithm."""
-        available = self.get_available_servers()
-        if not available:
-            return None
-
-        # Score servers based on multiple factors
-        scores = {}
-        for sid in available:
-            stats = self._server_stats[sid]
-            server = self._servers[sid]
-
-            # Lower is better: connections ratio, response time, failure rate
-            connection_score = stats.current_connections / server.max_connections
-            response_score = stats.avg_response_time / 1000  # normalize to seconds
-            failure_score = stats.failure_rate
-
-            # Weighted combination
-            total_score = (
-                connection_score * 0.4 +
-                response_score * 0.4 +
-                failure_score * 0.2
-            )
-            scores[sid] = total_score
-
-        return min(scores, key=scores.get)
-
-    def select_server(self, client_ip: Optional[str] = None) -> Optional[str]:
-        """
-        Select a server based on configured strategy.
-
-        Args:
-            client_ip: Client IP for IP hash strategy
-
-        Returns:
-            Selected server ID or None
-        """
-        strategy = self.config.strategy
-
-        if strategy == LoadBalancingStrategy.ROUND_ROBIN:
-            return self._select_round_robin()
-        elif strategy == LoadBalancingStrategy.WEIGHTED_ROUND_ROBIN:
-            return self._select_weighted_round_robin()
-        elif strategy == LoadBalancingStrategy.LEAST_CONNECTIONS:
-            return self._select_least_connections()
-        elif strategy == LoadBalancingStrategy.LEAST_RESPONSE_TIME:
-            return self._select_least_response_time()
-        elif strategy == LoadBalancingStrategy.IP_HASH:
-            return self._select_ip_hash(client_ip or "unknown")
-        elif strategy == LoadBalancingStrategy.RANDOM:
-            return self._select_random()
-        elif strategy == LoadBalancingStrategy.ADAPTIVE:
-            return self._select_adaptive()
-
-        return self._select_round_robin()
-
-    def record_request_start(self, server_id: str) -> None:
-        """Record start of request to server."""
+    def route(self, request_context: Optional[Dict[str, Any]] = None) -> RoutingDecision:
+        """Route a request to an appropriate node."""
         with self._lock:
-            if server_id in self._server_stats:
-                self._server_stats[server_id].requests += 1
-                self._server_stats[server_id].current_connections += 1
-                self._server_stats[server_id].last_used = time.time()
+            self._update_weights_if_needed()
+            eligible_nodes = self._get_eligible_nodes()
 
-    def record_request_end(
-        self,
-        server_id: str,
-        success: bool,
-        response_time: float,
-    ) -> None:
-        """Record end of request to server."""
-        with self._lock:
-            if server_id not in self._server_stats:
-                return
+            if not eligible_nodes:
+                raise RuntimeError("No eligible nodes available")
 
-            stats = self._server_stats[server_id]
-            stats.current_connections = max(0, stats.current_connections - 1)
-            stats.total_response_time += response_time
-
-            if success:
-                stats.successes += 1
-                self._circuit_breakers[server_id].record_success()
+            if self._config.algorithm == LoadBalancingAlgorithm.ROUND_ROBIN:
+                node = self._round_robin_select(eligible_nodes)
+            elif self._config.algorithm == LoadBalancingAlgorithm.LEAST_CONNECTIONS:
+                node = self._least_connections_select(eligible_nodes)
+            elif self._config.algorithm == LoadBalancingAlgorithm.WEIGHTED:
+                node = self._weighted_select(eligible_nodes)
+            elif self._config.algorithm == LoadBalancingAlgorithm.RANDOM:
+                node = self._random_select(eligible_nodes)
+            elif self._config.algorithm == LoadBalancingAlgorithm.ADAPTIVE:
+                node = self._adaptive_select(eligible_nodes)
             else:
-                stats.failures += 1
-                self._circuit_breakers[server_id].record_failure()
+                node = self._round_robin_select(eligible_nodes)
 
-    def get_server(self, server_id: str) -> Optional[Server]:
-        """Get server by ID."""
-        return self._servers.get(server_id)
+            node.active_connections += 1
+            self._request_counters[node.node_id] += 1
 
-    def get_all_servers(self) -> List[Server]:
-        """Get all servers."""
-        return list(self._servers.values())
+            decision = RoutingDecision(
+                node=node,
+                algorithm_used=self._config.algorithm,
+                routing_metadata={
+                    "eligible_count": len(eligible_nodes),
+                    "request_id": self._request_counters.get(node.node_id, 0)
+                }
+            )
+            self._routing_history.append(decision)
+            return decision
+
+    def _get_eligible_nodes(self) -> List[APINode]:
+        """Get list of nodes eligible for routing."""
+        eligible = []
+        for node in self._nodes.values():
+            if node.state == NodeState.UNHEALTHY:
+                continue
+            if self._circuit_breaker.is_open(node.node_id):
+                continue
+            if node.state == NodeState.DRAINING and node.active_connections > 0:
+                continue
+            eligible.append(node)
+        return eligible
+
+    def _round_robin_select(self, nodes: List[APINode]) -> APINode:
+        """Select node using round-robin."""
+        node_id = nodes[0].node_id
+        current_index = self._round_robin_index[node_id]
+        self._round_robin_index[node_id] = (current_index + 1) % len(nodes)
+        return nodes[current_index % len(nodes)]
+
+    def _least_connections_select(self, nodes: List[APINode]) -> APINode:
+        """Select node with least active connections."""
+        return min(nodes, key=lambda n: n.active_connections)
+
+    def _weighted_select(self, nodes: List[APINode]) -> APINode:
+        """Select node using weighted probability."""
+        total_weight = sum(n.weight for n in nodes)
+        import random
+        r = random.uniform(0, total_weight)
+        cumulative = 0
+        for node in nodes:
+            cumulative += node.weight
+            if r <= cumulative:
+                return node
+        return nodes[-1]
+
+    def _random_select(self, nodes: List[APINode]) -> APINode:
+        """Select node randomly."""
+        import random
+        return random.choice(nodes)
+
+    def _adaptive_select(self, nodes: List[APINode]) -> APINode:
+        """Select node using adaptive weights."""
+        weights = [AdaptiveWeightCalculator.calculate_weight(n) for n in nodes]
+        total_weight = sum(weights)
+        import random
+        r = random.uniform(0, total_weight)
+        cumulative = 0
+        for i, node in enumerate(nodes):
+            cumulative += weights[i]
+            if r <= cumulative:
+                return node
+        return nodes[-1]
+
+    def _update_weights_if_needed(self):
+        """Update node weights based on performance."""
+        if not self._config.adaptive_weights_enabled:
+            return
+
+        elapsed = (datetime.now() - self._last_weight_update).total_seconds()
+        if elapsed < self._config.weight_update_interval_seconds:
+            return
+
+        for node in self._nodes.values():
+            new_weight = AdaptiveWeightCalculator.calculate_weight(node)
+            node.weight = int(new_weight)
+
+        self._last_weight_update = datetime.now()
+
+    def record_success(self, node_id: str, latency_ms: float):
+        """Record successful request completion."""
+        with self._lock:
+            if node_id in self._nodes:
+                node = self._nodes[node_id]
+                node.active_connections = max(0, node.active_connections - 1)
+                node.consecutive_successes += 1
+                node.consecutive_failures = 0
+                node.total_requests += 1
+                node.avg_latency_ms = (
+                    (node.avg_latency_ms * (node.total_requests - 1) + latency_ms)
+                    / node.total_requests
+                )
+                self._circuit_breaker.record_success(node_id)
+
+    def record_failure(self, node_id: str):
+        """Record failed request."""
+        with self._lock:
+            if node_id in self._nodes:
+                node = self._nodes[node_id]
+                node.active_connections = max(0, node.active_connections - 1)
+                node.consecutive_failures += 1
+                node.consecutive_successes = 0
+                node.total_errors += 1
+                self._circuit_breaker.record_failure(node_id)
+
+                if node.consecutive_failures >= self._config.circuit_breaker_threshold:
+                    node.state = NodeState.UNHEALTHY
+
+    def perform_health_checks(self) -> ActionResult:
+        """Perform health checks on all nodes."""
+        try:
+            results = {}
+            for node_id, node in list(self._nodes.items()):
+                is_healthy = self._health_checker.check_node(node)
+                node.last_health_check = datetime.now()
+
+                if is_healthy:
+                    if node.state == NodeState.UNHEALTHY:
+                        node.state = NodeState.HEALTHY
+                    results[node_id] = {"status": "healthy", "reachable": True}
+                else:
+                    results[node_id] = {"status": "unhealthy", "reachable": False}
+
+            return ActionResult(
+                success=True,
+                data={"checks": results, "timestamp": datetime.now().isoformat()}
+            )
+        except Exception as e:
+            return ActionResult(success=False, error=str(e))
 
     def get_stats(self) -> Dict[str, Any]:
         """Get load balancer statistics."""
         with self._lock:
-            total_requests = sum(s.requests for s in self._server_stats.values())
-            total_successes = sum(s.successes for s in self._server_stats.values())
-            total_failures = sum(s.failures for s in self._server_stats.values())
+            total_requests = sum(n.total_requests for n in self._nodes.values())
+            total_errors = sum(n.total_errors for n in self._nodes.values())
+            total_connections = sum(n.active_connections for n in self._nodes.values())
 
             return {
-                "strategy": self.config.strategy.value,
-                "total_servers": len(self._servers),
-                "available_servers": len(self.get_available_servers()),
+                "total_nodes": len(self._nodes),
+                "healthy_nodes": sum(1 for n in self._nodes.values() if n.state == NodeState.HEALTHY),
                 "total_requests": total_requests,
-                "total_successes": total_successes,
-                "total_failures": total_failures,
-                "overall_failure_rate": total_failures / total_requests if total_requests > 0 else 0,
-                "servers": {
-                    sid: {
-                        "requests": stats.requests,
-                        "successes": stats.successes,
-                        "failures": stats.failures,
-                        "avg_response_time_ms": stats.avg_response_time,
-                        "current_connections": stats.current_connections,
-                        "circuit_breaker_state": self._circuit_breakers[sid].state,
+                "total_errors": total_errors,
+                "active_connections": total_connections,
+                "error_rate": total_errors / max(total_requests, 1),
+                "algorithm": self._config.algorithm.value,
+                "nodes": {
+                    node_id: {
+                        "state": node.state.value,
+                        "active_connections": node.active_connections,
+                        "total_requests": node.total_requests,
+                        "avg_latency_ms": node.avg_latency_ms,
+                        "circuit_state": self._circuit_breaker.get_state(node_id)
                     }
-                    for sid, stats in self._server_stats.items()
-                },
+                    for node_id, node in self._nodes.items()
+                }
             }
-
-    def health_check(self, server_id: str) -> bool:
-        """Perform health check on server."""
-        import socket
-        server = self._servers.get(server_id)
-        if not server:
-            return False
-
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(self.config.health_check_timeout)
-            result = sock.connect_ex((server.host, server.port))
-            sock.close()
-            is_healthy = result == 0
-            with self._lock:
-                server.is_healthy = is_healthy
-            return is_healthy
-        except Exception:
-            with self._lock:
-                server.is_healthy = False
-            return False
