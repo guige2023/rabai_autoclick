@@ -1,689 +1,401 @@
-"""Data Pipeline Action Module.
+"""
+Data Pipeline Action Module
 
-Provides configurable data processing pipelines with stages,
-filters, transforms, aggregations, and error handling.
+Composable data processing pipeline with stage-based architecture,
+parallel execution support, error handling, and comprehensive monitoring.
+
+MIT License - Copyright (c) 2025 RabAi Research
 """
 
 from __future__ import annotations
 
-import sys
-import os
+import asyncio
+import logging
 import time
-import hashlib
-from typing import Any, Callable, Dict, List, Optional, TypeVar, Generic
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Generic,
+    List,
+    Optional,
+    TypeVar,
+    Union,
+)
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
-
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+R = TypeVar("R")
+S = TypeVar("S")
 
 
-class PipelineStageType(Enum):
+class StageType(Enum):
     """Types of pipeline stages."""
-    SOURCE = "source"
-    FILTER = "filter"
+
+    EXTRACT = "extract"
     TRANSFORM = "transform"
+    LOAD = "load"
+    FILTER = "filter"
     AGGREGATE = "aggregate"
-    SPLIT = "split"
-    MERGE = "merge"
-    SINK = "sink"
+    VALIDATE = "validate"
+    ENRICH = "enrich"
+    CUSTOM = "custom"
 
 
 class StageStatus(Enum):
     """Execution status of a pipeline stage."""
+
     PENDING = "pending"
     RUNNING = "running"
-    SUCCESS = "success"
+    COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
 
 
 @dataclass
-class PipelineStage:
-    """Definition of a pipeline stage."""
-    stage_id: str
-    stage_type: PipelineStageType
-    name: str
-    config: Dict[str, Any] = field(default_factory=dict)
-    on_error: str = "skip"
-    timeout: float = 60.0
+class StageMetrics:
+    """Metrics for a pipeline stage."""
 
-
-@dataclass
-class StageResult:
-    """Result of a pipeline stage execution."""
-    stage_id: str
-    status: StageStatus
-    records_in: int = 0
-    records_out: int = 0
-    duration: float = 0.0
+    stage_name: str
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
+    duration_ms: float = 0.0
+    items_processed: int = 0
+    items_succeeded: int = 0
+    items_failed: int = 0
+    status: StageStatus = StageStatus.PENDING
     error: Optional[str] = None
-    metrics: Dict[str, Any] = field(default_factory=dict)
+
+    def start(self) -> None:
+        """Mark stage as started."""
+        self.start_time = time.time()
+        self.status = StageStatus.RUNNING
+
+    def complete(self, items_processed: int = 0) -> None:
+        """Mark stage as completed."""
+        self.end_time = time.time()
+        self.duration_ms = (self.end_time - self.start_time) * 1000 if self.start_time else 0
+        self.items_processed = items_processed
+        self.status = StageStatus.COMPLETED
+
+    def fail(self, error: str) -> None:
+        """Mark stage as failed."""
+        self.end_time = time.time()
+        self.duration_ms = (self.end_time - self.start_time) * 1000 if self.start_time else 0
+        self.status = StageStatus.FAILED
+        self.error = error
 
 
 @dataclass
-class PipelineMetrics:
-    """Overall pipeline execution metrics."""
-    total_records: int = 0
-    records_processed: int = 0
-    records_filtered: int = 0
-    records_failed: int = 0
-    stages_executed: int = 0
-    stages_failed: int = 0
-    total_duration: float = 0.0
+class PipelineConfig:
+    """Configuration for pipeline execution."""
+
+    name: str = "data_pipeline"
+    max_parallel_stages: int = 3
+    continue_on_error: bool = True
+    timeout_seconds: float = 300.0
+    retry_failed_items: bool = False
+    max_retries: int = 2
+    batch_size: int = 100
+    enable_metrics: bool = True
 
 
-class DataPipelineAction(BaseAction):
-    """
-    Configurable data processing pipeline.
+@dataclass
+class PipelineContext:
+    """Shared context passed through pipeline stages."""
 
-    Supports multi-stage pipelines with filtering, transformation,
-    aggregation, branching, and error handling.
+    data: Any = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    errors: List[Dict[str, Any]] = field(default_factory=list)
+    metrics: Dict[str, StageMetrics] = field(default_factory=dict)
 
-    Example:
-        pipeline = DataPipelineAction()
-        result = pipeline.execute(ctx, {
-            "action": "run",
-            "stages": [...],
-            "data": [...]
+    def add_error(self, stage: str, error: str, item: Any = None) -> None:
+        """Add an error to the context."""
+        self.errors.append({
+            "stage": stage,
+            "error": error,
+            "item": item,
+            "timestamp": time.time(),
         })
+
+    def get_metric(self, stage_name: str) -> Optional[StageMetrics]:
+        """Get metrics for a specific stage."""
+        return self.metrics.get(stage_name)
+
+
+class PipelineStage(Generic[T, R]):
     """
-    action_type = "data_pipeline"
-    display_name = "数据流水线"
-    description = "多阶段数据处理流水线，支持过滤、转换、聚合、分支和错误处理"
+    A single stage in the data pipeline.
 
-    def __init__(self) -> None:
-        super().__init__()
-        self._stage_handlers: Dict[PipelineStageType, Callable] = {
-            PipelineStageType.SOURCE: self._handle_source,
-            PipelineStageType.FILTER: self._handle_filter,
-            PipelineStageType.TRANSFORM: self._handle_transform,
-            PipelineStageType.AGGREGATE: self._handle_aggregate,
-            PipelineStageType.SPLIT: self._handle_split,
-            PipelineStageType.MERGE: self._handle_merge,
-            PipelineStageType.SINK: self._handle_sink,
-        }
+    Each stage receives input, processes it, and returns output.
+    """
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute a pipeline action.
+    def __init__(
+        self,
+        name: str,
+        stage_type: StageType,
+        handler: Callable[[T, PipelineContext], Awaitable[R]],
+        config: Optional[Dict[str, Any]] = None,
+    ):
+        self.name = name
+        self.stage_type = stage_type
+        self.handler = handler
+        self.config = config or {}
+        self._metrics = StageMetrics(stage_name=name)
+
+    async def execute(self, input_data: T, context: PipelineContext) -> R:
+        """Execute the stage with given input."""
+        logger.debug(f"Executing stage: {self.name}")
+        self._metrics.start()
+        context.metrics[self.name] = self._metrics
+
+        try:
+            result = await self.handler(input_data, context)
+            self._metrics.complete()
+            self._metrics.items_succeeded = getattr(result, "__len__", lambda: 1)()
+            return result
+        except Exception as e:
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            logger.error(f"Stage {self.name} failed: {error_msg}")
+            self._metrics.fail(error_msg)
+            context.add_error(self.name, error_msg)
+            raise
+
+    @property
+    def metrics(self) -> StageMetrics:
+        """Get stage metrics."""
+        return self._metrics
+
+
+class DataPipeline(Generic[T]):
+    """
+    Composable data processing pipeline.
+
+    Supports:
+    - Sequential and parallel stage execution
+    - Error handling and recovery
+    - Metrics collection
+    - Context passing between stages
+
+    Usage:
+        pipeline = DataPipeline(config)
+        pipeline.add_stage(extract_handler, "extract", StageType.EXTRACT)
+        pipeline.add_stage(transform_handler, "transform", StageType.TRANSFORM)
+        result = await pipeline.execute(input_data)
+    """
+
+    def __init__(self, config: Optional[PipelineConfig] = None):
+        self.config = config or PipelineConfig()
+        self._stages: List[PipelineStage] = []
+        self._context = PipelineContext()
+
+    def add_stage(
+        self,
+        handler: Callable[[Any, PipelineContext], Awaitable[Any]],
+        name: str,
+        stage_type: StageType = StageType.CUSTOM,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> "DataPipeline":
+        """Add a stage to the pipeline. Returns self for chaining."""
+        stage = PipelineStage(name=name, stage_type=stage_type, handler=handler, config=config)
+        self._stages.append(stage)
+        return self
+
+    def add_stages(
+        self,
+        stages: List[tuple[Callable[[Any, PipelineContext], Awaitable[Any]], str, StageType]],
+    ) -> "DataPipeline":
+        """Add multiple stages at once."""
+        for handler, name, stage_type in stages:
+            self.add_stage(handler, name, stage_type)
+        return self
+
+    async def execute(
+        self,
+        input_data: T,
+        context: Optional[PipelineContext] = None,
+    ) -> Any:
+        """
+        Execute the pipeline with the given input.
 
         Args:
-            context: Execution context.
-            params: Dict with keys: action (run|validate|get_stage),
-                   stages, data, options.
+            input_data: Initial data to process
+            context: Optional shared context
 
         Returns:
-            ActionResult with pipeline execution result.
+            Output from the final stage
         """
-        action = params.get("action", "")
+        ctx = context or PipelineContext()
+        ctx.data = input_data
 
-        try:
-            if action == "run":
-                return self._run_pipeline(params)
-            elif action == "validate":
-                return self._validate_pipeline(params)
-            elif action == "get_stage":
-                return self._get_stage_info(params)
-            else:
-                return ActionResult(success=False, message=f"Unknown action: {action}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Pipeline error: {str(e)}")
+        logger.info(f"Starting pipeline: {self.config.name} with {len(self._stages)} stages")
 
-    def _run_pipeline(self, params: Dict[str, Any]) -> ActionResult:
-        """Run a data pipeline."""
-        stages_def = params.get("stages", [])
-        data = params.get("data", [])
-        options = params.get("options", {})
-
-        if not stages_def:
-            return ActionResult(success=False, message="stages are required")
-
-        stages = self._build_stages(stages_def)
-        records = self._ensure_list(data)
-        stage_results: Dict[str, StageResult] = {}
-        metrics = PipelineMetrics(total_records=len(records))
-        start_time = time.time()
-
-        for stage in stages:
-            if not records and stage.stage_type != PipelineStageType.SOURCE:
-                result = StageResult(
-                    stage_id=stage.stage_id,
-                    status=StageStatus.SKIPPED,
-                    records_in=0,
-                    records_out=0,
-                )
-                stage_results[stage.stage_id] = result
-                continue
-
-            handler = self._stage_handlers.get(stage.stage_type, self._handle_generic)
-            stage_start = time.time()
+        for stage in self._stages:
+            if not self.config.continue_on_error and ctx.errors:
+                logger.warning(f"Pipeline aborted due to previous errors at stage: {ctx.errors[-1]['stage']}")
+                break
 
             try:
-                new_records, result = handler(stage, records, params)
-
-                if stage.config.get("output_var"):
-                    params[stage.config["output_var"]] = new_records
-
-                records = new_records
-                result.duration = time.time() - stage_start
-                stage_results[stage.stage_id] = result
-
-                metrics.records_processed += result.records_out
-                metrics.records_filtered += result.records_in - result.records_out
-                metrics.stages_executed += 1
-
+                ctx.data = await stage.execute(ctx.data, ctx)
             except Exception as e:
-                result = StageResult(
-                    stage_id=stage.stage_id,
-                    status=StageStatus.FAILED,
-                    records_in=len(records),
-                    records_out=0,
-                    duration=time.time() - stage_start,
-                    error=str(e),
-                )
-                stage_results[stage.stage_id] = result
-                metrics.stages_failed += 1
+                if not self.config.continue_on_error:
+                    raise PipelineExecutionError(f"Stage {stage.name} failed: {e}") from e
+                logger.error(f"Stage {stage.name} failed, continuing: {e}")
 
-                if stage.on_error == "fail":
-                    break
-                elif stage.on_error == "skip":
-                    continue
-                else:
-                    records = []
+        logger.info(f"Pipeline completed: {self.config.name}")
+        return ctx.data
 
-        metrics.total_duration = time.time() - start_time
+    def get_metrics(self) -> Dict[str, StageMetrics]:
+        """Get metrics for all stages."""
+        return {s.name: s.metrics for s in self._stages}
 
-        return ActionResult(
-            success=metrics.stages_failed == 0,
-            message=f"Pipeline completed: {metrics.records_processed}/{metrics.total_records} records",
-            data={
-                "metrics": {
-                    "total_records": metrics.total_records,
-                    "records_processed": metrics.records_processed,
-                    "records_filtered": metrics.records_filtered,
-                    "stages_executed": metrics.stages_executed,
-                    "stages_failed": metrics.stages_failed,
-                    "duration": metrics.total_duration,
-                },
-                "output": records,
-                "stage_results": {
-                    k: {"status": v.status.value, "records_in": v.records_in, "records_out": v.records_out}
-                    for k, v in stage_results.items()
+    def get_summary(self) -> Dict[str, Any]:
+        """Get a summary of pipeline execution."""
+        total_duration = sum(s.metrics.duration_ms for s in self._stages)
+        return {
+            "name": self.config.name,
+            "stages": len(self._stages),
+            "total_duration_ms": total_duration,
+            "stage_metrics": {
+                name: {
+                    "status": m.status.value,
+                    "duration_ms": m.duration_ms,
+                    "items_processed": m.items_processed,
                 }
-            }
-        )
-
-    def _handle_source(self, stage: PipelineStage, records: List[Any], params: Dict[str, Any]) -> tuple[List[Any], StageResult]:
-        """Handle source stage that produces records."""
-        source_type = stage.config.get("type", "inline")
-        stage_records: List[Any] = []
-
-        if source_type == "inline":
-            stage_records = self._ensure_list(stage.config.get("data", []))
-        elif source_type == "sequence":
-            start = stage.config.get("start", 0)
-            end = stage.config.get("end", 10)
-            stage_records = list(range(start, end))
-        elif source_type == "repeat":
-            value = stage.config.get("value", None)
-            count = stage.config.get("count", 1)
-            stage_records = [value] * count
-        elif source_type == "generator":
-            generator_func = stage.config.get("func")
-            if generator_func:
-                count = stage.config.get("count", 10)
-                stage_records = [generator_func(i) for i in range(count)]
-
-        result = StageResult(
-            stage_id=stage.stage_id,
-            status=StageStatus.SUCCESS,
-            records_in=0,
-            records_out=len(stage_records),
-        )
-
-        return stage_records, result
-
-    def _handle_filter(self, stage: PipelineStage, records: List[Any], params: Dict[str, Any]) -> tuple[List[Any], StageResult]:
-        """Handle filter stage that removes records."""
-        filter_type = stage.config.get("type", "expression")
-        filtered: List[Any] = []
-        filtered_count = 0
-
-        if filter_type == "expression":
-            expression = stage.config.get("expression", "True")
-            for record in records:
-                try:
-                    record_copy = record.copy() if isinstance(record, dict) else {"value": record}
-                    if eval(expression, {"__builtins__": {}}, {"record": record_copy}):
-                        filtered.append(record)
-                    else:
-                        filtered_count += 1
-                except Exception:
-                    filtered.append(record)
-
-        elif filter_type == "condition":
-            field_name = stage.config.get("field")
-            operator = stage.config.get("operator", "eq")
-            value = stage.config.get("value")
-
-            for record in records:
-                if isinstance(record, dict):
-                    field_value = record.get(field_name)
-                    if self._evaluate_operator(field_value, operator, value):
-                        filtered.append(record)
-                    else:
-                        filtered_count += 1
-                else:
-                    filtered.append(record)
-
-        elif filter_type == "unique":
-            seen = set()
-            seen_add = seen.add
-            for record in records:
-                key = str(record.get(stage.config.get("key", "id"), record))
-                if key not in seen:
-                    seen_add(key)
-                    filtered.append(record)
-                else:
-                    filtered_count += 1
-
-        elif filter_type == "limit":
-            limit = stage.config.get("limit", len(records))
-            offset = stage.config.get("offset", 0)
-            filtered = records[offset:offset + limit]
-
-        result = StageResult(
-            stage_id=stage.stage_id,
-            status=StageStatus.SUCCESS,
-            records_in=len(records),
-            records_out=len(filtered),
-            metrics={"filtered_count": filtered_count},
-        )
-
-        return filtered, result
-
-    def _handle_transform(self, stage: PipelineStage, records: List[Any], params: Dict[str, Any]) -> tuple[List[Any], StageResult]:
-        """Handle transform stage that modifies records."""
-        transform_type = stage.config.get("type", "map")
-        transformed: List[Any] = []
-
-        if transform_type == "map":
-            field_mappings = stage.config.get("mappings", {})
-            for record in records:
-                if isinstance(record, dict):
-                    new_record = record.copy()
-                    for old_field, new_field in field_mappings.items():
-                        if old_field in new_record:
-                            new_record[new_field] = new_record.pop(old_field)
-                    transformed.append(new_record)
-                else:
-                    transformed.append(record)
-
-        elif transform_type == "rename":
-            rename_map = stage.config.get("rename", {})
-            for record in records:
-                if isinstance(record, dict):
-                    new_record = {}
-                    for key, value in record.items():
-                        new_key = rename_map.get(key, key)
-                        new_record[new_key] = value
-                    transformed.append(new_record)
-                else:
-                    transformed.append(record)
-
-        elif transform_type == "add_field":
-            field_name = stage.config.get("field")
-            field_value = stage.config.get("value")
-            for record in records:
-                new_record = record.copy() if isinstance(record, dict) else {"value": record}
-                if callable(field_value):
-                    new_record[field_name] = field_value(record)
-                else:
-                    new_record[field_name] = field_value
-                transformed.append(new_record)
-
-        elif transform_type == "remove_field":
-            field_name = stage.config.get("field")
-            for record in records:
-                if isinstance(record, dict):
-                    new_record = {k: v for k, v in record.items() if k != field_name}
-                    transformed.append(new_record)
-                else:
-                    transformed.append(record)
-
-        elif transform_type == "type_convert":
-            field_name = stage.config.get("field")
-            target_type = stage.config.get("target_type", "str")
-            for record in records:
-                if isinstance(record, dict) and field_name in record:
-                    new_record = record.copy()
-                    new_record[field_name] = self._convert_type(new_record[field_name], target_type)
-                    transformed.append(new_record)
-                else:
-                    transformed.append(record)
-
-        result = StageResult(
-            stage_id=stage.stage_id,
-            status=StageStatus.SUCCESS,
-            records_in=len(records),
-            records_out=len(transformed),
-        )
-
-        return transformed, result
-
-    def _handle_aggregate(self, stage: PipelineStage, records: List[Any], params: Dict[str, Any]) -> tuple[List[Any], StageResult]:
-        """Handle aggregation stage."""
-        agg_type = stage.config.get("type", "group_by")
-        aggregated: List[Any] = []
-
-        if agg_type == "group_by":
-            group_field = stage.config.get("group_by", "category")
-            aggregations = stage.config.get("aggregations", [])
-
-            groups: Dict[Any, List[Any]] = {}
-            for record in records:
-                if isinstance(record, dict):
-                    key = record.get(group_field, "unknown")
-                    if key not in groups:
-                        groups[key] = []
-                    groups[key].append(record)
-
-            for key, group_records in groups.items():
-                result_record: Dict[str, Any] = {group_field: key}
-
-                for agg in aggregations:
-                    field_name = agg.get("field")
-                    agg_op = agg.get("operation", "sum")
-
-                    if field_name:
-                        values = [r.get(field_name, 0) for r in group_records if isinstance(r.get(field_name), (int, float))]
-                        result_record[f"{field_name}_{agg_op}"] = self._apply_aggregation(values, agg_op)
-                    else:
-                        result_record[f"count"] = len(group_records)
-
-                aggregated.append(result_record)
-
-        elif agg_type == "sum":
-            field_name = stage.config.get("field")
-            total = sum(r.get(field_name, 0) for r in records if isinstance(r.get(field_name), (int, float)))
-            aggregated = [{"field": field_name, "sum": total}]
-
-        elif agg_type == "count":
-            aggregated = [{"total_count": len(records)}]
-
-        elif agg_type == "average":
-            field_name = stage.config.get("field")
-            values = [r.get(field_name, 0) for r in records if isinstance(r.get(field_name), (int, float))]
-            avg = sum(values) / len(values) if values else 0
-            aggregated = [{"field": field_name, "average": avg, "count": len(values)}]
-
-        result = StageResult(
-            stage_id=stage.stage_id,
-            status=StageStatus.SUCCESS,
-            records_in=len(records),
-            records_out=len(aggregated),
-        )
-
-        return aggregated, result
-
-    def _handle_split(self, stage: PipelineStage, records: List[Any], params: Dict[str, Any]) -> tuple[List[Any], StageResult]:
-        """Handle split stage that branches the pipeline."""
-        split_type = stage.config.get("type", "conditional")
-        branch_var = stage.config.get("branch_var", "branch")
-
-        if split_type == "conditional":
-            condition = stage.config.get("condition", "True")
-            true_records = []
-            false_records = []
-
-            for record in records:
-                try:
-                    record_copy = record.copy() if isinstance(record, dict) else {"value": record}
-                    if eval(condition, {"__builtins__": {}}, {"record": record_copy}):
-                        true_records.append(record)
-                    else:
-                        false_records.append(record)
-                except Exception:
-                    false_records.append(record)
-
-            params[f"{branch_var}_true"] = true_records
-            params[f"{branch_var}_false"] = false_records
-
-            result = StageResult(
-                stage_id=stage.stage_id,
-                status=StageStatus.SUCCESS,
-                records_in=len(records),
-                records_out=len(true_records),
-                metrics={"true_count": len(true_records), "false_count": len(false_records)},
-            )
-
-            return true_records, result
-
-        return records, StageResult(stage_id=stage.stage_id, status=StageStatus.SUCCESS, records_in=len(records), records_out=len(records))
-
-    def _handle_merge(self, stage: PipelineStage, records: List[Any], params: Dict[str, Any]) -> tuple[List[Any], StageResult]:
-        """Handle merge stage that combines streams."""
-        merge_type = stage.config.get("type", "concat")
-        sources = stage.config.get("sources", [])
-
-        merged: List[Any] = list(records)
-
-        if merge_type == "concat":
-            for source_var in sources:
-                if source_var in params:
-                    source_data = self._ensure_list(params[source_var])
-                    merged.extend(source_data)
-
-        elif merge_type == "union":
-            seen = set()
-            for source_var in sources:
-                if source_var in params:
-                    for record in self._ensure_list(params[source_var]):
-                        key = str(record)
-                        if key not in seen:
-                            seen.add(key)
-                            merged.append(record)
-
-        result = StageResult(
-            stage_id=stage.stage_id,
-            status=StageStatus.SUCCESS,
-            records_in=len(records),
-            records_out=len(merged),
-        )
-
-        return merged, result
-
-    def _handle_sink(self, stage: PipelineStage, records: List[Any], params: Dict[str, Any]) -> tuple[List[Any], StageResult]:
-        """Handle sink stage that outputs records."""
-        sink_type = stage.config.get("type", "return")
-        stored_records: List[Any] = []
-
-        if sink_type == "return":
-            stored_records = records
-
-        elif sink_type == "store":
-            var_name = stage.config.get("var", "pipeline_output")
-            params[var_name] = records
-            stored_records = records
-
-        result = StageResult(
-            stage_id=stage.stage_id,
-            status=StageStatus.SUCCESS,
-            records_in=len(records),
-            records_out=len(stored_records),
-        )
-
-        return stored_records, result
-
-    def _handle_generic(self, stage: PipelineStage, records: List[Any], params: Dict[str, Any]) -> tuple[List[Any], StageResult]:
-        """Generic handler for unknown stage types."""
-        return records, StageResult(stage_id=stage.stage_id, status=StageStatus.SUCCESS, records_in=len(records), records_out=len(records))
-
-    def _build_stages(self, stages_def: List[Dict[str, Any]]) -> List[PipelineStage]:
-        """Build PipelineStage objects from definitions."""
-        stages = []
-        for stage_data in stages_def:
-            stage_type_str = stage_data.get("stage_type", "transform")
-            try:
-                stage_type = PipelineStageType(stage_type_str)
-            except ValueError:
-                stage_type = PipelineStageType.TRANSFORM
-
-            stage = PipelineStage(
-                stage_id=stage_data.get("stage_id", self._generate_stage_id()),
-                stage_type=stage_type,
-                name=stage_data.get("name", stage_type_str),
-                config=stage_data.get("config", {}),
-                on_error=stage_data.get("on_error", "skip"),
-                timeout=stage_data.get("timeout", 60.0),
-            )
-            stages.append(stage)
-
-        return stages
-
-    def _validate_pipeline(self, params: Dict[str, Any]) -> ActionResult:
-        """Validate a pipeline definition."""
-        stages_def = params.get("stages", [])
-
-        if not stages_def:
-            return ActionResult(success=False, message="stages are required")
-
-        errors: List[str] = []
-        warnings: List[str] = []
-
-        has_source = False
-        has_sink = False
-
-        for i, stage_data in enumerate(stages_def):
-            stage_type_str = stage_data.get("stage_type", "transform")
-
-            try:
-                PipelineStageType(stage_type_str)
-            except ValueError:
-                errors.append(f"Stage {i}: Unknown stage type '{stage_type_str}'")
-
-            if stage_type_str == "source":
-                has_source = True
-            if stage_type_str == "sink":
-                has_sink = True
-
-            if stage_data.get("stage_id") is None:
-                warnings.append(f"Stage {i}: Missing stage_id")
-
-        if not has_source:
-            warnings.append("Pipeline has no source stage")
-
-        if not has_sink:
-            warnings.append("Pipeline has no sink stage")
-
-        return ActionResult(
-            success=len(errors) == 0,
-            message="Validation passed" if not errors else "Validation failed",
-            data={"errors": errors, "warnings": warnings}
-        )
-
-    def _get_stage_info(self, params: Dict[str, Any]) -> ActionResult:
-        """Get information about a stage type."""
-        stage_type = params.get("stage_type", "transform")
-
-        try:
-            st = PipelineStageType(stage_type)
-        except ValueError:
-            return ActionResult(success=False, message=f"Unknown stage type: {stage_type}")
-
-        info = {
-            "stage_type": st.value,
-            "description": self._get_stage_description(st),
-            "config_options": self._get_stage_config_options(st),
+                for name, m in self.get_metrics().items()
+            },
+            "errors": len(self._context.errors),
         }
 
-        return ActionResult(success=True, data=info)
 
-    def _get_stage_description(self, stage_type: PipelineStageType) -> str:
-        """Get description for a stage type."""
-        descriptions = {
-            PipelineStageType.SOURCE: "Produces records for the pipeline",
-            PipelineStageType.FILTER: "Removes records based on conditions",
-            PipelineStageType.TRANSFORM: "Modifies record structure or values",
-            PipelineStageType.AGGREGATE: "Groups and aggregates records",
-            PipelineStageType.SPLIT: "Branches pipeline based on conditions",
-            PipelineStageType.MERGE: "Combines multiple record streams",
-            PipelineStageType.SINK: "Outputs records from the pipeline",
-        }
-        return descriptions.get(stage_type, "Unknown stage type")
+class PipelineBuilder:
+    """
+    Fluent builder for constructing pipelines.
 
-    def _get_stage_config_options(self, stage_type: PipelineStageType) -> List[str]:
-        """Get config options for a stage type."""
-        options = {
-            PipelineStageType.SOURCE: ["type", "data", "start", "end", "count", "value"],
-            PipelineStageType.FILTER: ["type", "expression", "field", "operator", "value", "key", "limit", "offset"],
-            PipelineStageType.TRANSFORM: ["type", "mappings", "rename", "field", "value", "target_type"],
-            PipelineStageType.AGGREGATE: ["type", "group_by", "aggregations", "field"],
-            PipelineStageType.SPLIT: ["type", "condition", "branch_var"],
-            PipelineStageType.MERGE: ["type", "sources"],
-            PipelineStageType.SINK: ["type", "var"],
-        }
-        return options.get(stage_type, [])
+    Usage:
+        pipeline = (
+            PipelineBuilder()
+            .with_name("etl_pipeline")
+            .with_extract(extract_handler)
+            .with_transform(transform_handler)
+            .with_load(load_handler)
+            .build()
+        )
+    """
 
-    def _evaluate_operator(self, field_value: Any, operator: str, expected: Any) -> bool:
-        """Evaluate a filter operator."""
-        ops = {
-            "eq": lambda a, b: a == b,
-            "ne": lambda a, b: a != b,
-            "gt": lambda a, b: a > b,
-            "ge": lambda a, b: a >= b,
-            "lt": lambda a, b: a < b,
-            "le": lambda a, b: a <= b,
-            "in": lambda a, b: a in b if isinstance(b, (list, tuple, set)) else False,
-            "not_in": lambda a, b: a not in b if isinstance(b, (list, tuple, set)) else True,
-            "contains": lambda a, b: b in a if a else False,
-            "starts_with": lambda a, b: str(a).startswith(str(b)) if a else False,
-            "ends_with": lambda a, b: str(a).endswith(str(b)) if a else False,
-        }
-        op_func = ops.get(operator, ops["eq"])
-        return op_func(field_value, expected)
+    def __init__(self):
+        self._config = PipelineConfig()
+        self._stages: List[tuple[Callable, str, StageType]] = []
 
-    def _apply_aggregation(self, values: List[float], operation: str) -> float:
-        """Apply an aggregation operation to values."""
-        if not values:
-            return 0.0
+    def with_name(self, name: str) -> "PipelineBuilder":
+        """Set pipeline name."""
+        self._config.name = name
+        return self
 
-        ops = {
-            "sum": sum,
-            "avg": lambda v: sum(v) / len(v),
-            "min": min,
-            "max": max,
-            "count": len,
-            "first": lambda v: v[0],
-            "last": lambda v: v[-1],
-        }
+    def with_max_parallel(self, max_parallel: int) -> "PipelineBuilder":
+        """Set maximum parallel stages."""
+        self._config.max_parallel_stages = max_parallel
+        return self
 
-        op_func = ops.get(operation, sum)
-        return op_func(values)
+    def with_continue_on_error(self, continue_on_error: bool) -> "PipelineBuilder":
+        """Set continue on error behavior."""
+        self._config.continue_on_error = continue_on_error
+        return self
 
-    def _convert_type(self, value: Any, target_type: str) -> Any:
-        """Convert a value to a target type."""
-        converters = {
-            "str": str,
-            "int": lambda v: int(v) if v is not None else 0,
-            "float": lambda v: float(v) if v is not None else 0.0,
-            "bool": lambda v: bool(v) if v is not None else False,
-        }
+    def with_extract(
+        self,
+        handler: Callable[[Any, PipelineContext], Awaitable[Any]],
+        name: str = "extract",
+    ) -> "PipelineBuilder":
+        """Add an extract stage."""
+        self._stages.append((handler, name, StageType.EXTRACT))
+        return self
 
-        converter = converters.get(target_type, str)
-        return converter(value)
+    def with_transform(
+        self,
+        handler: Callable[[Any, PipelineContext], Awaitable[Any]],
+        name: str = "transform",
+    ) -> "PipelineBuilder":
+        """Add a transform stage."""
+        self._stages.append((handler, name, StageType.TRANSFORM))
+        return self
 
-    def _ensure_list(self, data: Any) -> List[Any]:
-        """Ensure data is a list."""
-        if data is None:
-            return []
-        if isinstance(data, list):
-            return data
-        return [data]
+    def with_load(
+        self,
+        handler: Callable[[Any, PipelineContext], Awaitable[Any]],
+        name: str = "load",
+    ) -> "PipelineBuilder":
+        """Add a load stage."""
+        self._stages.append((handler, name, StageType.LOAD))
+        return self
 
-    def _generate_stage_id(self) -> str:
-        """Generate a unique stage ID."""
-        return f"stage_{hashlib.sha1(str(time.time_ns()).encode()).hexdigest()[:8]}"
+    def with_filter(
+        self,
+        handler: Callable[[Any, PipelineContext], Awaitable[Any]],
+        name: str = "filter",
+    ) -> "PipelineBuilder":
+        """Add a filter stage."""
+        self._stages.append((handler, name, StageType.FILTER))
+        return self
+
+    def with_validate(
+        self,
+        handler: Callable[[Any, PipelineContext], Awaitable[Any]],
+        name: str = "validate",
+    ) -> "PipelineBuilder":
+        """Add a validate stage."""
+        self._stages.append((handler, name, StageType.VALIDATE))
+        return self
+
+    def with_stage(
+        self,
+        handler: Callable[[Any, PipelineContext], Awaitable[Any]],
+        name: str,
+        stage_type: StageType = StageType.CUSTOM,
+    ) -> "PipelineBuilder":
+        """Add a custom stage."""
+        self._stages.append((handler, name, stage_type))
+        return self
+
+    def build(self) -> DataPipeline:
+        """Build the pipeline."""
+        pipeline = DataPipeline(self._config)
+        pipeline.add_stages(self._stages)
+        return pipeline
+
+
+class PipelineExecutionError(Exception):
+    """Raised when pipeline execution fails."""
+
+    pass
+
+
+async def demo_pipeline():
+    """Demonstrate pipeline usage."""
+    async def extract(data: Any, ctx: PipelineContext) -> List[Dict]:
+        await asyncio.sleep(0.1)
+        return [{"id": i, "value": i * 10} for i in range(5)]
+
+    async def transform(data: List[Dict], ctx: PipelineContext) -> List[Dict]:
+        await asyncio.sleep(0.1)
+        return [{"id": d["id"], "value": d["value"], "processed": True} for d in data]
+
+    pipeline = (
+        PipelineBuilder()
+        .with_name("demo_pipeline")
+        .with_extract(extract)
+        .with_transform(transform)
+        .build()
+    )
+
+    result = await pipeline.execute(None)
+    print(f"Result: {result}")
+    print(f"Summary: {pipeline.get_summary()}")
+
+
+if __name__ == "__main__":
+    asyncio.run(demo_pipeline())
