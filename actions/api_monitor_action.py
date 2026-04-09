@@ -1,260 +1,301 @@
-"""API Monitor Action Module.
+"""API monitoring and metrics collection.
 
-Provides API request/response monitoring, metrics collection,
-alerting on failures, and latency tracking.
+This module provides comprehensive API monitoring including:
+- Request/response timing
+- Error rate tracking
+- Latency percentiles
+- Health checks
+
+Example:
+    >>> from actions.api_monitor_action import APIMonitor
+    >>> monitor = APIMonitor()
+    >>> with monitor.track("get_user"):
+    ...     response = get_user(123)
 """
+
 from __future__ import annotations
 
-import asyncio
 import time
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Set
-from collections import defaultdict, deque
+import threading
 import logging
+import statistics
+from dataclasses import dataclass, field
+from typing import Any, Optional
+from collections import deque
+from enum import Enum
 
 logger = logging.getLogger(__name__)
 
 
-class AlertLevel(Enum):
-    """Alert level."""
-    INFO = "info"
-    WARNING = "warning"
-    ERROR = "error"
-    CRITICAL = "critical"
+class HealthStatus(Enum):
+    """API health status."""
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    UNHEALTHY = "unhealthy"
 
 
 @dataclass
 class RequestMetrics:
-    """Request metrics snapshot."""
-    endpoint: str
-    method: str
-    status_code: int
-    latency_ms: float
-    timestamp: float
+    """Metrics for a single API request."""
+    name: str
+    duration: float
+    status_code: Optional[int] = None
+    success: bool = True
     error: Optional[str] = None
-    size_bytes: int = 0
+    timestamp: float = field(default_factory=time.time)
 
 
 @dataclass
-class AlertRule:
-    """Alert rule configuration."""
+class AggregatedMetrics:
+    """Aggregated metrics for an endpoint."""
     name: str
-    condition: Callable[["APIMonitorAction"], bool]
-    level: AlertLevel
-    message: str
-    cooldown_seconds: float = 60.0
+    total_requests: int = 0
+    successful_requests: int = 0
+    failed_requests: int = 0
+    total_duration: float = 0.0
+    min_duration: float = float("inf")
+    max_duration: float = 0.0
+    durations: list[float] = field(default_factory=list)
+    error_codes: dict[int, int] = field(default_factory=dict)
+
+    @property
+    def avg_duration(self) -> float:
+        return self.total_duration / self.total_requests if self.total_requests else 0.0
+
+    @property
+    def p50_duration(self) -> float:
+        return statistics.median(self.durations) if self.durations else 0.0
+
+    @property
+    def p95_duration(self) -> float:
+        if not self.durations:
+            return 0.0
+        sorted_durations = sorted(self.durations)
+        index = int(len(sorted_durations) * 0.95)
+        return sorted_durations[min(index, len(sorted_durations) - 1)]
+
+    @property
+    def p99_duration(self) -> float:
+        if not self.durations:
+            return 0.0
+        sorted_durations = sorted(self.durations)
+        index = int(len(sorted_durations) * 0.99)
+        return sorted_durations[min(index, len(sorted_durations) - 1)]
+
+    @property
+    def error_rate(self) -> float:
+        return self.failed_requests / self.total_requests if self.total_requests else 0.0
+
+    @property
+    def success_rate(self) -> float:
+        return self.successful_requests / self.total_requests if self.total_requests else 0.0
 
 
-class APIMonitorAction:
-    """API request monitor with metrics and alerting.
+class APIMonitor:
+    """API monitoring and metrics collector.
 
-    Example:
-        monitor = APIMonitorAction()
-
-        await monitor.track_request(
-            endpoint="/api/users",
-            method="GET",
-            status_code=200,
-            latency_ms=45.0
-        )
-
-        stats = monitor.get_stats()
-        alerts = monitor.check_alerts()
+    Attributes:
+        window_size: Number of recent requests to keep per endpoint.
     """
 
     def __init__(
         self,
-        retention_seconds: float = 3600.0,
-        max_requests: int = 10000,
+        window_size: int = 1000,
+        error_threshold: float = 0.05,
+        latency_threshold_ms: float = 1000.0,
     ) -> None:
-        self.retention_seconds = retention_seconds
-        self.max_requests = max_requests
+        self.window_size = window_size
+        self.error_threshold = error_threshold
+        self.latency_threshold_ms = latency_threshold_ms
+        self._metrics: dict[str, AggregatedMetrics] = {}
+        self._recent_requests: dict[str, deque[RequestMetrics]] = {}
+        self._lock = threading.RLock()
+        self._health_status: dict[str, HealthStatus] = {}
+        self._overall_status = HealthStatus.HEALTHY
 
-        self._requests: deque[RequestMetrics] = deque(maxlen=max_requests)
-        self._endpoint_stats: Dict[str, Dict] = defaultdict(lambda: {
-            "count": 0,
-            "errors": 0,
-            "total_latency": 0.0,
-            "status_codes": defaultdict(int),
-        })
-        self._alert_states: Dict[str, float] = {}
-        self._alert_rules: List[AlertRule] = []
-        self._callbacks: Dict[AlertLevel, List[Callable]] = defaultdict(list)
-        self._lock = asyncio.Lock()
-
-    def register_alert_callback(
+    def track(
         self,
-        level: AlertLevel,
-        callback: Callable[[str, AlertLevel], None],
-    ) -> None:
-        """Register callback for alert level."""
-        self._callbacks[level].append(callback)
-
-    def add_alert_rule(self, rule: AlertRule) -> None:
-        """Add an alert rule."""
-        self._alert_rules.append(rule)
-
-    async def track_request(
-        self,
-        endpoint: str,
-        method: str,
-        status_code: int,
-        latency_ms: float,
+        name: str,
+        status_code: Optional[int] = None,
         error: Optional[str] = None,
-        size_bytes: int = 0,
-    ) -> None:
-        """Track an API request.
+    ) -> RequestMetrics:
+        """Track a request start.
 
         Args:
-            endpoint: API endpoint
-            method: HTTP method
-            status_code: Response status code
-            latency_ms: Request latency in milliseconds
-            error: Optional error message
-            size_bytes: Response size in bytes
-        """
-        async with self._lock:
-            metrics = RequestMetrics(
-                endpoint=endpoint,
-                method=method,
-                status_code=status_code,
-                latency_ms=latency_ms,
-                timestamp=time.time(),
-                error=error,
-                size_bytes=size_bytes,
-            )
-
-            self._requests.append(metrics)
-            self._update_endpoint_stats(metrics)
-            await self._cleanup_old_requests()
-
-    def _update_endpoint_stats(self, metrics: RequestMetrics) -> None:
-        """Update endpoint statistics."""
-        key = f"{metrics.method}:{metrics.endpoint}"
-        stats = self._endpoint_stats[key]
-
-        stats["count"] += 1
-        stats["total_latency"] += metrics.latency_ms
-        stats["status_codes"][metrics.status_code] += 1
-
-        if metrics.status_code >= 400 or metrics.error:
-            stats["errors"] += 1
-
-    async def _cleanup_old_requests(self) -> None:
-        """Remove requests older than retention period."""
-        cutoff = time.time() - self.retention_seconds
-        while self._requests and self._requests[0].timestamp < cutoff:
-            self._requests.popleft()
-
-    async def check_alerts(self) -> List[Dict[str, Any]]:
-        """Check all alert rules and return triggered alerts.
+            name: Endpoint or operation name.
+            status_code: HTTP status code.
+            error: Error message if request failed.
 
         Returns:
-            List of triggered alerts
+            RequestMetrics object to complete the tracking.
         """
-        triggered: List[Dict[str, Any]] = []
-        now = time.time()
+        return RequestMetrics(name=name, status_code=status_code, error=error)
 
-        for rule in self._alert_rules:
-            if self._is_in_cooldown(rule.name, now):
-                continue
+    def record(self, metrics: RequestMetrics) -> None:
+        """Record completed request metrics.
 
-            if rule.condition(self):
-                alert = {
-                    "name": rule.name,
-                    "level": rule.level,
-                    "message": rule.message,
-                    "timestamp": now,
-                }
-                triggered.append(alert)
-                self._alert_states[rule.name] = now
+        Args:
+            metrics: The completed request metrics.
+        """
+        with self._lock:
+            if metrics.name not in self._metrics:
+                self._metrics[metrics.name] = AggregatedMetrics(name=metrics.name)
+                self._recent_requests[metrics.name] = deque(maxlen=self.window_size)
 
-                for callback in self._callbacks.get(rule.level, []):
-                    try:
-                        callback(rule.name, rule.level)
-                    except Exception as e:
-                        logger.error(f"Alert callback failed: {e}")
+            agg = self._metrics[metrics.name]
+            agg.total_requests += 1
+            agg.total_duration += metrics.duration
+            agg.min_duration = min(agg.min_duration, metrics.duration)
+            agg.max_duration = max(agg.max_duration, metrics.duration)
+            agg.durations.append(metrics.duration)
 
-        return triggered
+            if not metrics.success:
+                agg.failed_requests += 1
+                if metrics.status_code:
+                    agg.error_codes[metrics.status_code] = (
+                        agg.error_codes.get(metrics.status_code, 0) + 1
+                    )
+            else:
+                agg.successful_requests += 1
 
-    def _is_in_cooldown(self, rule_name: str, now: float) -> bool:
-        """Check if alert is in cooldown period."""
-        if rule_name not in self._alert_states:
-            return False
-        return now - self._alert_states[rule_name] < self._get_rule(rule_name).cooldown_seconds
+            self._recent_requests[metrics.name].append(metrics)
+            self._update_health(metrics.name)
 
-    def _get_rule(self, rule_name: str) -> AlertRule:
-        """Get alert rule by name."""
-        return next(r for r in self._alert_rules if r.name == rule_name)
+    def get_metrics(self, name: str) -> Optional[AggregatedMetrics]:
+        """Get aggregated metrics for an endpoint.
 
-    def get_stats(self) -> Dict[str, Any]:
-        """Get current statistics."""
-        total_requests = len(self._requests)
-        if total_requests == 0:
-            return {"total_requests": 0}
+        Args:
+            name: Endpoint name.
 
-        recent_requests = [
-            r for r in self._requests
-            if time.time() - r.timestamp < 60
-        ]
+        Returns:
+            AggregatedMetrics or None if not found.
+        """
+        with self._lock:
+            return self._metrics.get(name)
 
-        errors = sum(1 for r in self._requests if r.status_code >= 400 or r.error)
-        avg_latency = sum(r.latency_ms for r in self._requests) / total_requests
+    def get_all_metrics(self) -> dict[str, AggregatedMetrics]:
+        """Get all endpoint metrics."""
+        with self._lock:
+            return dict(self._metrics)
 
-        return {
-            "total_requests": total_requests,
-            "recent_requests_1m": len(recent_requests),
-            "error_rate": errors / total_requests if total_requests > 0 else 0,
-            "avg_latency_ms": avg_latency,
-            "endpoints": {
-                key: {
-                    "count": stats["count"],
-                    "errors": stats["errors"],
-                    "avg_latency_ms": stats["total_latency"] / stats["count"] if stats["count"] > 0 else 0,
-                    "status_codes": dict(stats["status_codes"]),
-                }
-                for key, stats in self._endpoint_stats.items()
-            },
-        }
+    def get_health_status(self, name: str) -> HealthStatus:
+        """Get health status for an endpoint.
 
-    def get_endpoint_stats(self, endpoint: str, method: str) -> Dict[str, Any]:
-        """Get statistics for specific endpoint."""
-        key = f"{method}:{endpoint}"
-        stats = self._endpoint_stats.get(key, {})
-        count = stats.get("count", 0)
-        total_latency = stats.get("total_latency", 0)
+        Args:
+            name: Endpoint name.
 
-        return {
-            "endpoint": endpoint,
-            "method": method,
-            "count": count,
-            "errors": stats.get("errors", 0),
-            "error_rate": stats.get("errors", 0) / count if count > 0 else 0,
-            "avg_latency_ms": total_latency / count if count > 0 else 0,
-            "status_codes": dict(stats.get("status_codes", {})),
-        }
+        Returns:
+            HealthStatus for the endpoint.
+        """
+        with self._lock:
+            return self._health_status.get(name, HealthStatus.HEALTHY)
 
-    def get_recent_failures(self, limit: int = 10) -> List[RequestMetrics]:
-        """Get recent failed requests."""
-        failures = [
-            r for r in self._requests
-            if r.status_code >= 400 or r.error
-        ]
-        return sorted(failures, key=lambda r: r.timestamp, reverse=True)[:limit]
+    def get_overall_status(self) -> HealthStatus:
+        """Get overall API health status."""
+        with self._lock:
+            if any(s == HealthStatus.UNHEALTHY for s in self._health_status.values()):
+                return HealthStatus.UNHEALTHY
+            if any(s == HealthStatus.DEGRADED for s in self._health_status.values()):
+                return HealthStatus.DEGRADED
+            return HealthStatus.HEALTHY
 
-    def get_latency_percentiles(
+    def get_recent_requests(self, name: str, limit: int = 100) -> list[RequestMetrics]:
+        """Get recent requests for an endpoint.
+
+        Args:
+            name: Endpoint name.
+            limit: Maximum number of requests to return.
+
+        Returns:
+            List of recent RequestMetrics.
+        """
+        with self._lock:
+            if name not in self._recent_requests:
+                return []
+            return list(self._recent_requests[name])[-limit:]
+
+    def get_summary(self) -> dict[str, Any]:
+        """Get a summary of all monitoring data.
+
+        Returns:
+            Dictionary containing monitoring summary.
+        """
+        with self._lock:
+            return {
+                "overall_status": self.get_overall_status().value,
+                "endpoint_count": len(self._metrics),
+                "endpoints": {
+                    name: {
+                        "status": self._health_status.get(name, HealthStatus.HEALTHY).value,
+                        "total_requests": agg.total_requests,
+                        "error_rate": f"{agg.error_rate:.2%}",
+                        "avg_duration_ms": f"{agg.avg_duration * 1000:.2f}",
+                        "p99_duration_ms": f"{agg.p99_duration * 1000:.2f}",
+                    }
+                    for name, agg in self._metrics.items()
+                },
+            }
+
+    def reset(self, name: Optional[str] = None) -> None:
+        """Reset metrics for an endpoint or all endpoints.
+
+        Args:
+            name: Optional endpoint name. If None, reset all.
+        """
+        with self._lock:
+            if name:
+                if name in self._metrics:
+                    del self._metrics[name]
+                if name in self._recent_requests:
+                    del self._recent_requests[name]
+                if name in self._health_status:
+                    del self._health_status[name]
+            else:
+                self._metrics.clear()
+                self._recent_requests.clear()
+                self._health_status.clear()
+
+    def _update_health(self, name: str) -> None:
+        """Update health status for an endpoint."""
+        agg = self._metrics[name]
+        status = HealthStatus.HEALTHY
+        if agg.total_requests < 10:
+            status = HealthStatus.HEALTHY
+        elif agg.error_rate > self.error_threshold:
+            status = HealthStatus.UNHEALTHY
+        elif agg.p95_duration > self.latency_threshold_ms / 1000:
+            status = HealthStatus.DEGRADED
+        self._health_status[name] = status
+
+
+class MetricsTracker:
+    """Context manager for tracking request duration."""
+
+    def __init__(
         self,
-        percentiles: List[int] = [50, 90, 95, 99],
-    ) -> Dict[int, float]:
-        """Get latency percentiles."""
-        if not self._requests:
-            return {p: 0.0 for p in percentiles}
+        monitor: APIMonitor,
+        name: str,
+        status_code: Optional[int] = None,
+    ) -> None:
+        self.monitor = monitor
+        self.name = name
+        self.status_code = status_code
+        self.metrics: Optional[RequestMetrics] = None
+        self.start_time: float = 0.0
 
-        latencies = sorted(r.latency_ms for r in self._requests)
-        n = len(latencies)
+    def __enter__(self) -> MetricsTracker:
+        self.start_time = time.time()
+        return self
 
-        return {
-            p: latencies[int(n * p / 100)] if n > 0 else 0.0
-            for p in percentiles
-        }
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        duration = time.time() - self.start_time
+        success = exc_type is None
+        error_msg = str(exc_val) if exc_val else None
+        self.metrics = RequestMetrics(
+            name=self.name,
+            duration=duration,
+            status_code=self.status_code,
+            success=success,
+            error=error_msg,
+        )
+        self.monitor.record(self.metrics)
