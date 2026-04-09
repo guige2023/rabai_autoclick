@@ -1,265 +1,305 @@
+"""Data sampling action for extracting representative data samples.
+
+Provides various sampling strategies to extract representative
+subsets from large datasets for analysis and testing.
 """
-Data Sampling Action - Statistical sampling of datasets.
 
-This module provides data sampling capabilities including random,
-stratified, systematic, and reservoir sampling methods.
-"""
-
-from __future__ import annotations
-
+import logging
 import random
-import math
-from dataclasses import dataclass, field
-from typing import Any, Callable, TypeVar
+from dataclasses import dataclass
 from enum import Enum
+from typing import Any, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 
-T = TypeVar("T")
-
-
-class SamplingMethod(Enum):
-    """Sampling methods."""
+class SamplingStrategy(Enum):
+    """Data sampling strategies."""
     RANDOM = "random"
-    STRATIFIED = "stratified"
     SYSTEMATIC = "systematic"
-    RESERVOIR = "reservoir"
+    STRATIFIED = "stratified"
     CLUSTER = "cluster"
+    RESERVOIR = "reservoir"
     WEIGHTED = "weighted"
 
 
 @dataclass
 class SamplingConfig:
-    """Configuration for sampling."""
-    method: SamplingMethod = SamplingMethod.RANDOM
-    sample_size: int | None = None
-    sample_rate: float | None = None
-    seed: int | None = None
-    replace: bool = False
+    """Configuration for sampling behavior."""
+    sample_size: int
+    strategy: SamplingStrategy = SamplingStrategy.RANDOM
+    random_seed: Optional[int] = None
+    stratified_field: Optional[str] = None
+    weight_field: Optional[str] = None
 
 
 @dataclass
 class SamplingResult:
-    """Result of sampling operation."""
-    original_size: int
+    """Result of a sampling operation."""
+    sample: list[Any]
     sample_size: int
-    sample: list[dict[str, Any]]
-    method: SamplingMethod
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-class RandomSampler:
-    """Random sampling implementation."""
-    
-    def __init__(self, seed: int | None = None) -> None:
-        if seed is not None:
-            random.seed(seed)
-    
-    def sample(
-        self,
-        data: list[dict[str, Any]],
-        size: int | None = None,
-        rate: float | None = None,
-        replace: bool = False,
-    ) -> list[dict[str, Any]]:
-        """Perform random sampling."""
-        if size is None and rate is not None:
-            size = int(len(data) * rate)
-        elif size is None:
-            size = len(data)
-        
-        if replace:
-            return [random.choice(data) for _ in range(size)]
-        else:
-            size = min(size, len(data))
-            return random.sample(data, size)
-
-
-class StratifiedSampler:
-    """Stratified sampling implementation."""
-    
-    def __init__(self, seed: int | None = None) -> None:
-        if seed is not None:
-            random.seed(seed)
-    
-    def sample(
-        self,
-        data: list[dict[str, Any]],
-        stratum_field: str,
-        sample_size: int | None = None,
-        sample_rate: float | None = None,
-        min_per_stratum: int = 1,
-    ) -> list[dict[str, Any]]:
-        """Perform stratified sampling."""
-        strata: dict[Any, list[dict[str, Any]]] = {}
-        
-        for record in data:
-            stratum_value = record.get(stratum_field)
-            if stratum_value not in strata:
-                strata[stratum_value] = []
-            strata[stratum_value].append(record)
-        
-        total_size = sum(len(s) for s in strata.values())
-        
-        if sample_rate is not None:
-            samples = []
-            for stratum_records in strata.values():
-                stratum_size = max(min_per_stratum, int(len(stratum_records) * sample_rate))
-                stratum_size = min(stratum_size, len(stratum_records))
-                samples.extend(random.sample(stratum_records, stratum_size))
-            return samples
-        
-        if sample_size is not None:
-            samples = []
-            for stratum_records in strata.values():
-                proportion = len(stratum_records) / total_size
-                stratum_size = max(min_per_stratum, int(sample_size * proportion))
-                stratum_size = min(stratum_size, len(stratum_records))
-                samples.extend(random.sample(stratum_records, stratum_size))
-            return samples
-        
-        return data
-
-
-class SystematicSampler:
-    """Systematic sampling implementation."""
-    
-    def __init__(self, seed: int | None = None) -> None:
-        if seed is not None:
-            random.seed(seed)
-    
-    def sample(
-        self,
-        data: list[dict[str, Any]],
-        interval: int | None = None,
-        rate: float | None = None,
-        start_offset: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """Perform systematic sampling."""
-        if interval is None:
-            if rate is not None:
-                interval = max(1, int(1 / rate))
-            else:
-                interval = 1
-        
-        if start_offset is None:
-            start_offset = random.randint(0, interval - 1)
-        
-        return data[start_offset::interval]
-
-
-class ReservoirSampler:
-    """Reservoir sampling for large datasets."""
-    
-    def __init__(self, seed: int | None = None) -> None:
-        self._seed = seed
-        if seed is not None:
-            random.seed(seed)
-    
-    def sample(
-        self,
-        data: list[dict[str, Any]],
-        k: int,
-    ) -> list[dict[str, Any]]:
-        """Perform reservoir sampling (Algorithm R)."""
-        k = min(k, len(data))
-        reservoir = data[:k]
-        
-        for i in range(k, len(data)):
-            j = random.randint(0, i)
-            if j < k:
-                reservoir[j] = data[i]
-        
-        return reservoir
+    original_size: int
+    sampling_rate: float
+    strategy: str
 
 
 class DataSamplingAction:
-    """
-    Data sampling action for automation workflows.
-    
+    """Sample data using various strategies.
+
     Example:
-        action = DataSamplingAction()
-        result = await action.sample(
-            records,
-            method=SamplingMethod.RANDOM,
-            sample_size=100
-        )
+        >>> sampler = DataSamplingAction()
+        >>> result = sampler.sample(data, sample_size=1000)
     """
-    
-    def __init__(self, seed: int | None = None) -> None:
-        self._random_sampler = RandomSampler(seed)
-        self._stratified_sampler = StratifiedSampler(seed)
-        self._systematic_sampler = SystematicSampler(seed)
-        self._reservoir_sampler = ReservoirSampler(seed)
-    
-    async def sample(
+
+    def __init__(self) -> None:
+        self._rng = random.Random()
+
+    def sample(
         self,
-        data: list[dict[str, Any]],
-        method: SamplingMethod = SamplingMethod.RANDOM,
-        size: int | None = None,
-        rate: float | None = None,
-        replace: bool = False,
-        **kwargs,
+        data: list[Any],
+        sample_size: int,
+        strategy: SamplingStrategy = SamplingStrategy.RANDOM,
+        stratified_field: Optional[str] = None,
+        weight_field: Optional[str] = None,
+        random_seed: Optional[int] = None,
     ) -> SamplingResult:
-        """Sample data using specified method."""
-        if method == SamplingMethod.RANDOM:
-            sample_data = self._random_sampler.sample(data, size, rate, replace)
-        
-        elif method == SamplingMethod.STRATIFIED:
-            stratum_field = kwargs.get("stratum_field", "category")
-            sample_data = self._stratified_sampler.sample(
-                data, stratum_field, size, rate
+        """Sample data from a dataset.
+
+        Args:
+            data: Dataset to sample from.
+            sample_size: Number of items to sample.
+            strategy: Sampling strategy to use.
+            stratified_field: Field for stratified sampling.
+            weight_field: Field for weighted sampling.
+            random_seed: Optional random seed for reproducibility.
+
+        Returns:
+            Sampling result with sample and metadata.
+        """
+        if random_seed is not None:
+            self._rng.seed(random_seed)
+
+        original_size = len(data)
+
+        if sample_size >= original_size:
+            return SamplingResult(
+                sample=data.copy(),
+                sample_size=original_size,
+                original_size=original_size,
+                sampling_rate=1.0,
+                strategy=strategy.value,
             )
-        
-        elif method == SamplingMethod.SYSTEMATIC:
-            interval = kwargs.get("interval")
-            sample_data = self._systematic_sampler.sample(data, interval, rate)
-        
-        elif method == SamplingMethod.RESERVOIR:
-            k = size or kwargs.get("k", 100)
-            sample_data = self._reservoir_sampler.sample(data, k)
-        
-        elif method == SamplingMethod.WEIGHTED:
-            weight_field = kwargs.get("weight_field", "weight")
-            sample_data = self._weighted_sample(data, weight_field, size)
-        
+
+        if strategy == SamplingStrategy.RANDOM:
+            sample = self._random_sample(data, sample_size)
+        elif strategy == SamplingStrategy.SYSTEMATIC:
+            sample = self._systematic_sample(data, sample_size)
+        elif strategy == SamplingStrategy.STRATIFIED:
+            sample = self._stratified_sample(data, sample_size, stratified_field)
+        elif strategy == SamplingStrategy.CLUSTER:
+            sample = self._cluster_sample(data, sample_size)
+        elif strategy == SamplingStrategy.RESERVOIR:
+            sample = self._reservoir_sample(data, sample_size)
+        elif strategy == SamplingStrategy.WEIGHTED:
+            sample = self._weighted_sample(data, sample_size, weight_field)
         else:
-            sample_data = data
-        
+            sample = self._random_sample(data, sample_size)
+
+        sampling_rate = sample_size / original_size
+
         return SamplingResult(
-            original_size=len(data),
-            sample_size=len(sample_data),
-            sample=sample_data,
-            method=method,
-            metadata={"size_specified": size, "rate_specified": rate},
+            sample=sample,
+            sample_size=len(sample),
+            original_size=original_size,
+            sampling_rate=sampling_rate,
+            strategy=strategy.value,
         )
-    
+
+    def _random_sample(self, data: list[Any], size: int) -> list[Any]:
+        """Random sampling without replacement.
+
+        Args:
+            data: Dataset to sample.
+            size: Sample size.
+
+        Returns:
+            Random sample.
+        """
+        return self._rng.sample(data, size)
+
+    def _systematic_sample(self, data: list[Any], size: int) -> list[Any]:
+        """Systematic sampling (every kth element).
+
+        Args:
+            data: Dataset to sample.
+            size: Sample size.
+
+        Returns:
+            Systematic sample.
+        """
+        k = len(data) // size
+        if k < 1:
+            k = 1
+        start = self._rng.randint(0, k - 1)
+        return [data[i] for i in range(start, len(data), k)][:size]
+
+    def _stratified_sample(
+        self,
+        data: list[Any],
+        size: int,
+        field: Optional[str],
+    ) -> list[Any]:
+        """Stratified sampling by field value.
+
+        Args:
+            data: Dataset to sample.
+            size: Sample size.
+            field: Field to stratify by.
+
+        Returns:
+            Stratified sample.
+        """
+        if not field:
+            return self._random_sample(data, size)
+
+        groups: dict[Any, list[Any]] = {}
+        for item in data:
+            if isinstance(item, dict):
+                key = item.get(field, "unknown")
+            else:
+                key = getattr(item, field, "unknown")
+            groups.setdefault(key, []).append(item)
+
+        total = sum(len(g) for g in groups.values())
+        samples: list[Any] = []
+
+        for group_key, group_items in groups.items():
+            group_proportion = len(group_items) / total
+            group_size = max(1, int(size * group_proportion))
+            samples.extend(self._rng.sample(group_items, min(group_size, len(group_items))))
+
+        return samples[:size]
+
+    def _cluster_sample(self, data: list[Any], size: int) -> list[Any]:
+        """Cluster sampling (random clusters).
+
+        Args:
+            data: Dataset to sample.
+            size: Sample size.
+
+        Returns:
+            Cluster sample.
+        """
+        if len(data) < size:
+            return data.copy()
+
+        cluster_size = max(1, size // 10)
+        num_clusters = (size + cluster_size - 1) // cluster_size
+
+        cluster_indices = self._rng.sample(
+            range(0, len(data), cluster_size),
+            min(num_clusters, len(data) // cluster_size)
+        )
+
+        samples: list[Any] = []
+        for start_idx in cluster_indices:
+            end_idx = min(start_idx + cluster_size, len(data))
+            samples.extend(data[start_idx:end_idx])
+
+        return samples[:size]
+
+    def _reservoir_sample(self, data: list[Any], size: int) -> list[Any]:
+        """Reservoir sampling for streaming data.
+
+        Args:
+            data: Dataset to sample.
+            size: Sample size.
+
+        Returns:
+            Reservoir sample.
+        """
+        reservoir = data[:size]
+
+        for i in range(size, len(data)):
+            j = self._rng.randint(0, i)
+            if j < size:
+                reservoir[j] = data[i]
+
+        return reservoir
+
     def _weighted_sample(
         self,
-        data: list[dict[str, Any]],
-        weight_field: str,
-        size: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """Perform weighted sampling."""
-        weights = [record.get(weight_field, 1.0) for record in data]
+        data: list[Any],
+        size: int,
+        weight_field: Optional[str],
+    ) -> list[Any]:
+        """Weighted sampling based on field values.
+
+        Args:
+            data: Dataset to sample.
+            size: Sample size.
+            weight_field: Field containing weights.
+
+        Returns:
+            Weighted sample.
+        """
+        if not weight_field:
+            return self._random_sample(data, size)
+
+        weights: list[float] = []
+        for item in data:
+            if isinstance(item, dict):
+                w = float(item.get(weight_field, 1.0))
+            else:
+                w = float(getattr(item, weight_field, 1.0))
+            weights.append(max(0.0, w))
+
         total_weight = sum(weights)
-        
-        if size is None:
-            size = len(data)
-        
-        normalized = [w / total_weight for w in weights]
-        
-        indices = list(range(len(data)))
-        return [data[i] for i in random.choices(indices, weights=normalized, k=size)]
+        if total_weight == 0:
+            return self._random_sample(data, size)
 
+        samples: list[Any] = []
+        for _ in range(size):
+            r = self._rng.uniform(0, total_weight)
+            cumulative = 0.0
+            for i, item in enumerate(data):
+                cumulative += weights[i]
+                if r <= cumulative:
+                    samples.append(item)
+                    break
 
-# Export public API
-__all__ = [
-    "SamplingMethod",
-    "SamplingConfig",
-    "SamplingResult",
-    "RandomSampler",
-    "StratifiedSampler",
-    "SystematicSampler",
-    "ReservoirSampler",
-    "DataSamplingAction",
-]
+        return samples
+
+    def get_sample_sizes(
+        self,
+        population_size: int,
+        confidence_level: float = 0.95,
+        margin_of_error: float = 0.05,
+    ) -> dict[str, int]:
+        """Calculate recommended sample sizes.
+
+        Args:
+            population_size: Total population size.
+            confidence_level: Desired confidence level.
+            margin_of_error: Acceptable margin of error.
+
+        Returns:
+            Dictionary of sample size recommendations.
+        """
+        z_scores = {
+            0.90: 1.645,
+            0.95: 1.96,
+            0.99: 2.576,
+        }
+
+        z = z_scores.get(confidence_level, 1.96)
+        p = 0.5
+
+        infinite_sample = (z ** 2 * p * (1 - p)) / (margin_of_error ** 2)
+
+        n = infinite_sample / (1 + (infinite_sample - 1) / population_size)
+
+        return {
+            "infinite_population": int(infinite_sample) + 1,
+            "finite_population": int(n) + 1,
+        }

@@ -1,114 +1,248 @@
-"""API Throttle Action Module.
+"""API throttle action for request rate limiting.
 
-Implements API throttling with adaptive rate limits
-and burst handling.
+Implements token bucket and sliding window rate limiting
+with configurable limits and burst handling.
 """
 
-from __future__ import annotations
-
-import sys
-import os
+import asyncio
+import logging
 import time
-from typing import Any, Dict, Optional
 from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
+
+
+class ThrottleAlgorithm(Enum):
+    """Rate limiting algorithms."""
+    TOKEN_BUCKET = "token_bucket"
+    SLIDING_WINDOW = "sliding_window"
+    LEAKY_BUCKET = "leaky_bucket"
 
 
 @dataclass
 class ThrottleConfig:
-    """Throttle configuration."""
-    requests_per_second: float = 10.0
-    burst_size: int = 20
-    adaptive: bool = False
+    """Configuration for rate limiting."""
+    requests_per_second: float
+    burst_size: int = 1
+    algorithm: ThrottleAlgorithm = ThrottleAlgorithm.TOKEN_BUCKET
+    window_size_seconds: float = 60.0
 
 
-class APIThrottleAction(BaseAction):
-    """
-    API throttling with adaptive rate limits.
+@dataclass
+class ThrottleStats:
+    """Statistics for throttle operations."""
+    total_requests: int = 0
+    throttled_requests: int = 0
+    allowed_requests: int = 0
+    wait_time_ms: float = 0.0
 
-    Implements throttling with burst handling
-    and adaptive rate adjustment.
+
+@dataclass
+class ThrottleResult:
+    """Result of a throttle check."""
+    allowed: bool
+    wait_time_ms: float
+    remaining_tokens: float
+    reset_in_ms: float
+
+
+class APIThrottleAction:
+    """Rate limit API requests.
+
+    Args:
+        config: Throttle configuration.
+        client_id: Optional client identifier for per-client limiting.
 
     Example:
-        throttle = APIThrottleAction()
-        result = throttle.execute(ctx, {"action": "check", "identity": "user-123"})
+        >>> throttle = APIThrottleAction(requests_per_second=10)
+        >>> result = await throttle.check()
+        >>> if result.allowed:
+        ...     await make_api_call()
     """
-    action_type = "api_throttle"
-    display_name = "API节流"
-    description = "API自适应节流和突发处理"
 
-    def __init__(self) -> None:
-        super().__init__()
-        self._tokens: Dict[str, float] = {}
-        self._last_refill: Dict[str, float] = {}
-        self._config = ThrottleConfig()
+    def __init__(
+        self,
+        config: Optional[ThrottleConfig] = None,
+        client_id: Optional[str] = None,
+    ) -> None:
+        self.config = config or ThrottleConfig(requests_per_second=10)
+        self.client_id = client_id
+        self._stats = ThrottleStats()
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        action = params.get("action", "")
-        try:
-            if action == "check":
-                return self._check_throttle(params)
-            elif action == "set_config":
-                return self._set_config(params)
-            elif action == "reset":
-                return self._reset(params)
-            else:
-                return ActionResult(success=False, message=f"Unknown action: {action}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Throttle error: {str(e)}")
+        if self.config.algorithm == ThrottleAlgorithm.TOKEN_BUCKET:
+            self._tokens = float(self.config.burst_size)
+            self._last_update = time.time()
+        elif self.config.algorithm == ThrottleAlgorithm.SLIDING_WINDOW:
+            self._requests: list[float] = []
+        elif self.config.algorithm == ThrottleAlgorithm.LEAKY_BUCKET:
+            self._bucket_level = 0.0
+            self._last_leak = time.time()
 
-    def _check_throttle(self, params: Dict[str, Any]) -> ActionResult:
-        identity = params.get("identity", "default")
-        cost = params.get("cost", 1.0)
+    async def check(self) -> ThrottleResult:
+        """Check if request is allowed under rate limit.
 
-        allowed, remaining = self._consume_tokens(identity, cost)
+        Returns:
+            Throttle result with allowed status and wait time.
+        """
+        self._stats.total_requests += 1
 
-        if allowed:
-            return ActionResult(success=True, message="Request allowed", data={"allowed": True, "remaining": remaining})
+        if self.config.algorithm == ThrottleAlgorithm.TOKEN_BUCKET:
+            return await self._check_token_bucket()
+        elif self.config.algorithm == ThrottleAlgorithm.SLIDING_WINDOW:
+            return await self._check_sliding_window()
         else:
-            return ActionResult(success=False, message="Throttled", data={"allowed": False, "retry_after_ms": 100})
+            return await self._check_leaky_bucket()
 
-    def _consume_tokens(self, identity: str, cost: float) -> tuple[bool, float]:
+    async def _check_token_bucket(self) -> ThrottleResult:
+        """Check using token bucket algorithm.
+
+        Returns:
+            Throttle result.
+        """
         now = time.time()
+        elapsed = now - self._last_update
 
-        if identity not in self._tokens:
-            self._tokens[identity] = self._config.burst_size
-            self._last_refill[identity] = now
+        tokens_to_add = elapsed * self.config.requests_per_second
+        self._tokens = min(
+            self.config.burst_size,
+            self._tokens + tokens_to_add
+        )
+        self._last_update = now
 
-        tokens = self._tokens[identity]
-        last_refill = self._last_refill[identity]
-
-        elapsed = now - last_refill
-        refill_amount = elapsed * self._config.requests_per_second
-        tokens = min(self._config.burst_size, tokens + refill_amount)
-
-        if tokens >= cost:
-            self._tokens[identity] = tokens - cost
-            self._last_refill[identity] = now
-            return True, self._tokens[identity]
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            self._stats.allowed_requests += 1
+            return ThrottleResult(
+                allowed=True,
+                wait_time_ms=0.0,
+                remaining_tokens=self._tokens,
+                reset_in_ms=0.0,
+            )
         else:
-            self._tokens[identity] = tokens
-            self._last_refill[identity] = now
-            return False, 0.0
+            wait_time = (1.0 - self._tokens) / self.config.requests_per_second
+            self._stats.throttled_requests += 1
+            self._stats.wait_time_ms += wait_time * 1000
+            return ThrottleResult(
+                allowed=False,
+                wait_time_ms=wait_time * 1000,
+                remaining_tokens=self._tokens,
+                reset_in_ms=wait_time * 1000,
+            )
 
-    def _set_config(self, params: Dict[str, Any]) -> ActionResult:
-        rps = params.get("requests_per_second", 10.0)
-        burst = params.get("burst_size", 20)
-        adaptive = params.get("adaptive", False)
+    async def _check_sliding_window(self) -> ThrottleResult:
+        """Check using sliding window algorithm.
 
-        self._config = ThrottleConfig(requests_per_second=rps, burst_size=burst, adaptive=adaptive)
+        Returns:
+            Throttle result.
+        """
+        now = time.time()
+        window_start = now - self.config.window_size_seconds
 
-        return ActionResult(success=True, message="Throttle config updated")
+        self._requests = [
+            ts for ts in self._requests if ts > window_start
+        ]
 
-    def _reset(self, params: Dict[str, Any]) -> ActionResult:
-        identity = params.get("identity")
-        if identity:
-            if identity in self._tokens:
-                del self._tokens[identity]
-            return ActionResult(success=True, message=f"Reset throttle for {identity}")
+        rps = self.config.requests_per_second
+        if len(self._requests) < rps:
+            self._requests.append(now)
+            self._stats.allowed_requests += 1
+            return ThrottleResult(
+                allowed=True,
+                wait_time_ms=0.0,
+                remaining_tokens=rps - len(self._requests),
+                reset_in_ms=0.0,
+            )
         else:
-            self._tokens.clear()
-            self._last_refill.clear()
-            return ActionResult(success=True, message="All throttles reset")
+            oldest = self._requests[0]
+            wait_time = (oldest + self.config.window_size_seconds) - now
+            self._stats.throttled_requests += 1
+            self._stats.wait_time_ms += wait_time * 1000
+            return ThrottleResult(
+                allowed=False,
+                wait_time_ms=wait_time * 1000,
+                remaining_tokens=0.0,
+                reset_in_ms=wait_time * 1000,
+            )
+
+    async def _check_leaky_bucket(self) -> ThrottleResult:
+        """Check using leaky bucket algorithm.
+
+        Returns:
+            Throttle result.
+        """
+        now = time.time()
+        elapsed = now - self._last_leak
+        leaked = elapsed * self.config.requests_per_second
+
+        self._bucket_level = max(0.0, self._bucket_level - leaked)
+        self._last_leak = now
+
+        if self._bucket_level < self.config.burst_size:
+            self._bucket_level += 1.0
+            self._stats.allowed_requests += 1
+            return ThrottleResult(
+                allowed=True,
+                wait_time_ms=0.0,
+                remaining_tokens=float(self.config.burst_size - self._bucket_level),
+                reset_in_ms=0.0,
+            )
+        else:
+            wait_time = 1.0 / self.config.requests_per_second
+            self._stats.throttled_requests += 1
+            self._stats.wait_time_ms += wait_time * 1000
+            return ThrottleResult(
+                allowed=False,
+                wait_time_ms=wait_time * 1000,
+                remaining_tokens=0.0,
+                reset_in_ms=wait_time * 1000,
+            )
+
+    async def wait_if_needed(self) -> float:
+        """Wait if rate limited and return wait time.
+
+        Returns:
+            Time waited in seconds.
+        """
+        result = await self.check()
+        if not result.allowed:
+            await asyncio.sleep(result.wait_time_ms / 1000.0)
+            return result.wait_time_ms / 1000.0
+        return 0.0
+
+    def reset(self) -> None:
+        """Reset throttle state."""
+        if self.config.algorithm == ThrottleAlgorithm.TOKEN_BUCKET:
+            self._tokens = float(self.config.burst_size)
+            self._last_update = time.time()
+        elif self.config.algorithm == ThrottleAlgorithm.SLIDING_WINDOW:
+            self._requests.clear()
+        elif self.config.algorithm == ThrottleAlgorithm.LEAKY_BUCKET:
+            self._bucket_level = 0.0
+            self._last_leak = time.time()
+
+        self._stats = ThrottleStats()
+
+    def get_stats(self) -> ThrottleStats:
+        """Get throttle statistics.
+
+        Returns:
+            Current statistics.
+        """
+        return self._stats
+
+    def get_remaining(self) -> float:
+        """Get remaining requests in current window.
+
+        Returns:
+            Remaining request capacity.
+        """
+        if self.config.algorithm == ThrottleAlgorithm.TOKEN_BUCKET:
+            return self._tokens
+        elif self.config.algorithm == ThrottleAlgorithm.SLIDING_WINDOW:
+            window_start = time.time() - self.config.window_size_seconds
+            active = len([ts for ts in self._requests if ts > window_start])
+            return max(0.0, self.config.requests_per_second - active)
+        else:
+            return float(self.config.burst_size - self._bucket_level)
