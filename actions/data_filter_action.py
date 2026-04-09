@@ -1,431 +1,336 @@
-"""Data Filter Action Module.
+"""
+Data Filter Action Module.
 
-Provides data filtering, searching, and querying
-capabilities for structured and unstructured data.
+Advanced data filtering with predicates, combinators,
+transformation, and pagination support.
 """
 
-from typing import Any, Dict, List, Optional, Callable, Union, TypeVar, Generic
 from dataclasses import dataclass, field
+from typing import Any, Callable, Generic, TypeVar, Optional
 from enum import Enum
-import re
-import json
-from datetime import datetime
+import logging
 
-
+logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
 class FilterOperator(Enum):
-    """Filter comparison operators."""
+    """Filter operators."""
     EQ = "eq"
     NE = "ne"
     GT = "gt"
-    GE = "ge"
+    GTE = "gte"
     LT = "lt"
-    LE = "le"
+    LTE = "lte"
     IN = "in"
     NOT_IN = "not_in"
     CONTAINS = "contains"
-    NOT_CONTAINS = "not_contains"
     STARTS_WITH = "starts_with"
     ENDS_WITH = "ends_with"
     REGEX = "regex"
-    EXISTS = "exists"
-    BETWEEN = "between"
+    IS_NULL = "is_null"
+    IS_NOT_NULL = "is_not_null"
 
 
 @dataclass
 class FilterCondition:
-    """A single filter condition."""
+    """
+    Single filter condition.
+
+    Attributes:
+        field: Field name to filter on.
+        operator: Filter operator.
+        value: Comparison value.
+        case_sensitive: Whether string comparison is case-sensitive.
+    """
     field: str
     operator: FilterOperator
     value: Any = None
-    value2: Any = None
-    negate: bool = False
-
-    def evaluate(self, item: Dict[str, Any]) -> bool:
-        """Evaluate condition against an item."""
-        field_value = self._get_field_value(item, self.field)
-
-        result = self._apply_operator(field_value)
-
-        if self.negate:
-            result = not result
-
-        return result
-
-    def _get_field_value(self, item: Dict[str, Any], field: str) -> Any:
-        """Get field value using dot notation."""
-        parts = field.split(".")
-        value = item
-
-        for part in parts:
-            if isinstance(value, dict):
-                value = value.get(part)
-            elif isinstance(value, list):
-                try:
-                    index = int(part)
-                    value = value[index] if 0 <= index < len(value) else None
-                except ValueError:
-                    return None
-            else:
-                return None
-
-        return value
-
-    def _apply_operator(self, field_value: Any) -> bool:
-        """Apply the filter operator."""
-        if self.operator == FilterOperator.EQ:
-            return field_value == self.value
-        elif self.operator == FilterOperator.NE:
-            return field_value != self.value
-        elif self.operator == FilterOperator.GT:
-            return field_value is not None and field_value > self.value
-        elif self.operator == FilterOperator.GE:
-            return field_value is not None and field_value >= self.value
-        elif self.operator == FilterOperator.LT:
-            return field_value is not None and field_value < self.value
-        elif self.operator == FilterOperator.LE:
-            return field_value is not None and field_value <= self.value
-        elif self.operator == FilterOperator.IN:
-            return field_value in self.value if isinstance(self.value, list) else False
-        elif self.operator == FilterOperator.NOT_IN:
-            return field_value not in self.value if isinstance(self.value, list) else True
-        elif self.operator == FilterOperator.CONTAINS:
-            return str(self.value) in str(field_value) if field_value else False
-        elif self.operator == FilterOperator.NOT_CONTAINS:
-            return str(self.value) not in str(field_value) if field_value else True
-        elif self.operator == FilterOperator.STARTS_WITH:
-            return str(field_value).startswith(str(self.value)) if field_value else False
-        elif self.operator == FilterOperator.ENDS_WITH:
-            return str(field_value).endswith(str(self.value)) if field_value else False
-        elif self.operator == FilterOperator.REGEX:
-            try:
-                return bool(re.search(str(self.value), str(field_value)))
-            except re.error:
-                return False
-        elif self.operator == FilterOperator.EXISTS:
-            return field_value is not None
-        elif self.operator == FilterOperator.BETWEEN:
-            return (
-                field_value is not None
-                and self.value <= field_value <= self.value2
-            )
-
-        return True
+    case_sensitive: bool = False
 
 
 @dataclass
-class FilterGroup:
-    """Groups multiple filter conditions."""
-    conditions: List[FilterCondition]
-    logical_op: str = "and"
-
-    def evaluate(self, item: Dict[str, Any]) -> bool:
-        """Evaluate all conditions in group."""
-        if self.logical_op == "and":
-            return all(c.evaluate(item) for c in self.conditions)
-        else:
-            return any(c.evaluate(item) for c in self.conditions)
+class SortSpec:
+    """Sort specification."""
+    field: str
+    ascending: bool = True
 
 
-class DataFilter:
-    """Filters data based on conditions."""
-
-    def __init__(self):
-        self._filters: List[FilterGroup] = []
-
-    def add_filter(self, filter_group: FilterGroup):
-        """Add a filter group."""
-        self._filters.append(filter_group)
-
-    def add_condition(
-        self,
-        field: str,
-        operator: FilterOperator,
-        value: Any = None,
-        logical_op: str = "and",
-    ):
-        """Add a single condition."""
-        condition = FilterCondition(
-            field=field,
-            operator=operator,
-            value=value,
-        )
-        self._filters.append(FilterGroup([condition], logical_op))
-
-    def filter_list(
-        self,
-        items: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """Filter a list of items."""
-        if not self._filters:
-            return items
-
-        result = items
-        for filter_group in self._filters:
-            result = [item for item in result if filter_group.evaluate(item)]
-
-        return result
-
-    def filter_single(
-        self,
-        item: Dict[str, Any],
-    ) -> bool:
-        """Check if single item matches filters."""
-        if not self._filters:
-            return True
-
-        for filter_group in self._filters:
-            if not filter_group.evaluate(item):
-                return False
-
-        return True
-
-    def clear_filters(self):
-        """Remove all filters."""
-        self._filters.clear()
+@dataclass
+class PaginationSpec:
+    """Pagination specification."""
+    page: int = 1
+    page_size: int = 20
 
 
-class SearchEngine:
-    """Full-text search capabilities."""
+@dataclass
+class FilterResult(Generic[T]):
+    """Result of filter operation."""
+    items: list[T]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
+
+class DataFilterAction(Generic[T]):
+    """
+    Advanced data filtering with multiple operators and combinators.
+
+    Example:
+        filter = DataFilterAction[dict]()
+        filter.where("age", FilterOperator.GTE, 18)
+        filter.where("status", FilterOperator.IN, ["active", "pending"])
+        filter.sort_by("created_at", ascending=False)
+        result = filter.apply(data_records)
+    """
 
     def __init__(self):
-        self._index: Dict[str, List[int]] = {}
-        self._documents: List[Dict[str, Any]] = []
-
-    def index(self, documents: List[Dict[str, Any]], fields: List[str]):
-        """Build search index."""
-        self._documents = documents
-        self._index.clear()
-
-        for idx, doc in enumerate(documents):
-            for field in fields:
-                value = doc.get(field, "")
-                if isinstance(value, str):
-                    words = self._tokenize(value)
-                    for word in words:
-                        if word not in self._index:
-                            self._index[word] = []
-                        self._index[word].append(idx)
-
-    def _tokenize(self, text: str) -> List[str]:
-        """Tokenize text into words."""
-        text = text.lower()
-        words = re.findall(r'\w+', text)
-        return words
-
-    def search(
-        self,
-        query: str,
-        limit: int = 10,
-    ) -> List[Dict[str, Any]]:
-        """Search for documents matching query."""
-        query_words = self._tokenize(query)
-
-        if not query_words:
-            return []
-
-        doc_scores: Dict[int, float] = {}
-        for word in query_words:
-            if word in self._index:
-                for doc_idx in self._index[word]:
-                    doc_scores[doc_idx] = doc_scores.get(doc_idx, 0) + 1
-
-        ranked = sorted(
-            doc_scores.items(),
-            key=lambda x: x[1],
-            reverse=True,
-        )[:limit]
-
-        return [self._documents[idx] for idx, score in ranked]
-
-
-class QueryBuilder:
-    """Builds complex queries programmatically."""
-
-    def __init__(self):
-        self._conditions: List[FilterCondition] = []
-        self._logical_op: str = "and"
-        self._sort_field: Optional[str] = None
-        self._sort_desc: bool = False
-        self._limit_count: Optional[int] = None
-        self._offset_count: Optional[int] = None
+        """Initialize data filter action."""
+        self.conditions: list[FilterCondition] = []
+        self._and_conditions: list[list[FilterCondition]] = []
+        self._or_conditions: list[list[FilterCondition]] = []
+        self.sort_specs: list[SortSpec] = []
+        self.pagination: Optional[PaginationSpec] = None
 
     def where(
         self,
         field: str,
-        operator: Union[FilterOperator, str],
-        value: Any = None,
-    ) -> "QueryBuilder":
-        """Add WHERE condition."""
-        if isinstance(operator, str):
-            operator = FilterOperator(operator)
+        operator: FilterOperator,
+        value: Any = None
+    ) -> "DataFilterAction":
+        """
+        Add AND filter condition.
 
-        self._conditions.append(FilterCondition(
-            field=field,
-            operator=operator,
-            value=value,
-        ))
-        return self
+        Args:
+            field: Field name.
+            operator: Filter operator.
+            value: Comparison value.
 
-    def where_in(self, field: str, values: List[Any]) -> "QueryBuilder":
-        """Add WHERE field IN values."""
-        self._conditions.append(FilterCondition(
-            field=field,
-            operator=FilterOperator.IN,
-            value=values,
-        ))
-        return self
-
-    def where_contains(self, field: str, value: str) -> "QueryBuilder":
-        """Add WHERE field contains value."""
-        self._conditions.append(FilterCondition(
-            field=field,
-            operator=FilterOperator.CONTAINS,
-            value=value,
-        ))
-        return self
-
-    def where_between(
-        self,
-        field: str,
-        min_value: Any,
-        max_value: Any,
-    ) -> "QueryBuilder":
-        """Add WHERE field BETWEEN values."""
-        self._conditions.append(FilterCondition(
-            field=field,
-            operator=FilterOperator.BETWEEN,
-            value=min_value,
-            value2=max_value,
-        ))
-        return self
-
-    def where_exists(self, field: str) -> "QueryBuilder":
-        """Add WHERE field EXISTS."""
-        self._conditions.append(FilterCondition(
-            field=field,
-            operator=FilterOperator.EXISTS,
-        ))
+        Returns:
+            Self for method chaining.
+        """
+        condition = FilterCondition(field=field, operator=operator, value=value)
+        self.conditions.append(condition)
         return self
 
     def and_where(
         self,
         field: str,
-        operator: Union[FilterOperator, str],
-        value: Any = None,
-    ) -> "QueryBuilder":
-        """Add AND condition."""
-        return self.where(field, operator, value)
+        operator: FilterOperator,
+        value: Any = None
+    ) -> "DataFilterAction":
+        """Add condition to current AND group."""
+        condition = FilterCondition(field=field, operator=operator, value=value)
+        if self.conditions:
+            self._and_conditions.append([condition])
+        else:
+            self.conditions.append(condition)
+        return self
 
     def or_where(
         self,
         field: str,
-        operator: Union[FilterOperator, str],
-        value: Any = None,
-    ) -> "QueryBuilder":
-        """Add OR condition."""
-        if self._conditions:
-            self._conditions[-1].negate = False
-        return self.where(field, operator, value)
+        operator: FilterOperator,
+        value: Any = None
+    ) -> "DataFilterAction":
+        """
+        Start OR group with condition.
 
-    def order_by(self, field: str, descending: bool = False) -> "QueryBuilder":
-        """Add ORDER BY."""
-        self._sort_field = field
-        self._sort_desc = descending
+        Args:
+            field: Field name.
+            operator: Filter operator.
+            value: Comparison value.
+
+        Returns:
+            Self for method chaining.
+        """
+        condition = FilterCondition(field=field, operator=operator, value=value)
+        self._or_conditions.append([condition])
         return self
 
-    def limit(self, count: int) -> "QueryBuilder":
-        """Add LIMIT."""
-        self._limit_count = count
+    def sort_by(self, field: str, ascending: bool = True) -> "DataFilterAction":
+        """
+        Add sort specification.
+
+        Args:
+            field: Field to sort by.
+            ascending: Sort direction.
+
+        Returns:
+            Self for method chaining.
+        """
+        self.sort_specs.append(SortSpec(field=field, ascending=ascending))
         return self
 
-    def offset(self, count: int) -> "QueryBuilder":
-        """Add OFFSET."""
-        self._offset_count = count
+    def paginate(self, page: int = 1, page_size: int = 20) -> "DataFilterAction":
+        """
+        Set pagination.
+
+        Args:
+            page: Page number (1-indexed).
+            page_size: Items per page.
+
+        Returns:
+            Self for method chaining.
+        """
+        self.pagination = PaginationSpec(page=page, page_size=page_size)
         return self
 
-    def build(self) -> List[FilterCondition]:
-        """Build filter conditions."""
-        return self._conditions
+    def apply(self, data: list[T]) -> FilterResult[T]:
+        """
+        Apply filters to data.
 
-    def apply(
-        self,
-        items: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """Apply query to items."""
-        filter_group = FilterGroup(self._conditions, self._logical_op)
-        result = [item for item in items if filter_group.evaluate(item)]
+        Args:
+            data: List of records to filter.
 
-        if self._sort_field:
-            result = sorted(
-                result,
-                key=lambda x: x.get(self._sort_field, ""),
-                reverse=self._sort_desc,
-            )
+        Returns:
+            FilterResult with filtered and sorted data.
+        """
+        filtered = self._filter(data)
 
-        if self._offset_count:
-            result = result[self._offset_count:]
+        if self.sort_specs:
+            filtered = self._sort(filtered)
 
-        if self._limit_count:
-            result = result[:self._limit_count]
+        total = len(filtered)
 
-        return result
+        if self.pagination:
+            page = self.pagination.page
+            page_size = self.pagination.page_size
+            start = (page - 1) * page_size
+            end = start + page_size
+            filtered = filtered[start:end]
+            total_pages = (len(filtered) + page_size - 1) // page_size
+        else:
+            page = 1
+            page_size = len(filtered)
+            total_pages = 1
 
+        return FilterResult(
+            items=filtered,
+            total=total,
+            page=page,
+            page_size=page_size,
+            total_pages=total_pages
+        )
 
-class DataFilterAction:
-    """High-level data filter action."""
+    def _filter(self, data: list[T]) -> list[T]:
+        """Apply all filter conditions."""
+        results = []
 
-    def __init__(
-        self,
-        data_filter: Optional[DataFilter] = None,
-        search_engine: Optional[SearchEngine] = None,
-    ):
-        self.data_filter = data_filter or DataFilter()
-        self.search_engine = search_engine or SearchEngine()
+        for record in data:
+            if self._matches(record):
+                results.append(record)
 
-    def filter(
-        self,
-        items: List[Dict[str, Any]],
-        conditions: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """Filter items with conditions."""
-        self.data_filter.clear_filters()
+        return results
 
-        for cond in conditions:
-            operator = FilterOperator(cond["operator"])
-            self.data_filter.add_condition(
-                field=cond["field"],
-                operator=operator,
-                value=cond.get("value"),
-            )
+    def _matches(self, record: T) -> bool:
+        """Check if record matches all conditions."""
+        if isinstance(record, dict):
+            record_get = lambda f: record.get(f)
+        else:
+            record_get = lambda f: getattr(record, f, None)
 
-        return self.data_filter.filter_list(items)
+        if self.conditions:
+            if not all(self._check_condition(record_get, cond) for cond in self.conditions):
+                return False
 
-    def search(
-        self,
-        items: List[Dict[str, Any]],
-        query: str,
-        fields: List[str],
-        limit: int = 10,
-    ) -> List[Dict[str, Any]]:
-        """Full-text search in items."""
-        self.search_engine.index(items, fields)
-        return self.search_engine.search(query, limit)
+        for and_group in self._and_conditions:
+            if not all(self._check_condition(record_get, cond) for cond in and_group):
+                return False
 
-    def query(self) -> QueryBuilder:
-        """Create a new query builder."""
-        return QueryBuilder()
+        if self._or_conditions:
+            if not any(all(self._check_condition(record_get, cond) for cond in group) for group in self._or_conditions):
+                return False
 
+        return True
 
-# Module exports
-__all__ = [
-    "DataFilterAction",
-    "DataFilter",
-    "SearchEngine",
-    "QueryBuilder",
-    "FilterCondition",
-    "FilterGroup",
-    "FilterOperator",
-]
+    def _check_condition(self, get_field: Callable, condition: FilterCondition) -> bool:
+        """Check single condition against record."""
+        value = get_field(condition.field)
+
+        op = condition.operator
+
+        if op == FilterOperator.EQ:
+            return value == condition.value
+
+        elif op == FilterOperator.NE:
+            return value != condition.value
+
+        elif op == FilterOperator.GT:
+            return value is not None and value > condition.value
+
+        elif op == FilterOperator.GTE:
+            return value is not None and value >= condition.value
+
+        elif op == FilterOperator.LT:
+            return value is not None and value < condition.value
+
+        elif op == FilterOperator.LTE:
+            return value is not None and value <= condition.value
+
+        elif op == FilterOperator.IN:
+            return value in condition.value
+
+        elif op == FilterOperator.NOT_IN:
+            return value not in condition.value
+
+        elif op == FilterOperator.CONTAINS:
+            if value is None:
+                return False
+            val_str = str(value)
+            cmp_str = str(condition.value)
+            return cmp_str in val_str if condition.case_sensitive else cmp_str.lower() in val_str.lower()
+
+        elif op == FilterOperator.STARTS_WITH:
+            if value is None:
+                return False
+            val_str = str(value)
+            cmp_str = str(condition.value)
+            return val_str.startswith(cmp_str) if condition.case_sensitive else val_str.lower().startswith(cmp_str.lower())
+
+        elif op == FilterOperator.ENDS_WITH:
+            if value is None:
+                return False
+            val_str = str(value)
+            cmp_str = str(condition.value)
+            return val_str.endswith(cmp_str) if condition.case_sensitive else val_str.lower().endswith(cmp_str.lower())
+
+        elif op == FilterOperator.REGEX:
+            import re
+            if value is None:
+                return False
+            flags = 0 if condition.case_sensitive else re.IGNORECASE
+            return bool(re.search(condition.value, str(value), flags))
+
+        elif op == FilterOperator.IS_NULL:
+            return value is None
+
+        elif op == FilterOperator.IS_NOT_NULL:
+            return value is not None
+
+        return True
+
+    def _sort(self, data: list[T]) -> list[T]:
+        """Sort data by sort specifications."""
+        if isinstance(data[0], dict) if data else False:
+            get_val = lambda r, f: r.get(f)
+        else:
+            get_val = lambda r, f: getattr(r, f, None)
+
+        def sort_key(record: T) -> tuple:
+            values = []
+            for spec in self.sort_specs:
+                val = get_val(record, spec.field)
+                values.append(val if spec.ascending else (-val if isinstance(val, (int, float)) else val))
+            return tuple(values)
+
+        return sorted(data, key=sort_key)
+
+    def clear(self) -> None:
+        """Clear all filters and sorts."""
+        self.conditions.clear()
+        self._and_conditions.clear()
+        self._or_conditions.clear()
+        self.sort_specs.clear()
+        self.pagination = None

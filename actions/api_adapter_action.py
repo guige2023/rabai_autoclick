@@ -1,369 +1,362 @@
 """
-API adapter pattern module.
+API Adapter Action Module.
 
-Provides adapter implementations for integrating with various
-external API styles and protocols.
-
-Author: Aito Auto Agent
+Unified API adapter with protocol translation, request/response
+transformation, and multi-backend routing.
 """
 
-from __future__ import annotations
-
-from abc import ABC, abstractmethod
+import asyncio
 from dataclasses import dataclass, field
-from typing import (
-    Any,
-    Callable,
-    Optional,
-    TypeVar,
-    Generic,
-)
+from typing import Any, Callable, Optional
+from enum import Enum
+import logging
+
+logger = logging.getLogger(__name__)
 
 
-T = TypeVar('T')
-R = TypeVar('R')
-
-
-class ApiAdapter(ABC, Generic[T, R]):
-    """
-    Abstract base class for API adapters.
-
-    Adapters translate between different API formats and protocols.
-    """
-
-    @abstractmethod
-    def request(self, endpoint: str, **kwargs) -> R:
-        """Make a request through the adapter."""
-        pass
-
-    @abstractmethod
-    def response(self, raw_response: T) -> R:
-        """Process raw response into standard format."""
-        pass
+class Protocol(Enum):
+    """Supported API protocols."""
+    REST = "rest"
+    GRAPHQL = "graphql"
+    WEBSOCKET = "websocket"
+    GRPC = "grpc"
+    WEBHOOK = "webhook"
 
 
 @dataclass
-class RequestConfig:
-    """Configuration for API requests."""
-    url: str
-    method: str = "GET"
-    headers: dict[str, str] = field(default_factory=dict)
-    params: dict[str, Any] = field(default_factory=dict)
-    body: Optional[Any] = None
+class Endpoint:
+    """API endpoint definition."""
+    path: str
+    method: str
+    protocol: Protocol
+    handler: Optional[Callable] = None
+    auth_required: bool = False
+    rate_limit: Optional[float] = None
+
+
+@dataclass
+class RequestTransform:
+    """Request transformation rules."""
+    field_mapping: dict[str, str] = field(default_factory=dict)
+    default_values: dict[str, Any] = field(default_factory=dict)
+    value_transformers: dict[str, Callable] = field(default_factory=dict)
+
+
+@dataclass
+class ResponseTransform:
+    """Response transformation rules."""
+    field_mapping: dict[str, str] = field(default_factory=dict)
+    exclude_fields: list[str] = field(default_factory=list)
+    value_transformers: dict[str, Callable] = field(default_factory=dict)
+    wrapper_key: Optional[str] = None
+
+
+@dataclass
+class BackendConfig:
+    """Backend server configuration."""
+    name: str
+    base_url: str
+    protocol: Protocol
+    headers: dict = field(default_factory=dict)
     timeout: float = 30.0
-    retries: int = 0
 
 
-@dataclass
-class ResponseWrapper:
-    """Standardized response wrapper."""
-    status_code: int
-    headers: dict[str, str]
-    body: Any
-    raw: Any = None
-
-
-class RestApiAdapter(ApiAdapter[dict, ResponseWrapper]):
+class APIAdapterAction:
     """
-    REST API adapter with standardized interface.
+    Unified API adapter with protocol translation and transformation.
 
     Example:
-        adapter = RestApiAdapter(base_url="https://api.example.com")
-        response = adapter.request("/users/123", method="GET")
+        adapter = APIAdapterAction()
+        adapter.add_backend("main", "https://api.example.com", Protocol.REST)
+        adapter.add_endpoint("/users", "GET", Protocol.REST)
+        adapter.transform_request(field_mapping={"user_id": "id"})
+        result = await adapter.request("GET", "/users")
     """
 
-    def __init__(
+    def __init__(self):
+        """Initialize API adapter."""
+        self.backends: dict[str, BackendConfig] = {}
+        self.endpoints: dict[str, Endpoint] = {}
+        self.request_transform = RequestTransform()
+        self.response_transform = ResponseTransform()
+        self._active_backend: Optional[str] = None
+
+    def add_backend(
         self,
-        base_url: str = "",
-        default_headers: Optional[dict[str, str]] = None,
+        name: str,
+        base_url: str,
+        protocol: Protocol = Protocol.REST,
+        headers: Optional[dict] = None,
         timeout: float = 30.0
-    ):
-        self._base_url = base_url.rstrip("/")
-        self._default_headers = default_headers or {}
-        self._timeout = timeout
+    ) -> BackendConfig:
+        """
+        Add a backend configuration.
 
-    def request(self, endpoint: str, **kwargs) -> ResponseWrapper:
-        """Make REST API request."""
-        import requests
+        Args:
+            name: Backend identifier.
+            base_url: Base URL for backend.
+            protocol: API protocol.
+            headers: Default headers.
+            timeout: Request timeout.
 
-        url = f"{self._base_url}/{endpoint.lstrip('/')}"
-        headers = {**self._default_headers, **kwargs.get("headers", {})}
-
-        response = requests.request(
-            url=url,
-            method=kwargs.get("method", "GET"),
-            headers=headers,
-            params=kwargs.get("params"),
-            json=kwargs.get("body"),
-            timeout=kwargs.get("timeout", self._timeout)
+        Returns:
+            Created BackendConfig.
+        """
+        backend = BackendConfig(
+            name=name,
+            base_url=base_url.rstrip("/"),
+            protocol=protocol,
+            headers=headers or {},
+            timeout=timeout
         )
 
-        return ResponseWrapper(
-            status_code=response.status_code,
-            headers=dict(response.headers),
-            body=response.json() if response.content else None,
-            raw=response
-        )
+        self.backends[name] = backend
+        if self._active_backend is None:
+            self._active_backend = name
 
-    def response(self, raw_response: dict) -> ResponseWrapper:
-        """Process REST response."""
-        return ResponseWrapper(
-            status_code=raw_response.get("status_code", 0),
-            headers=raw_response.get("headers", {}),
-            body=raw_response.get("body")
-        )
+        logger.info(f"Added backend: {name} ({base_url})")
+        return backend
 
+    def set_active_backend(self, name: str) -> bool:
+        """Set active backend for requests."""
+        if name in self.backends:
+            self._active_backend = name
+            return True
+        return False
 
-class GraphQLAdapter(ApiAdapter[dict, ResponseWrapper]):
-    """
-    GraphQL API adapter.
-
-    Example:
-        adapter = GraphQLAdapter(endpoint="https://api.example.com/graphql")
-        response = adapter.request(
-            query="{ user(id: 123) { name email } }"
-        )
-    """
-
-    def __init__(
+    def add_endpoint(
         self,
-        endpoint: str,
-        headers: Optional[dict[str, str]] = None
-    ):
-        self._endpoint = endpoint
-        self._headers = headers or {}
+        path: str,
+        method: str,
+        protocol: Protocol = Protocol.REST,
+        handler: Optional[Callable] = None,
+        auth_required: bool = False,
+        rate_limit: Optional[float] = None
+    ) -> Endpoint:
+        """
+        Add an API endpoint.
 
-    def request(
+        Args:
+            path: Endpoint path.
+            method: HTTP method.
+            protocol: API protocol.
+            handler: Request handler function.
+            auth_required: Whether auth is required.
+            rate_limit: Optional rate limit.
+
+        Returns:
+            Created Endpoint.
+        """
+        endpoint = Endpoint(
+            path=path,
+            method=method.upper(),
+            protocol=protocol,
+            handler=handler,
+            auth_required=auth_required,
+            rate_limit=rate_limit
+        )
+
+        key = f"{method.upper()}:{path}"
+        self.endpoints[key] = endpoint
+        logger.debug(f"Added endpoint: {method.upper()} {path}")
+        return endpoint
+
+    def transform_request(
+        self,
+        field_mapping: Optional[dict[str, str]] = None,
+        default_values: Optional[dict[str, Any]] = None,
+        value_transformers: Optional[dict[str, Callable]] = None
+    ) -> None:
+        """Configure request transformation rules."""
+        if field_mapping:
+            self.request_transform.field_mapping.update(field_mapping)
+        if default_values:
+            self.request_transform.default_values.update(default_values)
+        if value_transformers:
+            self.request_transform.value_transformers.update(value_transformers)
+
+    def transform_response(
+        self,
+        field_mapping: Optional[dict[str, str]] = None,
+        exclude_fields: Optional[list[str]] = None,
+        value_transformers: Optional[dict[str, Callable]] = None,
+        wrapper_key: Optional[str] = None
+    ) -> None:
+        """Configure response transformation rules."""
+        if field_mapping:
+            self.response_transform.field_mapping.update(field_mapping)
+        if exclude_fields:
+            self.response_transform.exclude_fields.extend(exclude_fields)
+        if value_transformers:
+            self.response_transform.value_transformers.update(value_transformers)
+        if wrapper_key:
+            self.response_transform.wrapper_key = wrapper_key
+
+    async def request(
+        self,
+        method: str,
+        path: str,
+        data: Optional[Any] = None,
+        headers: Optional[dict] = None,
+        params: Optional[dict] = None,
+        backend: Optional[str] = None
+    ) -> Any:
+        """
+        Make an API request.
+
+        Args:
+            method: HTTP method.
+            path: Request path.
+            data: Request body data.
+            headers: Additional headers.
+            params: Query parameters.
+            backend: Backend name (uses active if None).
+
+        Returns:
+            Response data.
+
+        Raises:
+            ValueError: If no backend configured or endpoint not found.
+        """
+        backend_name = backend or self._active_backend
+        if not backend_name or backend_name not in self.backends:
+            raise ValueError(f"No backend configured: {backend_name}")
+
+        backend_config = self.backends[backend_name]
+        key = f"{method.upper()}:{path}"
+
+        endpoint = self.endpoints.get(key)
+
+        if endpoint and endpoint.auth_required:
+            if headers and "Authorization" not in headers:
+                raise ValueError("Authentication required for this endpoint")
+
+        request_headers = backend_config.headers.copy()
+        if headers:
+            request_headers.update(headers)
+
+        transformed_data = self._transform_request_data(data) if data else None
+
+        url = f"{backend_config.base_url}{path}"
+
+        try:
+            import aiohttp
+
+            async with aiohttp.ClientSession() as session:
+                async with session.request(
+                    method=method.upper(),
+                    url=url,
+                    json=transformed_data,
+                    headers=request_headers,
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=backend_config.timeout)
+                ) as response:
+                    response_data = await response.json() if response.content_type == "application/json" else await response.text()
+
+                    if not response.ok:
+                        raise Exception(f"Request failed: {response.status} {response_data}")
+
+                    return self._transform_response_data(response_data)
+
+        except ImportError:
+            raise ImportError("aiohttp is required for API requests. Install with: pip install aiohttp")
+
+    async def graphql_query(
         self,
         query: str,
         variables: Optional[dict] = None,
-        operation_name: Optional[str] = None,
-        **kwargs
-    ) -> ResponseWrapper:
-        """Execute GraphQL query/mutation."""
-        import requests
+        backend: Optional[str] = None
+    ) -> dict:
+        """
+        Execute a GraphQL query.
 
-        payload = {"query": query}
-        if variables:
-            payload["variables"] = variables
-        if operation_name:
-            payload["operationName"] = operation_name
+        Args:
+            query: GraphQL query string.
+            variables: Query variables.
+            backend: Backend name.
 
-        response = requests.post(
-            self._endpoint,
-            json=payload,
-            headers=self._headers,
-            timeout=kwargs.get("timeout", 30.0)
+        Returns:
+            GraphQL response data.
+        """
+        return await self.request(
+            method="POST",
+            path="/graphql",
+            data={"query": query, "variables": variables or {}},
+            backend=backend
         )
 
-        result = response.json()
+    def _transform_request_data(self, data: Any) -> Any:
+        """Apply request transformation to data."""
+        if isinstance(data, dict):
+            result = {}
 
-        errors = result.get("errors", [])
-        status_code = 400 if errors else 200
+            for key, value in data.items():
+                mapped_key = self.request_transform.field_mapping.get(key, key)
 
-        return ResponseWrapper(
-            status_code=response.status_code or status_code,
-            headers=dict(response.headers),
-            body=result.get("data"),
-            raw=result
-        )
+                if key in self.request_transform.value_transformers:
+                    value = self.request_transform.value_transformers[key](value)
 
-    def query(self, query: str, variables: Optional[dict] = None) -> ResponseWrapper:
-        """Execute a GraphQL query."""
-        return self.request(query=query, variables=variables)
+                result[mapped_key] = self._transform_request_data(value)
 
-    def mutation(
-        self,
-        mutation: str,
-        variables: Optional[dict] = None
-    ) -> ResponseWrapper:
-        """Execute a GraphQL mutation."""
-        return self.request(query=mutation, variables=variables)
+            for key, value in self.request_transform.default_values.items():
+                if key not in result:
+                    result[key] = value
 
-    def response(self, raw_response: dict) -> ResponseWrapper:
-        """Process GraphQL response."""
-        return ResponseWrapper(
-            status_code=200 if raw_response.get("data") else 400,
-            headers={},
-            body=raw_response.get("data"),
-            raw=raw_response
-        )
+            return result
 
+        elif isinstance(data, list):
+            return [self._transform_request_data(item) for item in data]
 
-class WebSocketAdapter(ApiAdapter[Any, Any]):
-    """
-    WebSocket API adapter for real-time communication.
+        return data
 
-    Example:
-        adapter = WebSocketAdapter("wss://api.example.com/ws")
-        adapter.connect()
-        adapter.send({"type": "subscribe", "channel": "prices"})
-    """
+    def _transform_response_data(self, data: Any) -> Any:
+        """Apply response transformation to data."""
+        wrapper = self.response_transform.wrapper_key
 
-    def __init__(
-        self,
-        url: str,
-        headers: Optional[dict[str, str]] = None
-    ):
-        self._url = url
-        self._headers = headers or {}
-        self._ws = None
+        if wrapper and isinstance(data, dict) and wrapper in data:
+            data = data[wrapper]
 
-    def request(self, endpoint: str = "", **kwargs) -> Any:
-        """Send message over WebSocket."""
-        if self._ws is None:
-            self.connect()
+        if isinstance(data, dict):
+            result = {}
 
-        message = kwargs.get("message")
-        if message:
-            self._ws.send(message)
+            for key, value in data.items():
+                if key in self.response_transform.exclude_fields:
+                    continue
 
-        return self._receive()
+                mapped_key = self.response_transform.field_mapping.get(key, key)
 
-    def connect(self) -> None:
-        """Establish WebSocket connection."""
-        import websocket
+                if key in self.response_transform.value_transformers:
+                    value = self.response_transform.value_transformers[key](value)
 
-        self._ws = websocket.WebSocketApp(
-            self._url,
-            header=self._headers,
-            on_message=self._on_message,
-            on_error=self._on_error,
-            on_close=self._on_close
-        )
+                result[mapped_key] = self._transform_response_data(value)
 
-    def disconnect(self) -> None:
-        """Close WebSocket connection."""
-        if self._ws:
-            self._ws.close()
-            self._ws = None
+            return result
 
-    def send(self, data: Any) -> None:
-        """Send data over WebSocket."""
-        if self._ws:
-            import json
-            self._ws.send(json.dumps(data))
+        elif isinstance(data, list):
+            return [self._transform_response_data(item) for item in data]
 
-    def _receive(self) -> Any:
-        """Receive message from WebSocket."""
-        pass
+        return data
 
-    def _on_message(self, ws: Any, message: str) -> None:
-        """Handle incoming message."""
-        pass
+    def get_endpoints(self) -> list[dict]:
+        """Get all registered endpoints."""
+        return [
+            {
+                "path": ep.path,
+                "method": ep.method,
+                "protocol": ep.protocol.value,
+                "auth_required": ep.auth_required
+            }
+            for ep in self.endpoints.values()
+        ]
 
-    def _on_error(self, ws: Any, error: Exception) -> None:
-        """Handle WebSocket error."""
-        pass
-
-    def _on_close(self, ws: Any) -> None:
-        """Handle WebSocket close."""
-        pass
-
-    def response(self, raw_response: Any) -> Any:
-        """Process WebSocket message."""
-        return raw_response
-
-
-class BatchAdapter(ApiAdapter[list, list]):
-    """
-    Batch API adapter for request batching.
-
-    Example:
-        adapter = BatchAdapter(RestApiAdapter(base_url="https://api.example.com"))
-        results = adapter.request([
-            {"endpoint": "/users/1"},
-            {"endpoint": "/users/2"}
-        ])
-    """
-
-    def __init__(
-        self,
-        wrapped: ApiAdapter,
-        batch_size: int = 10
-    ):
-        self._wrapped = wrapped
-        self._batch_size = batch_size
-
-    def request(self, requests: list[dict], **kwargs) -> list[ResponseWrapper]:
-        """Execute batch of requests."""
-        results = []
-        for req in requests:
-            try:
-                result = self._wrapped.request(
-                    endpoint=req.get("endpoint", ""),
-                    method=req.get("method", "GET"),
-                    **req
-                )
-                results.append(result)
-            except Exception as e:
-                results.append(ResponseWrapper(
-                    status_code=0,
-                    headers={},
-                    body={"error": str(e)}
-                ))
-        return results
-
-    def response(self, raw_response: list) -> list:
-        """Process batch responses."""
-        return [self._wrapped.response(r) if hasattr(r, '__dict__') else r for r in raw_response]
-
-
-class TransformAdapter(ApiAdapter[T, R]):
-    """
-    Adapter with request/response transformation.
-
-    Example:
-        adapter = TransformAdapter(
-            wrapped=RestApiAdapter(base_url="https://api.example.com"),
-            request_transform=lambda req: {"body": {"data": req}},
-            response_transform=lambda res: res.body.get("result")
-        )
-    """
-
-    def __init__(
-        self,
-        wrapped: ApiAdapter,
-        request_transform: Optional[Callable[[dict], dict]] = None,
-        response_transform: Optional[Callable[[ResponseWrapper], Any]] = None
-    ):
-        self._wrapped = wrapped
-        self._request_transform = request_transform or (lambda x: x)
-        self._response_transform = response_transform or (lambda x: x)
-
-    def request(self, endpoint: str, **kwargs) -> R:
-        """Make request with transformation."""
-        transformed = self._request_transform({
-            "endpoint": endpoint,
-            **kwargs
-        })
-        result = self._wrapped.request(**transformed)
-        return self._response_transform(result)
-
-    def response(self, raw_response: T) -> R:
-        """Process response with transformation."""
-        return self._response_transform(raw_response)
-
-
-def create_rest_adapter(
-    base_url: str,
-    **kwargs
-) -> RestApiAdapter:
-    """Factory for REST API adapter."""
-    return RestApiAdapter(base_url=base_url, **kwargs)
-
-
-def create_graphql_adapter(
-    endpoint: str,
-    **kwargs
-) -> GraphQLAdapter:
-    """Factory for GraphQL adapter."""
-    return GraphQLAdapter(endpoint=endpoint, **kwargs)
-
-
-def create_websocket_adapter(
-    url: str,
-    **kwargs
-) -> WebSocketAdapter:
-    """Factory for WebSocket adapter."""
-    return WebSocketAdapter(url=url, **kwargs)
+    def get_backends(self) -> list[dict]:
+        """Get all configured backends."""
+        return [
+            {
+                "name": b.name,
+                "base_url": b.base_url,
+                "protocol": b.protocol.value,
+                "is_active": b.name == self._active_backend
+            }
+            for b in self.backends.values()
+        ]
