@@ -1,293 +1,303 @@
-"""OAuth2 authentication action module.
-
-Provides OAuth2 client credentials and authorization code flow support
-for API authentication with token refresh capabilities.
 """
+OAuth 2.0 Client Action Module.
 
-from __future__ import annotations
+Provides OAuth 2.0 authorization code flow, client credentials,
+and refresh token management for API authentication.
+
+Author: rabai_autoclick team
+"""
 
 import time
 import hashlib
-import hmac
 import base64
-import urllib.parse
-from typing import Any, Callable, Optional
+import json
+import logging
+from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
 from enum import Enum
-import logging
+from urllib.parse import urlencode, parse_qs, urlparse
 
 logger = logging.getLogger(__name__)
 
 
 class GrantType(Enum):
-    """OAuth2 grant types."""
-    CLIENT_CREDENTIALS = "client_credentials"
+    """OAuth 2.0 grant types."""
     AUTHORIZATION_CODE = "authorization_code"
+    CLIENT_CREDENTIALS = "client_credentials"
     REFRESH_TOKEN = "refresh_token"
+    DEVICE_CODE = "device_code"
 
 
 @dataclass
-class OAuth2Token:
-    """Represents an OAuth2 token response."""
+class TokenResponse:
+    """OAuth 2.0 token response."""
     access_token: str
-    token_type: str = "Bearer"
-    expires_in: int = 3600
+    token_type: str
+    expires_in: int
     refresh_token: Optional[str] = None
     scope: Optional[str] = None
-    issued_at: float = field(default_factory=time.time)
+    id_token: Optional[str] = None
+    expires_at: float = field(default=0)
+
+    def __post_init__(self):
+        if self.expires_at == 0:
+            self.expires_at = time.time() + self.expires_in
 
     @property
     def is_expired(self) -> bool:
         """Check if token is expired."""
-        return time.time() >= (self.issued_at + self.expires_in - 60)
+        return time.time() >= self.expires_at - 60
 
-    def to_dict(self) -> dict[str, Any]:
-        """Convert token to dictionary."""
-        return {
-            "access_token": self.access_token,
-            "token_type": self.token_type,
-            "expires_in": self.expires_in,
-            "refresh_token": self.refresh_token,
-            "scope": self.scope,
-        }
+    @property
+    def is_refresh_needed(self) -> bool:
+        """Check if refresh is needed (within 5 min of expiry)."""
+        return time.time() >= self.expires_at - 300
 
 
-class OAuth2Client:
-    """OAuth2 client with token management."""
+@dataclass
+class OAuth2Config:
+    """OAuth 2.0 configuration."""
+    client_id: str
+    client_secret: str
+    authorization_url: str
+    token_url: str
+    redirect_uri: str
+    scope: str
+    state: Optional[str] = None
+    timeout: int = 30
 
-    def __init__(
-        self,
-        client_id: str,
-        client_secret: str,
-        token_url: str,
-        authorize_url: Optional[str] = None,
-        redirect_uri: Optional[str] = None,
-    ):
-        """Initialize OAuth2 client.
 
-        Args:
-            client_id: OAuth2 client ID
-            client_secret: OAuth2 client secret
-            token_url: Token endpoint URL
-            authorize_url: Authorization endpoint URL
-            redirect_uri: Redirect URI for authorization code flow
+class OAuth2Action:
+    """
+    OAuth 2.0 Client Implementation.
+
+    Supports multiple grant types and automatic token refresh.
+
+    Example:
+        >>> config = OAuth2Config(
+        ...     client_id="app_id",
+        ...     client_secret="secret",
+        ...     authorization_url="https://auth.example.com/authorize",
+        ...     token_url="https://auth.example.com/token",
+        ...     redirect_uri="http://localhost:8080/callback",
+        ...     scope="read write"
+        ... )
+        >>> oauth = OAuth2Action(config)
+        >>> auth_url = oauth.get_authorization_url()
+        >>> token = oauth.exchange_code("auth_code")
+    """
+
+    def __init__(self, config: OAuth2Config, http_client: Optional[Any] = None):
+        self.config = config
+        self.http_client = http_client
+        self._token: Optional[TokenResponse] = None
+        self._code_verifier: Optional[str] = None
+
+    def generate_code_verifier(self, length: int = 128) -> str:
         """
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self.token_url = token_url
-        self.authorize_url = authorize_url
-        self.redirect_uri = redirect_uri
-        self._token: Optional[OAuth2Token] = None
-        self._token_refresh_callbacks: list[Callable[[OAuth2Token], None]] = []
-
-    def set_token(self, token: OAuth2Token) -> None:
-        """Set current token."""
-        self._token = token
-        for callback in self._token_refresh_callbacks:
-            callback(token)
-
-    def get_token(self) -> Optional[OAuth2Token]:
-        """Get current token."""
-        return self._token
-
-    def on_token_refresh(self, callback: Callable[[OAuth2Token], None]) -> None:
-        """Register token refresh callback."""
-        self._token_refresh_callbacks.append(callback)
-
-    def build_authorization_url(
-        self,
-        scope: Optional[str] = None,
-        state: Optional[str] = None,
-        code_challenge: bool = True,
-    ) -> tuple[str, Optional[str]]:
-        """Build authorization URL for authorization code flow.
+        Generate PKCE code verifier.
 
         Args:
-            scope: Requested scopes
-            state: State parameter for CSRF protection
-            code_challenge: Whether to use PKCE code challenge
+            length: Length of the verifier (43-128 chars)
 
         Returns:
-            Tuple of (authorization_url, code_verifier)
+            Random code verifier string
         """
-        if not self.authorize_url:
-            raise ValueError("authorize_url not configured")
+        if not (43 <= length <= 128):
+            raise ValueError("Code verifier length must be 43-128 characters")
+        chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+        verifier = "".join(__import__("secrets").choice(chars) for _ in range(length))
+        self._code_verifier = verifier
+        return verifier
 
-        params: dict[str, str] = {
+    def generate_code_challenge(self, verifier: str) -> str:
+        """
+        Generate PKCE code challenge from verifier.
+
+        Args:
+            verifier: Code verifier string
+
+        Returns:
+            S256 code challenge
+        """
+        digest = hashlib.sha256(verifier.encode("ascii")).digest()
+        return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+    def get_authorization_url(self, state: Optional[str] = None,
+                              code_challenge: Optional[str] = None) -> str:
+        """
+        Get authorization URL for user to authorize.
+
+        Args:
+            state: Optional state parameter
+            code_challenge: Optional PKCE code challenge
+
+        Returns:
+            Authorization URL
+        """
+        params = {
             "response_type": "code",
-            "client_id": self.client_id,
-            "redirect_uri": self.redirect_uri or "",
+            "client_id": self.config.client_id,
+            "redirect_uri": self.config.redirect_uri,
+            "scope": self.config.scope,
         }
 
-        if scope:
-            params["scope"] = scope
         if state:
             params["state"] = state
+        elif self.config.state:
+            params["state"] = self.config.state
 
-        code_verifier: Optional[str] = None
-        if code_challenge:
-            code_verifier = self._generate_code_verifier()
-            code_challenge_digest = hashlib.sha256(code_verifier.encode()).digest()
-            code_challenge_b64 = base64.urlsafe_b64encode(code_challenge_digest).rstrip(b"=").decode()
-            params["code_challenge"] = code_challenge_b64
+        if code_challenge and self._code_verifier:
+            params["code_challenge"] = code_challenge
             params["code_challenge_method"] = "S256"
 
-        auth_url = f"{self.authorize_url}?{urllib.parse.urlencode(params)}"
-        return auth_url, code_verifier
+        return f"{self.config.authorization_url}?{urlencode(params)}"
 
-    def _generate_code_verifier(self) -> str:
-        """Generate PKCE code verifier."""
-        random_bytes = __import__("secrets").token_bytes(32)
-        return base64.urlsafe_b64encode(random_bytes).rstrip(b"=").decode()
-
-    def exchange_code_for_token(
-        self,
-        code: str,
-        code_verifier: Optional[str] = None,
-    ) -> OAuth2Token:
-        """Exchange authorization code for access token.
+    async def exchange_code(self, code: str,
+                           code_verifier: Optional[str] = None) -> TokenResponse:
+        """
+        Exchange authorization code for tokens.
 
         Args:
             code: Authorization code
             code_verifier: PKCE code verifier
 
         Returns:
-            OAuth2Token object
+            Token response
         """
-        data: dict[str, str] = {
+        data = {
             "grant_type": GrantType.AUTHORIZATION_CODE.value,
             "code": code,
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
+            "client_id": self.config.client_id,
+            "redirect_uri": self.config.redirect_uri,
         }
 
-        if self.redirect_uri:
-            data["redirect_uri"] = self.redirect_uri
         if code_verifier:
             data["code_verifier"] = code_verifier
 
-        response_data = self._make_token_request(data)
-        token = self._parse_token_response(response_data)
-        self.set_token(token)
-        return token
+        return await self._request_token(data)
 
-    def refresh_access_token(self, refresh_token: str) -> OAuth2Token:
-        """Refresh access token using refresh token.
+    async def refresh_access_token(self, refresh_token: str) -> TokenResponse:
+        """
+        Refresh access token using refresh token.
 
         Args:
             refresh_token: Refresh token
 
         Returns:
-            New OAuth2Token object
+            New token response
         """
-        data: dict[str, str] = {
+        data = {
             "grant_type": GrantType.REFRESH_TOKEN.value,
             "refresh_token": refresh_token,
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
+            "client_id": self.config.client_id,
         }
 
-        response_data = self._make_token_request(data)
-        token = self._parse_token_response(response_data)
-        self.set_token(token)
-        return token
+        return await self._request_token(data)
 
-    def client_credentials_grant(self, scope: Optional[str] = None) -> OAuth2Token:
-        """Request token using client credentials grant.
-
-        Args:
-            scope: Requested scopes
+    async def client_credentials(self) -> TokenResponse:
+        """
+        Get access token using client credentials.
 
         Returns:
-            OAuth2Token object
+            Token response
         """
-        data: dict[str, str] = {
+        data = {
             "grant_type": GrantType.CLIENT_CREDENTIALS.value,
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
+            "client_id": self.config.client_id,
+            "client_secret": self.config.client_secret,
+            "scope": self.config.scope,
         }
 
-        if scope:
-            data["scope"] = scope
+        return await self._request_token(data)
 
-        response_data = self._make_token_request(data)
-        token = self._parse_token_response(response_data)
-        self.set_token(token)
-        return token
+    async def _request_token(self, data: Dict[str, str]) -> TokenResponse:
+        """Send token request to authorization server."""
+        if self.http_client is None:
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=self.config.timeout) as client:
+                    response = await client.post(
+                        self.config.token_url,
+                        data=data,
+                        headers={"Content-Type": "application/x-www-form-urlencoded"}
+                    )
+                    response.raise_for_status()
+                    token_data = response.json()
+            except ImportError:
+                logger.warning("httpx not available, using requests")
+                import requests
+                resp = requests.post(
+                    self.config.token_url,
+                    data=data,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    timeout=self.config.timeout
+                )
+                resp.raise_for_status()
+                token_data = resp.json()
+        else:
+            response = await self.http_client.post(
+                self.config.token_url,
+                data=data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"}
+            )
+            token_data = response.json()
 
-    def _make_token_request(self, data: dict[str, str]) -> dict[str, Any]:
-        """Make token request to authorization server.
+        self._token = TokenResponse(
+            access_token=token_data["access_token"],
+            token_type=token_data.get("token_type", "Bearer"),
+            expires_in=token_data.get("expires_in", 3600),
+            refresh_token=token_data.get("refresh_token"),
+            scope=token_data.get("scope"),
+            id_token=token_data.get("id_token"),
+        )
+        return self._token
+
+    def get_valid_token(self) -> Optional[TokenResponse]:
+        """Get current valid token or None."""
+        return self._token if self._token and not self._token.is_expired else None
+
+    async def ensure_valid_token(self) -> TokenResponse:
+        """
+        Ensure valid token is available, refreshing if needed.
+
+        Returns:
+            Valid token response
+        """
+        if self._token is None:
+            return await self.client_credentials()
+
+        if self._token.is_expired:
+            if self._token.refresh_token:
+                return await self.refresh_access_token(self._token.refresh_token)
+            return await self.client_credentials()
+
+        return self._token
+
+    def parse_callback(self, url: str) -> Dict[str, Any]:
+        """
+        Parse OAuth callback URL.
 
         Args:
-            data: Request body data
+            url: Callback URL with query parameters
 
         Returns:
-            Parsed JSON response
+            Parsed parameters
         """
-        import json as json_module
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        return {k: v[0] if len(v) == 1 else v for k, v in params.items()}
 
-        try:
-            import urllib.request
-            req = urllib.request.Request(
-                self.token_url,
-                data=urllib.parse.urlencode(data).encode(),
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-            with urllib.request.urlopen(req, timeout=30) as response:
-                return json_module.loads(response.read().decode())
-        except Exception as e:
-            logger.error(f"OAuth2 token request failed: {e}")
-            raise
+    def validate_state(self, received: str, expected: Optional[str] = None) -> bool:
+        """
+        Validate state parameter.
 
-    def _parse_token_response(self, data: dict[str, Any]) -> OAuth2Token:
-        """Parse token response data."""
-        return OAuth2Token(
-            access_token=data["access_token"],
-            token_type=data.get("token_type", "Bearer"),
-            expires_in=data.get("expires_in", 3600),
-            refresh_token=data.get("refresh_token"),
-            scope=data.get("scope"),
-        )
-
-    def get_authorized_header(self) -> dict[str, str]:
-        """Get authorization header with current token.
+        Args:
+            received: State received in callback
+            expected: Expected state (uses config state if None)
 
         Returns:
-            Dict with Authorization header
-
-        Raises:
-            ValueError: If no token available
+            True if valid
         """
-        if not self._token:
-            raise ValueError("No token available. Authenticate first.")
-        if self._token.is_expired and self._token.refresh_token:
-            self.refresh_access_token(self._token.refresh_token)
-        return {"Authorization": f"{self._token.token_type} {self._token.access_token}"}
-
-
-def create_oauth2_client(
-    client_id: str,
-    client_secret: str,
-    token_url: str,
-    authorize_url: Optional[str] = None,
-    redirect_uri: Optional[str] = None,
-) -> OAuth2Client:
-    """Create OAuth2 client instance.
-
-    Args:
-        client_id: OAuth2 client ID
-        client_secret: OAuth2 client secret
-        token_url: Token endpoint URL
-        authorize_url: Authorization endpoint URL
-        redirect_uri: Redirect URI
-
-    Returns:
-        OAuth2Client instance
-    """
-    return OAuth2Client(
-        client_id=client_id,
-        client_secret=client_secret,
-        token_url=token_url,
-        authorize_url=authorize_url,
-        redirect_uri=redirect_uri,
-    )
+        expected_state = expected or self.config.state
+        return received == expected_state if expected_state else True

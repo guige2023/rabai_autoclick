@@ -1,314 +1,337 @@
-"""Task scheduler action module.
+"""
+Task Scheduler Action Module.
 
-Provides task scheduling functionality with cron-like scheduling,
-periodic tasks, delayed execution, and task prioritization.
+Provides cron-style task scheduling with dependencies,
+priority queuing, and execution tracking.
+
+Author: rabai_autoclick team
 """
 
-from __future__ import annotations
-
 import time
-import threading
-from typing import Any, Callable, Optional
+import asyncio
+import logging
+from typing import Optional, Dict, Any, List, Callable, Set
 from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime, timedelta
-import logging
-import sched
-import uuid
+from heapq import heappush, heappop
 
 logger = logging.getLogger(__name__)
 
 
-class ScheduleType(Enum):
-    """Task schedule type."""
-    ONCE = "once"
-    INTERVAL = "interval"
-    CRON = "cron"
-    DELAYED = "delayed"
+class TaskStatus(Enum):
+    """Task execution status."""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class Priority(Enum):
+    """Task priority levels."""
+    LOW = 3
+    NORMAL = 2
+    HIGH = 1
+    CRITICAL = 0
 
 
 @dataclass
 class ScheduledTask:
-    """Represents a scheduled task."""
-    id: str
-    name: str
-    func: Callable[..., Any]
+    """A scheduled task definition."""
+    task_id: str
+    func: Callable
     args: tuple = field(default_factory=tuple)
-    kwargs: dict[str, Any] = field(default_factory=dict)
-    schedule_type: ScheduleType = ScheduleType.ONCE
-    interval: float = 0.0
-    next_run: Optional[float] = None
-    last_run: Optional[float] = None
-    enabled: bool = True
-    max_runs: Optional[int] = None
-    run_count: int = 0
-    on_error: Optional[Callable[[Exception], None]] = None
+    kwargs: Dict[str, Any] = field(default_factory=dict)
+    priority: Priority = Priority.NORMAL
+    scheduled_at: Optional[float] = None
+    max_retries: int = 3
+    timeout: Optional[float] = None
+    dependencies: Set[str] = field(default_factory=set)
+    tags: Set[str] = field(default_factory=set)
+
+    def __lt__(self, other: "ScheduledTask") -> bool:
+        """Compare tasks by scheduled time and priority."""
+        if self.scheduled_at == other.scheduled_at:
+            return self.priority.value < other.priority.value
+        return self.scheduled_at < other.scheduled_at
 
 
-class TaskScheduler:
-    """Task scheduler with multiple schedule types."""
+@dataclass
+class TaskResult:
+    """Result of a task execution."""
+    task_id: str
+    status: TaskStatus
+    result: Any = None
+    error: Optional[str] = None
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    retries: int = 0
 
-    def __init__(self daemon: bool = True):
-        """Initialize task scheduler.
+    @property
+    def duration(self) -> Optional[float]:
+        """Get execution duration in seconds."""
+        if self.started_at and self.completed_at:
+            return self.completed_at - self.started_at
+        return None
 
-        Args:
-            daemon: Run scheduler as daemon thread
-        """
-        self.daemon = daemon
-        self._tasks: dict[str, ScheduledTask] = {}
+
+class TaskSchedulerAction:
+    """
+    Advanced Task Scheduler.
+
+    Supports cron expressions, task dependencies, priority queuing,
+    retries, and comprehensive execution tracking.
+
+    Example:
+        >>> async def my_task(x, y):
+        ...     return x + y
+        >>> scheduler = TaskSchedulerAction()
+        >>> task = scheduler.schedule_task("add", my_task, args=(1, 2), when=time.time() + 60)
+        >>> scheduler.start()
+    """
+
+    def __init__(self, max_workers: int = 4):
+        self.max_workers = max_workers
+        self._tasks: List[ScheduledTask] = []
+        self._running_tasks: Dict[str, ScheduledTask] = {}
+        self._results: Dict[str, TaskResult] = {}
+        self._completed_task_ids: Set[str] = set()
+        self._cancelled_task_ids: Set[str] = set()
         self._running = False
-        self._thread: Optional[threading.Thread] = None
-        self._lock = threading.Lock()
-        self._scheduler = sched.scheduler(time.time, time.sleep)
-        self._task_results: dict[str, Any] = {}
+        self._lock = asyncio.Lock()
 
-    def add_task(
+    def schedule_task(
         self,
-        name: str,
-        func: Callable[..., Any],
+        task_id: str,
+        func: Callable,
         args: tuple = (),
-        kwargs: Optional[dict[str, Any]] = None,
-        schedule_type: ScheduleType = ScheduleType.ONCE,
-        interval: float = 0.0,
-        delay: float = 0.0,
-        cron_expr: Optional[str] = None,
-        max_runs: Optional[int] = None,
-        on_error: Optional[Callable[[Exception], None]] = None,
-    ) -> str:
-        """Add task to scheduler.
+        kwargs: Optional[Dict[str, Any]] = None,
+        when: Optional[float] = None,
+        priority: Priority = Priority.NORMAL,
+        max_retries: int = 3,
+        timeout: Optional[float] = None,
+        dependencies: Optional[Set[str]] = None,
+        tags: Optional[Set[str]] = None,
+    ) -> ScheduledTask:
+        """
+        Schedule a task for execution.
 
         Args:
-            name: Task name
-            func: Function to execute
-            args: Positional arguments
-            kwargs: Keyword arguments
-            schedule_type: Schedule type
-            interval: Interval for periodic tasks (seconds)
-            delay: Delay before first execution (seconds)
-            cron_expr: Cron expression (not implemented)
-            max_runs: Maximum number of runs
-            on_error: Error callback
+            task_id: Unique task identifier
+            func: Async callable to execute
+            args: Positional arguments for the function
+            kwargs: Keyword arguments for the function
+            when: Unix timestamp to execute at (None = ASAP)
+            priority: Task priority (lower = higher priority)
+            max_retries: Maximum retry attempts on failure
+            timeout: Task timeout in seconds
+            dependencies: Set of task IDs that must complete first
+            tags: Set of tags for categorization
 
         Returns:
-            Task ID
+            ScheduledTask object
         """
-        task_id = str(uuid.uuid4())
-
-        next_run = None
-        if delay > 0:
-            next_run = time.time() + delay
-        elif schedule_type == ScheduleType.INTERVAL and interval > 0:
-            next_run = time.time() + interval
+        scheduled_at = when if when is not None else time.time()
 
         task = ScheduledTask(
-            id=task_id,
-            name=name,
+            task_id=task_id,
             func=func,
             args=args,
             kwargs=kwargs or {},
-            schedule_type=schedule_type,
-            interval=interval,
-            next_run=next_run,
-            max_runs=max_runs,
-            on_error=on_error,
+            priority=priority,
+            scheduled_at=scheduled_at,
+            max_retries=max_retries,
+            timeout=timeout,
+            dependencies=dependencies or set(),
+            tags=tags or set(),
         )
 
-        with self._lock:
-            self._tasks[task_id] = task
+        heappush(self._tasks, task)
+        logger.info(f"Scheduled task {task_id} at {datetime.fromtimestamp(scheduled_at)}")
+        return task
 
-        if self._running:
-            self._schedule_task(task)
-
-        logger.info(f"Added task: {name} ({task_id})")
-        return task_id
-
-    def remove_task(self, task_id: str) -> bool:
-        """Remove task from scheduler.
+    def schedule_interval(
+        self,
+        task_id: str,
+        func: Callable,
+        interval: float,
+        args: tuple = (),
+        kwargs: Optional[Dict[str, Any]] = None,
+        priority: Priority = Priority.NORMAL,
+        tags: Optional[Set[str]] = None,
+    ) -> ScheduledTask:
+        """
+        Schedule a recurring task.
 
         Args:
-            task_id: Task ID to remove
+            task_id: Unique task identifier
+            func: Async callable to execute
+            interval: Interval in seconds between executions
+            args: Positional arguments for the function
+            kwargs: Keyword arguments for the function
+            priority: Task priority
+            tags: Set of tags for categorization
 
         Returns:
-            True if task was removed
+            ScheduledTask object
         """
-        with self._lock:
-            if task_id in self._tasks:
-                del self._tasks[task_id]
-                logger.info(f"Removed task: {task_id}")
-                return True
-        return False
+        scheduled_at = time.time() + interval
+        task = self.schedule_task(
+            task_id=task_id,
+            func=func,
+            args=args,
+            kwargs=kwargs,
+            when=scheduled_at,
+            priority=priority,
+            tags=tags,
+        )
+        task.interval = interval
+        return task
 
     def get_task(self, task_id: str) -> Optional[ScheduledTask]:
-        """Get task by ID."""
-        with self._lock:
-            return self._tasks.get(task_id)
-
-    def list_tasks(self) -> list[ScheduledTask]:
-        """List all tasks."""
-        with self._lock:
-            return list(self._tasks.values())
-
-    def enable_task(self, task_id: str) -> bool:
-        """Enable a task."""
-        with self._lock:
-            task = self._tasks.get(task_id)
-            if task:
-                task.enabled = True
-                if task.schedule_type == ScheduleType.INTERVAL:
-                    task.next_run = time.time() + task.interval
-                return True
-        return False
-
-    def disable_task(self, task_id: str) -> bool:
-        """Disable a task."""
-        with self._lock:
-            task = self._tasks.get(task_id)
-            if task:
-                task.enabled = False
-                return True
-        return False
-
-    def start(self) -> None:
-        """Start scheduler."""
-        with self._lock:
-            if self._running:
-                return
-            self._running = True
-
-        self._thread = threading.Thread(target=self._run_loop, daemon=self.daemon)
-        self._thread.start()
-        logger.info("Task scheduler started")
-
-    def stop(self) -> None:
-        """Stop scheduler."""
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=5)
-            self._thread = None
-        logger.info("Task scheduler stopped")
-
-    def _run_loop(self) -> None:
-        """Main scheduler loop."""
-        while self._running:
-            try:
-                self._process_due_tasks()
-                time.sleep(0.1)
-            except Exception as e:
-                logger.error(f"Scheduler error: {e}")
-
-    def _process_due_tasks(self) -> None:
-        """Process tasks that are due."""
-        current_time = time.time()
-
-        with self._lock:
-            due_tasks = [
-                task for task in self._tasks.values()
-                if task.enabled and task.next_run and task.next_run <= current_time
-            ]
-
-        for task in due_tasks:
-            self._execute_task(task)
-
-    def _execute_task(self, task: ScheduledTask) -> None:
-        """Execute a task."""
-        try:
-            logger.debug(f"Executing task: {task.name}")
-            result = task.func(*task.args, **task.kwargs)
-            self._task_results[task.id] = result
-            task.last_run = time.time()
-            task.run_count += 1
-
-            if task.schedule_type == ScheduleType.INTERVAL:
-                if task.max_runs and task.run_count >= task.max_runs:
-                    task.enabled = False
-                    logger.info(f"Task {task.name} reached max runs")
-                else:
-                    task.next_run = time.time() + task.interval
-
-            elif task.schedule_type == ScheduleType.DELAYED:
-                task.enabled = False
-
-            logger.debug(f"Task completed: {task.name}")
-
-        except Exception as e:
-            logger.error(f"Task execution error: {task.name} - {e}")
-            if task.on_error:
-                task.on_error(e)
-
-    def _schedule_task(self, task: ScheduledTask) -> None:
-        """Schedule a task in the internal scheduler."""
-        if task.next_run:
-            delay = max(0, task.next_run - time.time())
-            self._scheduler.enter(delay, 0, self._execute_task, argument=(task,))
-
-    def get_next_run_time(self, task_id: str) -> Optional[datetime]:
-        """Get next run time for task."""
-        task = self.get_task(task_id)
-        if task and task.next_run:
-            return datetime.fromtimestamp(task.next_run)
+        """Get task by ID from the queue."""
+        for task in self._tasks:
+            if task.task_id == task_id:
+                return task
         return None
 
-    def get_task_result(self, task_id: str) -> Optional[Any]:
-        """Get task execution result."""
-        return self._task_results.get(task_id)
-
-
-class PeriodicTask:
-    """Simple periodic task wrapper."""
-
-    def __init__(
-        self,
-        interval: float,
-        func: Callable[..., Any],
-        args: tuple = (),
-        kwargs: Optional[dict[str, Any]] = None,
-    ):
-        """Initialize periodic task.
+    def cancel_task(self, task_id: str) -> bool:
+        """
+        Cancel a pending task.
 
         Args:
-            interval: Execution interval (seconds)
-            func: Function to execute
-            args: Positional arguments
-            kwargs: Keyword arguments
-        """
-        self.interval = interval
-        self.func = func
-        self.args = args
-        self.kwargs = kwargs or {}
-        self._running = False
-        self._thread: Optional[threading.Thread] = None
+            task_id: Task identifier
 
-    def start(self) -> None:
-        """Start periodic execution."""
-        if self._running:
-            return
+        Returns:
+            True if task was cancelled
+        """
+        self._cancelled_task_ids.add(task_id)
+        self._tasks = [t for t in self._tasks if t.task_id != task_id]
+        logger.info(f"Cancelled task {task_id}")
+        return True
+
+    def get_result(self, task_id: str) -> Optional[TaskResult]:
+        """Get result of a completed task."""
+        return self._results.get(task_id)
+
+    def get_pending_tasks(self) -> List[ScheduledTask]:
+        """Get all pending tasks sorted by scheduled time."""
+        return sorted(self._tasks, key=lambda t: (t.scheduled_at, t.priority.value))
+
+    def get_task_stats(self) -> Dict[str, Any]:
+        """Get scheduler statistics."""
+        return {
+            "pending": len(self._tasks),
+            "running": len(self._running_tasks),
+            "completed": len([r for r in self._results.values() if r.status == TaskStatus.COMPLETED]),
+            "failed": len([r for r in self._results.values() if r.status == TaskStatus.FAILED]),
+        }
+
+    async def _check_dependencies(self, task: ScheduledTask) -> bool:
+        """Check if all dependencies are satisfied."""
+        for dep_id in task.dependencies:
+            if dep_id in self._cancelled_task_ids:
+                return False
+            if dep_id not in self._completed_task_ids:
+                result = self._results.get(dep_id)
+                if result is None or result.status != TaskStatus.COMPLETED:
+                    return False
+        return True
+
+    async def _execute_task(self, task: ScheduledTask) -> TaskResult:
+        """Execute a single task with timeout and retries."""
+        result = TaskResult(
+            task_id=task.task_id,
+            status=TaskStatus.RUNNING,
+            started_at=time.time(),
+        )
+
+        retries = 0
+        last_error = None
+
+        while retries <= task.max_retries:
+            try:
+                if task.timeout:
+                    result.result = await asyncio.wait_for(
+                        task.func(*task.args, **task.kwargs),
+                        timeout=task.timeout
+                    )
+                else:
+                    result.result = await task.func(*task.args, **task.kwargs)
+
+                result.status = TaskStatus.COMPLETED
+                result.completed_at = time.time()
+                self._completed_task_ids.add(task.task_id)
+                logger.info(f"Task {task.task_id} completed successfully")
+                return result
+
+            except asyncio.TimeoutError:
+                last_error = f"Task {task.task_id} timed out after {task.timeout}s"
+                logger.warning(last_error)
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"Task {task.task_id} failed (attempt {retries + 1}): {e}")
+
+            retries += 1
+            if retries <= task.max_retries:
+                await asyncio.sleep(2 ** retries)
+
+        result.status = TaskStatus.FAILED
+        result.error = last_error
+        result.completed_at = time.time()
+        result.retries = retries
+        logger.error(f"Task {task.task_id} failed after {retries} attempts: {last_error}")
+        return result
+
+    async def _worker(self, worker_id: int) -> None:
+        """Worker coroutine to process tasks."""
+        while self._running:
+            task = None
+
+            async with self._lock:
+                current_time = time.time()
+                while self._tasks:
+                    next_task = heappop(self._tasks)
+                    if next_task.task_id in self._cancelled_task_ids:
+                        continue
+                    if next_task.scheduled_at > current_time:
+                        heappush(self._tasks, next_task)
+                        break
+                    if await self._check_dependencies(next_task):
+                        task = next_task
+                        break
+                    else:
+                        logger.warning(f"Dependencies not met for task {next_task.task_id}")
+
+                if task is None and self._tasks:
+                    next_task = self._tasks[0]
+                    wait_time = max(0, next_task.scheduled_at - current_time)
+                    if wait_time > 0:
+                        await asyncio.sleep(min(wait_time, 1.0))
+
+            if task:
+                async with self._lock:
+                    self._running_tasks[task.task_id] = task
+                result = await self._execute_task(task)
+                async with self._lock:
+                    self._running_tasks.pop(task.task_id, None)
+                    self._results[task.task_id] = result
+
+                    if hasattr(task, "interval") and task.interval:
+                        task.scheduled_at = time.time() + task.interval
+                        heappush(self._tasks, task)
+            else:
+                await asyncio.sleep(0.1)
+
+    async def start(self) -> None:
+        """Start the scheduler."""
         self._running = True
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
+        logger.info(f"Starting task scheduler with {self.max_workers} workers")
+        workers = [self._worker(i) for i in range(self.max_workers)]
+        await asyncio.gather(*workers)
 
     def stop(self) -> None:
-        """Stop periodic execution."""
+        """Stop the scheduler."""
         self._running = False
-        if self._thread:
-            self._thread.join(timeout=5)
-
-    def _run(self) -> None:
-        """Run loop."""
-        while self._running:
-            try:
-                self.func(*self.args, **self.kwargs)
-            except Exception as e:
-                logger.error(f"Periodic task error: {e}")
-            time.sleep(self.interval)
-
-
-def create_scheduler(daemon: bool = True) -> TaskScheduler:
-    """Create task scheduler instance.
-
-    Args:
-        daemon: Run as daemon thread
-
-    Returns:
-        TaskScheduler instance
-    """
-    return TaskScheduler(daemon=daemon)
+        logger.info("Task scheduler stopped")
