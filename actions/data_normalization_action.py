@@ -1,15 +1,15 @@
 """Data normalization action module for RabAI AutoClick.
 
 Provides data normalization operations:
-- DataNormalizationAction: Normalize numeric data
-- DataMinMaxNormalizeAction: Min-max normalization
-- DataZScoreNormalizeAction: Z-score normalization
-- DataRobustNormalizeAction: Robust scaling normalization
+- MinMaxNormalizerAction: Min-max normalization
+- ZScoreNormalizerAction: Z-score normalization
+- DecimalScalerAction: Decimal scaling normalization
+- RobustScalerAction: Robust scaling normalization
+- UnitVectorNormalizerAction: Unit vector normalization
 """
 
-import math
-from typing import Any, Dict, List, Optional
-from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+from collections import defaultdict
 
 import sys
 import os
@@ -19,247 +19,416 @@ sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class DataNormalizationAction(BaseAction):
-    """Normalize data using various methods."""
-    action_type = "data_normalization"
-    display_name = "数据归一化"
-    description = "多种数据归一化方法"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            method = params.get("method", "minmax")
-            column = params.get("column")
-            feature_range = params.get("feature_range", (0, 1))
-
-            if not data:
-                return ActionResult(success=False, message="data is required")
-
-            if isinstance(data, list) and isinstance(data[0], dict) and column:
-                values = [row.get(column) for row in data]
-            else:
-                values = list(data) if isinstance(data, list) else [data]
-
-            numeric = [v for v in values if v is not None and isinstance(v, (int, float))]
-            if not numeric:
-                return ActionResult(success=False, message="No numeric values found")
-
-            if method == "minmax":
-                result, stats = self._minmax_normalize(values, feature_range)
-            elif method == "zscore":
-                result, stats = self._zscore_normalize(values)
-            elif method == "robust":
-                result, stats = self._robust_normalize(values)
-            elif method == "log":
-                result, stats = self._log_normalize(values)
-            elif method == "decimal":
-                result, stats = self._decimal_normalize(values)
-            else:
-                result, stats = self._minmax_normalize(values, feature_range)
-
-            if isinstance(data, list) and isinstance(data[0], dict) and column:
-                for i, row in enumerate(data):
-                    row[column] = result[i]
-
-            return ActionResult(
-                success=True,
-                message=f"Normalized with {method}",
-                data={"data": result, "stats": stats, "method": method}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Normalization error: {e}")
-
-    def _minmax_normalize(self, values: List[float], feature_range: tuple) -> tuple:
-        """Min-max normalization."""
-        numeric = [v for v in values if v is not None]
-        if not numeric:
-            return values, {}
-        min_v, max_v = min(numeric), max(numeric)
-        range_v = max_v - min_v
-        a, b = feature_range
-        if range_v == 0:
-            result = [a for _ in values]
-        else:
-            result = [a + (v - min_v) / range_v * (b - a) if v is not None else None for v in values]
-        return result, {"min": min_v, "max": max_v, "range": range_v}
-
-    def _zscore_normalize(self, values: List[float]) -> tuple:
-        """Z-score normalization."""
-        numeric = [v for v in values if v is not None]
-        if not numeric:
-            return values, {}
-        mean = sum(numeric) / len(numeric)
-        variance = sum((v - mean) ** 2 for v in numeric) / len(numeric)
-        std = math.sqrt(variance)
-        result = [(v - mean) / std if v is not None else None for v in values] if std != 0 else values
-        return result, {"mean": mean, "std": std}
-
-    def _robust_normalize(self, values: List[float]) -> tuple:
-        """Robust scaling normalization."""
-        numeric = sorted([v for v in values if v is not None])
-        if not numeric:
-            return values, {}
-        q1 = numeric[len(numeric) // 4]
-        q3 = numeric[3 * len(numeric) // 4]
-        iqr = q3 - q1
-        median = numeric[len(numeric) // 2]
-        result = [(v - median) / iqr if v is not None and iqr != 0 else None for v in values]
-        return result, {"median": median, "q1": q1, "q3": q3, "iqr": iqr}
-
-    def _log_normalize(self, values: List[float]) -> tuple:
-        """Log normalization."""
-        numeric = [v for v in values if v is not None and v > 0]
-        if not numeric:
-            return values, {}
-        result = [math.log(v) if v is not None and v > 0 else None for v in values]
-        return result, {"log_transformed": True}
-
-    def _decimal_normalize(self, values: List[float]) -> tuple:
-        """Decimal scaling normalization."""
-        numeric = [v for v in values if v is not None]
-        if not numeric:
-            return values, {}
-        max_abs = max(abs(v) for v in numeric)
-        if max_abs == 0:
-            return values, {}
-        digits = len(str(int(max_abs)))
-        divisor = 10 ** digits
-        result = [v / divisor if v is not None else None for v in values]
-        return result, {"divisor": divisor, "digits": digits}
-
-
-class DataMinMaxNormalizeAction(BaseAction):
+class MinMaxNormalizerAction(BaseAction):
     """Min-max normalization."""
-    action_type = "data_minmax_normalize"
-    display_name = "Min-Max归一化"
-    description = "Min-Max归一化到指定范围"
-
+    action_type = "minmax_normalizer"
+    display_name = "最小最大归一化"
+    description = "将数据归一化到指定范围"
+    
+    def __init__(self):
+        super().__init__()
+    
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
             data = params.get("data", [])
-            column = params.get("column")
-            min_val = params.get("min", 0.0)
-            max_val = params.get("max", 1.0)
-
+            fields = params.get("fields", [])
+            feature_range = params.get("feature_range", (0, 1))
+            
             if not data:
-                return ActionResult(success=False, message="data is required")
-
-            if isinstance(data, list) and isinstance(data[0], dict) and column:
-                values = [row.get(column) for row in data]
-            else:
-                values = list(data) if isinstance(data, list) else [data]
-
-            numeric = [v for v in values if v is not None and isinstance(v, (int, float))]
-            if not numeric:
-                return ActionResult(success=False, message="No numeric values")
-
-            data_min, data_max = min(numeric), max(numeric)
+                return ActionResult(success=False, message="No data provided")
+            
+            if not fields:
+                return ActionResult(success=False, message="No fields specified")
+            
+            min_val, max_val = feature_range
+            result = self._normalize(data, fields, min_val, max_val)
+            
+            return ActionResult(
+                success=True,
+                message="Min-max normalization complete",
+                data={
+                    "original_count": len(data),
+                    "fields_normalized": fields,
+                    "feature_range": feature_range,
+                    "normalized_data": result[:100]
+                }
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+    
+    def _normalize(self, data: List[Dict], fields: List[str], 
+                   min_val: float, max_val: float) -> List[Dict]:
+        result = []
+        
+        for field in fields:
+            values = [item.get(field, 0) for item in data if isinstance(item, dict)]
+            
+            if not values:
+                continue
+            
+            data_min = min(values)
+            data_max = max(values)
             data_range = data_max - data_min
-
+            
             if data_range == 0:
-                result = [(min_val + max_val) / 2 for _ in values]
-            else:
-                result = [min_val + (v - data_min) / data_range * (max_val - min_val) if v is not None else None for v in values]
-
-            if isinstance(data, list) and isinstance(data[0], dict) and column:
-                for i, row in enumerate(data):
-                    row[column] = result[i]
-
-            return ActionResult(
-                success=True,
-                message=f"Min-max normalized: [{data_min:.2f}, {data_max:.2f}] → [{min_val}, {max_val}]",
-                data={"data": result, "original_min": data_min, "original_max": data_max, "target_range": (min_val, max_val)}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"MinMax normalize error: {e}")
+                continue
+            
+            scale = (max_val - min_val) / data_range
+            
+            for item in data:
+                if isinstance(item, dict) and field in item:
+                    item[field] = ((item[field] - data_min) * scale) + min_val
+        
+        return data
 
 
-class DataZScoreNormalizeAction(BaseAction):
+class ZScoreNormalizerAction(BaseAction):
     """Z-score normalization."""
-    action_type = "data_zscore_normalize"
-    display_name = "Z-Score归一化"
-    description = "标准化为均值0标准差1"
-
+    action_type = "zscore_normalizer"
+    display_name = "Z分数归一化"
+    description = "使用Z分数进行数据归一化"
+    
+    def __init__(self):
+        super().__init__()
+    
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
             data = params.get("data", [])
-            column = params.get("column")
-
+            fields = params.get("fields", [])
+            
             if not data:
-                return ActionResult(success=False, message="data is required")
-
-            if isinstance(data, list) and isinstance(data[0], dict) and column:
-                values = [row.get(column) for row in data]
-            else:
-                values = list(data) if isinstance(data, list) else [data]
-
-            numeric = [v for v in values if v is not None and isinstance(v, (int, float))]
-            if not numeric:
-                return ActionResult(success=False, message="No numeric values")
-
-            mean = sum(numeric) / len(numeric)
-            variance = sum((v - mean) ** 2 for v in numeric) / len(numeric)
-            std = math.sqrt(variance)
-
+                return ActionResult(success=False, message="No data provided")
+            
+            if not fields:
+                return ActionResult(success=False, message="No fields specified")
+            
+            result = self._normalize(data, fields)
+            
+            return ActionResult(
+                success=True,
+                message="Z-score normalization complete",
+                data={
+                    "original_count": len(data),
+                    "fields_normalized": fields,
+                    "normalized_data": result[:100]
+                }
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+    
+    def _normalize(self, data: List[Dict], fields: List[str]) -> List[Dict]:
+        for field in fields:
+            values = [item.get(field, 0) for item in data if isinstance(item, dict)]
+            
+            if not values:
+                continue
+            
+            mean = sum(values) / len(values)
+            variance = sum((v - mean) ** 2 for v in values) / len(values)
+            std = variance ** 0.5
+            
             if std == 0:
-                return ActionResult(success=False, message="Standard deviation is zero")
-
-            result = [(v - mean) / std if v is not None else None for v in values]
-
-            if isinstance(data, list) and isinstance(data[0], dict) and column:
-                for i, row in enumerate(data):
-                    row[column] = result[i]
-
-            return ActionResult(
-                success=True,
-                message=f"Z-score normalized: mean={mean:.4f}, std={std:.4f}",
-                data={"data": result, "mean": mean, "std": std}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Z-score normalize error: {e}")
+                continue
+            
+            for item in data:
+                if isinstance(item, dict) and field in item:
+                    item[field] = (item[field] - mean) / std
+        
+        return data
 
 
-class DataRobustNormalizeAction(BaseAction):
-    """Robust scaling normalization."""
-    action_type = "data_robust_normalize"
-    display_name = "稳健归一化"
-    description = "基于中位数和IQR的稳健归一化"
-
+class DecimalScalerAction(BaseAction):
+    """Decimal scaling normalization."""
+    action_type = "decimal_scaler"
+    display_name = "小数点缩放归一化"
+    description = "使用小数点缩放进行归一化"
+    
+    def __init__(self):
+        super().__init__()
+    
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
             data = params.get("data", [])
-            column = params.get("column")
-
+            fields = params.get("fields", [])
+            
             if not data:
-                return ActionResult(success=False, message="data is required")
-
-            if isinstance(data, list) and isinstance(data[0], dict) and column:
-                values = [row.get(column) for row in data]
-            else:
-                values = list(data) if isinstance(data, list) else [data]
-
-            numeric = sorted([v for v in values if v is not None and isinstance(v, (int, float))])
-            if len(numeric) < 4:
-                return ActionResult(success=False, message="Need at least 4 numeric values")
-
-            q1 = numeric[len(numeric) // 4]
-            q3 = numeric[3 * len(numeric) // 4]
-            iqr = q3 - q1
-            median = numeric[len(numeric) // 2]
-
-            if iqr == 0:
-                return ActionResult(success=False, message="IQR is zero")
-
-            result = [(v - median) / iqr if v is not None else None for v in values]
-
-            if isinstance(data, list) and isinstance(data[0], dict) and column:
-                for i, row in enumerate(data):
-                    row[column] = result[i]
-
+                return ActionResult(success=False, message="No data provided")
+            
+            if not fields:
+                return ActionResult(success=False, message="No fields specified")
+            
+            result, scaling_factors = self._normalize(data, fields)
+            
             return ActionResult(
                 success=True,
-                message=f"Robust normalized: median={median:.4f}, IQR={iqr:.4f}",
-                data={"data": result, "median": median, "q1": q1, "q3": q3, "iqr": iqr}
+                message="Decimal scaling normalization complete",
+                data={
+                    "original_count": len(data),
+                    "fields_normalized": fields,
+                    "scaling_factors": scaling_factors,
+                    "normalized_data": result[:100]
+                }
             )
         except Exception as e:
-            return ActionResult(success=False, message=f"Robust normalize error: {e}")
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+    
+    def _normalize(self, data: List[Dict], fields: List[str]) -> Tuple[List[Dict], Dict]:
+        scaling_factors = {}
+        
+        for field in fields:
+            values = [item.get(field, 0) for item in data if isinstance(item, dict)]
+            
+            if not values:
+                continue
+            
+            max_abs = max(abs(v) for v in values)
+            
+            if max_abs == 0:
+                continue
+            
+            j = 1
+            while max_abs >= 1:
+                max_abs /= 10
+                j *= 10
+            while max_abs < 0.1:
+                max_abs *= 10
+                j /= 10
+            
+            scaling_factors[field] = j
+            
+            for item in data:
+                if isinstance(item, dict) and field in item:
+                    item[field] = item[field] * j
+        
+        return data, scaling_factors
+
+
+class RobustScalerAction(BaseAction):
+    """Robust scaling normalization."""
+    action_type = "robust_scaler"
+    display_name = "鲁棒缩放归一化"
+    description = "使用中位数和四分位数进行鲁棒缩放"
+    
+    def __init__(self):
+        super().__init__()
+    
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            fields = params.get("fields", [])
+            
+            if not data:
+                return ActionResult(success=False, message="No data provided")
+            
+            if not fields:
+                return ActionResult(success=False, message="No fields specified")
+            
+            result = self._normalize(data, fields)
+            
+            return ActionResult(
+                success=True,
+                message="Robust scaling normalization complete",
+                data={
+                    "original_count": len(data),
+                    "fields_normalized": fields,
+                    "normalized_data": result[:100]
+                }
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+    
+    def _normalize(self, data: List[Dict], fields: List[str]) -> List[Dict]:
+        for field in fields:
+            values = sorted([item.get(field, 0) for item in data if isinstance(item, dict)])
+            
+            if not values:
+                continue
+            
+            median = values[len(values) // 2]
+            
+            q1_idx = len(values) // 4
+            q3_idx = 3 * len(values) // 4
+            iqr = values[q3_idx] - values[q1_idx]
+            
+            if iqr == 0:
+                continue
+            
+            for item in data:
+                if isinstance(item, dict) and field in item:
+                    item[field] = (item[field] - median) / iqr
+        
+        return data
+
+
+class UnitVectorNormalizerAction(BaseAction):
+    """Unit vector normalization."""
+    action_type = "unit_vector_normalizer"
+    display_name = "单位向量归一化"
+    description = "将数据归一化为单位向量"
+    
+    def __init__(self):
+        super().__init__()
+    
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            fields = params.get("fields", [])
+            norm_type = params.get("norm_type", "l2")
+            
+            if not data:
+                return ActionResult(success=False, message="No data provided")
+            
+            if not fields:
+                return ActionResult(success=False, message="No fields specified")
+            
+            result = self._normalize(data, fields, norm_type)
+            
+            return ActionResult(
+                success=True,
+                message=f"Unit vector normalization (L{norm_type}) complete",
+                data={
+                    "original_count": len(data),
+                    "fields_normalized": fields,
+                    "norm_type": norm_type,
+                    "normalized_data": result[:100]
+                }
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+    
+    def _normalize(self, data: List[Dict], fields: List[str], norm_type: str) -> List[Dict]:
+        if norm_type == "l2":
+            for item in data:
+                if isinstance(item, dict):
+                    values = [item.get(f, 0) for f in fields]
+                    magnitude = sum(v ** 2 for v in values) ** 0.5
+                    
+                    if magnitude > 0:
+                        for f in fields:
+                            item[f] = item.get(f, 0) / magnitude
+        elif norm_type == "l1":
+            for item in data:
+                if isinstance(item, dict):
+                    values = [abs(item.get(f, 0)) for f in fields]
+                    norm = sum(values)
+                    
+                    if norm > 0:
+                        for f in fields:
+                            item[f] = item.get(f, 0) / norm
+        elif norm_type == "max":
+            for item in data:
+                if isinstance(item, dict):
+                    values = [abs(item.get(f, 0)) for f in fields]
+                    max_val = max(values) if values else 1
+                    
+                    if max_val > 0:
+                        for f in fields:
+                            item[f] = item.get(f, 0) / max_val
+        
+        return data
+
+
+class LogNormalizerAction(BaseAction):
+    """Log transformation normalization."""
+    action_type = "log_normalizer"
+    display_name = "对数归一化"
+    description = "使用对数变换进行归一化"
+    
+    def __init__(self):
+        super().__init__()
+    
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            fields = params.get("fields", [])
+            log_base = params.get("log_base", "natural")
+            
+            if not data:
+                return ActionResult(success=False, message="No data provided")
+            
+            if not fields:
+                return ActionResult(success=False, message="No fields specified")
+            
+            result = self._normalize(data, fields, log_base)
+            
+            return ActionResult(
+                success=True,
+                message="Log normalization complete",
+                data={
+                    "original_count": len(data),
+                    "fields_normalized": fields,
+                    "log_base": log_base,
+                    "normalized_data": result[:100]
+                }
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+    
+    def _normalize(self, data: List[Dict], fields: List[str], log_base: str) -> List[Dict]:
+        import math
+        
+        for field in fields:
+            for item in data:
+                if isinstance(item, dict) and field in item:
+                    value = item[field]
+                    
+                    if isinstance(value, (int, float)) and value > 0:
+                        if log_base == "natural":
+                            item[field] = math.log(value)
+                        elif log_base == "10":
+                            item[field] = math.log10(value)
+                        elif log_base == "2":
+                            item[field] = math.log2(value)
+        
+        return data
+
+
+class PowerNormalizerAction(BaseAction):
+    """Power transformation normalization."""
+    action_type = "power_normalizer"
+    display_name = "幂次归一化"
+    description = "使用幂次变换进行归一化"
+    
+    def __init__(self):
+        super().__init__()
+    
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            fields = params.get("fields", [])
+            power = params.get("power", 0.5)
+            
+            if not data:
+                return ActionResult(success=False, message="No data provided")
+            
+            if not fields:
+                return ActionResult(success=False, message="No fields specified")
+            
+            result = self._normalize(data, fields, power)
+            
+            return ActionResult(
+                success=True,
+                message=f"Power normalization (power={power}) complete",
+                data={
+                    "original_count": len(data),
+                    "fields_normalized": fields,
+                    "power": power,
+                    "normalized_data": result[:100]
+                }
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+    
+    def _normalize(self, data: List[Dict], fields: List[str], power: float) -> List[Dict]:
+        for field in fields:
+            for item in data:
+                if isinstance(item, dict) and field in item:
+                    value = item[field]
+                    
+                    if isinstance(value, (int, float)):
+                        if power == 0:
+                            item[field] = 0 if value == 0 else 1
+                        else:
+                            item[field] = value ** power
+        
+        return data
