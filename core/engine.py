@@ -314,6 +314,14 @@ class FlowEngine:
             
             result: ActionResult = action.execute(self.context, params)
             
+            # Check if stop was requested during action execution
+            with self._state_lock:
+                if self._stop_requested:
+                    return ActionResult(
+                        success=False,
+                        message='Workflow stopped'
+                    )
+            
             result.duration = time.time() - start_time
             
             # Store output to context variable if specified

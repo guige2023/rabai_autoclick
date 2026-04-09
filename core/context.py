@@ -118,7 +118,8 @@ class ContextManager:
         
         def replace_var(match) -> str:
             expr = match.group(1).strip()
-            return str(self._evaluate_expression(expr))
+            result = self._evaluate_expression(expr)
+            return str(result) if not isinstance(result, str) else result
         
         return re.sub(pattern, replace_var, text)
     
