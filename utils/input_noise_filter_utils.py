@@ -1,271 +1,268 @@
 """
-Input Noise Filter Utilities for UI Automation.
+Input noise filter utilities.
 
-This module provides utilities for filtering noise from
-input events in UI automation workflows.
-
-Author: AI Assistant
-License: MIT
+This module provides noise filtering utilities for raw input data,
+including Kalman filters, outlier detection, and signal smoothing.
 """
 
 from __future__ import annotations
 
-import time
+import math
+from typing import List, Tuple, Optional, Callable
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any, Callable
-from enum import Enum
 
 
-class NoiseType(Enum):
-    """Types of input noise."""
-    MICRO_MOVEMENT = "micro_movement"
-    RAPID_FLICKER = "rapid_flicker"
-    GHOST_CLICK = "ghost_click"
-    STUCK_KEY = "stuck_key"
-    DRIFT = "drift"
+# Type aliases
+Point2D = Tuple[float, float]
+InputPoint = Tuple[float, float, float]  # x, y, timestamp_ms
 
 
 @dataclass
-class InputEvent:
-    """Represents an input event."""
-    event_type: str
-    timestamp: float
-    x: Optional[float] = None
-    y: Optional[float] = None
-    key: Optional[str] = None
-    value: Any = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+class KalmanFilterState:
+    """State of a 1D Kalman filter."""
+    estimate: float = 0.0
+    error_covariance: float = 1.0
+    process_noise: float = 0.1
+    measurement_noise: float = 1.0
 
 
 @dataclass
-class FilterConfig:
-    """Configuration for noise filtering."""
-    micro_movement_threshold: float = 2.0
-    flicker_interval_ms: float = 50.0
-    ghost_click_delay_ms: float = 100.0
-    drift_threshold: float = 5.0
-    stuck_key_timeout_ms: float = 5000.0
+class FilteredResult:
+    """Result of filtering an input point."""
+    x: float
+    y: float
+    timestamp_ms: float
+    is_outlier: bool = False
+    confidence: float = 1.0
 
 
-class InputNoiseFilter:
+class KalmanFilter2D:
+    """2D Kalman filter for input smoothing."""
+
+    def __init__(self, process_noise: float = 0.1, measurement_noise: float = 1.0):
+        self._state_x = KalmanFilterState(process_noise=process_noise, measurement_noise=measurement_noise)
+        self._state_y = KalmanFilterState(process_noise=process_noise, measurement_noise=measurement_noise)
+        self._initialized = False
+
+    def update(self, x: float, y: float) -> Tuple[float, float]:
+        """
+        Update filter with new measurement.
+
+        Args:
+            x: X coordinate.
+            y: Y coordinate.
+
+        Returns:
+            Filtered (x, y).
+        """
+        if not self._initialized:
+            self._state_x.estimate = x
+            self._state_y.estimate = y
+            self._initialized = True
+            return x, y
+
+        # Update X
+        self._state_x.error_covariance += self._state_x.process_noise
+        kalman_gain_x = self._state_x.error_covariance / (self._state_x.error_covariance + self._state_x.measurement_noise)
+        self._state_x.estimate += kalman_gain_x * (x - self._state_x.estimate)
+        self._state_x.error_covariance *= (1.0 - kalman_gain_x)
+
+        # Update Y
+        self._state_y.error_covariance += self._state_y.process_noise
+        kalman_gain_y = self._state_y.error_covariance / (self._state_y.error_covariance + self._state_y.measurement_noise)
+        self._state_y.estimate += kalman_gain_y * (y - self._state_y.estimate)
+        self._state_y.error_covariance *= (1.0 - kalman_gain_y)
+
+        return self._state_x.estimate, self._state_y.estimate
+
+    def reset(self) -> None:
+        """Reset filter state."""
+        self._initialized = False
+        self._state_x = KalmanFilterState()
+        self._state_y = KalmanFilterState()
+
+
+def moving_average_filter(
+    points: List[Point2D],
+    window_size: int = 3,
+) -> List[Point2D]:
     """
-    Filter noise from input events.
-    """
-
-    def __init__(self, config: Optional[FilterConfig] = None):
-        """
-        Initialize input noise filter.
-
-        Args:
-            config: Filter configuration
-        """
-        self.config = config or FilterConfig()
-        self._last_mouse_pos: Optional[tuple] = None
-        self._last_mouse_time: float = 0.0
-        self._last_click_time: float = 0.0
-        self._last_click_pos: Optional[tuple] = None
-        self._held_keys: Dict[str, float] = {}
-
-    def filter_mouse_move(self, event: InputEvent) -> Optional[InputEvent]:
-        """
-        Filter noise from mouse move events.
-
-        Args:
-            event: Mouse move event
-
-        Returns:
-            Filtered event or None if filtered out
-        """
-        if event.x is None or event.y is None:
-            return event
-
-        if self._last_mouse_pos is None:
-            self._last_mouse_pos = (event.x, event.y)
-            self._last_mouse_time = event.timestamp
-            return event
-
-        dx = event.x - self._last_mouse_pos[0]
-        dy = event.y - self._last_mouse_pos[1]
-        distance = (dx * dx + dy * dy) ** 0.5
-
-        dt = event.timestamp - self._last_mouse_time
-
-        if distance < self.config.micro_movement_threshold:
-            if dt < 0.1:
-                self._last_mouse_pos = (event.x, event.y)
-                self._last_mouse_time = event.timestamp
-                return None
-
-        self._last_mouse_pos = (event.x, event.y)
-        self._last_mouse_time = event.timestamp
-        return event
-
-    def filter_click(self, event: InputEvent) -> Optional[InputEvent]:
-        """
-        Filter noise from click events.
-
-        Args:
-            event: Click event
-
-        Returns:
-            Filtered event or None if filtered out
-        """
-        if self._last_click_pos is not None and event.x is not None and event.y is not None:
-            dx = event.x - self._last_click_pos[0]
-            dy = event.y - self._last_click_pos[1]
-            distance = (dx * dx + dy * dy) ** 0.5
-
-            dt_ms = (event.timestamp - self._last_click_time) * 1000
-
-            if distance < self.config.ghost_click_delay_ms and dt_ms < self.config.ghost_click_delay_ms:
-                return None
-
-        self._last_click_pos = (event.x, event.y)
-        self._last_click_time = event.timestamp
-        return event
-
-    def filter_key_event(self, event: InputEvent) -> Optional[InputEvent]:
-        """
-        Filter noise from keyboard events.
-
-        Args:
-            event: Key event
-
-        Returns:
-            Filtered event or None if filtered out
-        """
-        if event.key is None:
-            return event
-
-        if event.event_type == "key_down":
-            if event.key in self._held_keys:
-                prev_time = self._held_keys[event.key]
-                if event.timestamp - prev_time < 0.05:
-                    return None
-            self._held_keys[event.key] = event.timestamp
-            return event
-
-        elif event.event_type == "key_up":
-            if event.key not in self._held_keys:
-                return None
-
-            held_duration = event.timestamp - self._held_keys[event.key]
-            timeout_ms = self.config.stuck_key_timeout_ms / 1000.0
-
-            if held_duration > timeout_ms:
-                return None
-
-            del self._held_keys[event.key]
-            return event
-
-        return event
-
-    def filter(self, event: InputEvent) -> Optional[InputEvent]:
-        """
-        Filter any input event.
-
-        Args:
-            event: Input event
-
-        Returns:
-            Filtered event or None
-        """
-        if event.event_type in ("mouse_move", "mousemove"):
-            return self.filter_mouse_move(event)
-        elif event.event_type in ("click", "mouse_down", "mouse_up"):
-            return self.filter_click(event)
-        elif event.event_type.startswith("key"):
-            return self.filter_key_event(event)
-        return event
-
-
-class ChainedNoiseFilter:
-    """
-    Chain multiple noise filters together.
-    """
-
-    def __init__(self):
-        """Initialize chained filter."""
-        self._filters: List[Callable[[InputEvent], Optional[InputEvent]]] = []
-
-    def add_filter(
-        self,
-        filter_func: Callable[[InputEvent], Optional[InputEvent]]
-    ) -> 'ChainedNoiseFilter':
-        """
-        Add a filter to the chain.
-
-        Args:
-            filter_func: Filter function
-
-        Returns:
-            Self for chaining
-        """
-        self._filters.append(filter_func)
-        return self
-
-    def filter(self, event: InputEvent) -> Optional[InputEvent]:
-        """
-        Apply all filters in chain.
-
-        Args:
-            event: Input event
-
-        Returns:
-            Filtered event or None
-        """
-        result = event
-        for filter_func in self._filters:
-            if result is None:
-                return None
-            result = filter_func(result)
-        return result
-
-    def filter_many(self, events: List[InputEvent]) -> List[InputEvent]:
-        """
-        Filter multiple events.
-
-        Args:
-            events: List of events
-
-        Returns:
-            Filtered events
-        """
-        return [e for e in events if self.filter(e) is not None]
-
-
-def detect_noise_type(event: InputEvent, context: Dict[str, Any]) -> List[NoiseType]:
-    """
-    Detect types of noise in an event.
+    Apply moving average filter to trajectory.
 
     Args:
-        event: Input event
-        context: Context with history
+        points: Input trajectory.
+        window_size: Filter window size (must be odd).
 
     Returns:
-        List of detected noise types
+        Filtered trajectory.
     """
-    noise_types = []
+    if window_size < 1:
+        return points[:]
+    if window_size % 2 == 0:
+        window_size += 1
+    if len(points) < window_size:
+        return points[:]
 
-    if event.event_type == "mouse_move":
-        prev_pos = context.get("prev_mouse_pos")
-        prev_time = context.get("prev_mouse_time", 0.0)
+    half = window_size // 2
+    result: List[Point2D] = []
 
-        if prev_pos and event.x is not None:
-            dx = event.x - prev_pos[0]
-            dy = event.y - prev_pos[1]
-            distance = (dx * dx + dy * dy) ** 0.5
+    for i in range(len(points)):
+        start = max(0, i - half)
+        end = min(len(points), i + half + 1)
+        window = points[start:end]
+        avg_x = sum(p[0] for p in window) / len(window)
+        avg_y = sum(p[1] for p in window) / len(window)
+        result.append((avg_x, avg_y))
 
-            if distance < 2.0:
-                noise_types.append(NoiseType.MICRO_MOVEMENT)
+    return result
 
-            dt = event.timestamp - prev_time
-            if dt < 0.05 and distance < 10.0:
-                noise_types.append(NoiseType.RAPID_FLICKER)
 
-    elif event.event_type == "key_down":
-        held_keys = context.get("held_keys", {})
-        if event.key in held_keys:
-            noise_types.append(NoiseType.STUCK_KEY)
+def exponential_moving_average_filter(
+    points: List[Point2D],
+    alpha: float = 0.3,
+) -> List[Point2D]:
+    """
+    Apply exponential moving average filter.
 
-    return noise_types
+    Args:
+        points: Input trajectory.
+        alpha: Smoothing factor (0-1, lower = smoother).
+
+    Returns:
+        Filtered trajectory.
+    """
+    if not points or alpha <= 0 or alpha > 1:
+        return points[:]
+
+    result: List[Point2D] = [points[0]]
+    for point in points[1:]:
+        prev = result[-1]
+        filtered_x = alpha * point[0] + (1 - alpha) * prev[0]
+        filtered_y = alpha * point[1] + (1 - alpha) * prev[1]
+        result.append((filtered_x, filtered_y))
+
+    return result
+
+
+def detect_outliers(
+    points: List[Point2D],
+    threshold_std: float = 2.0,
+) -> List[bool]:
+    """
+    Detect outlier points based on velocity discontinuities.
+
+    Args:
+        points: Input trajectory.
+        threshold_std: Number of standard deviations for outlier threshold.
+
+    Returns:
+        List of booleans indicating if each point is an outlier.
+    """
+    if len(points) < 3:
+        return [False] * len(points)
+
+    # Compute velocities
+    velocities: List[float] = []
+    for i in range(1, len(points)):
+        dx = points[i][0] - points[i - 1][0]
+        dy = points[i][1] - points[i - 1][1]
+        velocities.append(math.sqrt(dx * dx + dy * dy))
+
+    if not velocities:
+        return [False] * len(points)
+
+    mean_vel = sum(velocities) / len(velocities)
+    variance = sum((v - mean_vel) ** 2 for v in velocities) / len(velocities)
+    std_vel = math.sqrt(variance)
+
+    threshold = threshold_std * std_vel
+
+    # Mark outliers
+    outliers = [False]  # First point is never an outlier
+    for i in range(1, len(velocities) + 1):
+        if i < len(velocities) and velocities[i - 1] > mean_vel + threshold:
+            outliers.append(True)
+        else:
+            outliers.append(False)
+
+    # Pad if needed
+    while len(outliers) < len(points):
+        outliers.append(False)
+
+    return outliers
+
+
+def filter_outliers(
+    points: List[Point2D],
+    threshold_std: float = 2.0,
+) -> List[Point2D]:
+    """
+    Remove outlier points from trajectory.
+
+    Args:
+        points: Input trajectory.
+        threshold_std: Outlier detection threshold.
+
+    Returns:
+        Filtered trajectory with outliers removed.
+    """
+    outliers = detect_outliers(points, threshold_std)
+    return [p for p, is_outlier in zip(points, outliers) if not is_outlier]
+
+
+def apply_savgol_filter(
+    points: List[Point2D],
+    window_size: int = 5,
+    polynomial_order: int = 2,
+) -> List[Point2D]:
+    """
+    Apply Savitzky-Golay filter for smoothing.
+
+    Args:
+        points: Input trajectory.
+        window_size: Must be odd and >= polynomial_order + 2.
+        polynomial_order: Polynomial order.
+
+    Returns:
+        Filtered trajectory.
+    """
+    if len(points) < window_size:
+        return points[:]
+    if window_size % 2 == 0:
+        window_size += 1
+    if polynomial_order >= window_size:
+        polynomial_order = window_size - 1
+
+    half = window_size // 2
+    result: List[Point2D] = []
+
+    for i in range(len(points)):
+        start = max(0, i - half)
+        end = min(len(points), i + half + 1)
+        window = points[start:end]
+        n = len(window)
+
+        # Fit polynomial in x and y separately (simplified)
+        xs = [p[0] for p in window]
+        ys = [p[1] for p in window]
+        indices = list(range(n))
+
+        # Simple linear fit for smoothing
+        sum_x = sum(indices)
+        sum_x2 = sum(i ** 2 for i in indices)
+        sum_yx = sum(ys[j] * indices[j] for j in range(n))
+        sum_y = sum(ys)
+        sum_xy = sum(xs[j] * indices[j] for j in range(n))
+
+        denom = n * sum_x2 - sum_x * sum_x
+        if abs(denom) < 1e-10:
+            result.append((sum_x / n, sum_y / n))
+        else:
+            a_x = (n * sum_xy - sum_x * sum_y) / denom
+            b_x = (sum_y - a_x * sum_x) / n
+            a_y = (n * sum_yx - sum_x * sum_y) / denom
+            b_y = (sum_y - a_y * sum_x) / n
+            mid = indices[n // 2]
+            result.append((a_x * mid + b_x, a_y * mid + b_y))
+
+    return result
