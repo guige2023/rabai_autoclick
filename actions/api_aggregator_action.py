@@ -1,251 +1,222 @@
-"""
-API Aggregator Action.
+"""API response aggregator for combining multiple API results.
 
-Provides API response aggregation.
-Supports:
-- Parallel API calls
-- Response merging
-- Error handling
-- Timeout management
+This module provides response aggregation:
+- Merge results from multiple APIs
+- Fan-out/fan-in patterns
+- Result deduplication
+- Conflict resolution
+
+Example:
+    >>> from actions.api_aggregator_action import ResponseAggregator
+    >>> aggregator = ResponseAggregator()
+    >>> result = aggregator.aggregate([api1(), api2()])
 """
 
-from typing import Dict, List, Optional, Any, Callable, Awaitable
-from dataclasses import dataclass, field
-import asyncio
+from __future__ import annotations
+
 import logging
-import json
-import time
+from typing import Any, Callable, Optional
+from dataclasses import dataclass, field
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class AggregationRequest:
-    """Aggregation request definition."""
-    endpoint: str
-    method: str = "GET"
-    params: Optional[Dict[str, Any]] = None
-    headers: Optional[Dict[str, str]] = None
-    body: Optional[Any] = None
-    timeout: float = 30.0
+class AggregationConfig:
+    """Configuration for aggregation."""
+    dedup_by: Optional[str] = None
+    merge_strategy: str = "first"
+    conflict_resolver: Optional[Callable[[Any, Any], Any]] = None
 
 
-@dataclass
-class AggregationResult:
-    """Result of an aggregation."""
-    endpoint: str
-    success: bool
-    status_code: Optional[int] = None
-    data: Any = None
-    error: Optional[str] = None
-    duration_ms: float = 0.0
+class ResponseAggregator:
+    """Aggregate API responses.
 
-
-@dataclass
-class AggregatedResponse:
-    """Combined response from multiple APIs."""
-    results: List[AggregationResult]
-    total_duration_ms: float
-    success_count: int
-    failure_count: int
-    combined_data: Dict[str, Any] = field(default_factory=dict)
-
-
-class ApiAggregatorAction:
+    Example:
+        >>> agg = ResponseAggregator()
+        >>> agg.add_response(api1_response)
+        >>> agg.add_response(api2_response)
+        >>> merged = agg.merge()
     """
-    API Aggregator Action.
-    
-    Provides API aggregation with support for:
-    - Parallel API calls
-    - Response merging by key
-    - Partial failure handling
-    - Timeout management
+
+    def __init__(self, config: Optional[AggregationConfig] = None) -> None:
+        self.config = config or AggregationConfig()
+        self._responses: list[Any] = []
+        self._metadata: dict[str, Any] = {}
+
+    def add_response(
+        self,
+        response: Any,
+        source: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Add a response to aggregate.
+
+        Args:
+            response: Response data.
+            source: Optional source identifier.
+            metadata: Optional metadata for this response.
+        """
+        self._responses.append(response)
+        if metadata:
+            self._metadata[source or len(self._responses)] = metadata
+
+    def merge(self) -> Any:
+        """Merge all added responses.
+
+        Returns:
+            Merged result.
+        """
+        if not self._responses:
+            return None
+        if all(isinstance(r, dict) for r in self._responses):
+            return self._merge_dicts()
+        elif all(isinstance(r, list) for r in self._responses):
+            return self._merge_lists()
+        return self._responses[0]
+
+    def _merge_dicts(self) -> dict[str, Any]:
+        """Merge dictionary responses."""
+        result: dict[str, Any] = {}
+        for response in self._responses:
+            if not isinstance(response, dict):
+                continue
+            for key, value in response.items():
+                if key not in result:
+                    result[key] = value
+                else:
+                    result[key] = self._resolve_conflict(result[key], value)
+        return result
+
+    def _merge_lists(self) -> list[Any]:
+        """Merge list responses."""
+        if self.config.dedup_by:
+            return self._deduplicate_lists()
+        result = []
+        for response in self._responses:
+            if isinstance(response, list):
+                result.extend(response)
+        return result
+
+    def _deduplicate_lists(self) -> list[dict[str, Any]]:
+        """Deduplicate list items by key."""
+        seen = set()
+        result = []
+        for response in self._responses:
+            if not isinstance(response, list):
+                continue
+            for item in response:
+                if isinstance(item, dict):
+                    key_value = item.get(self.config.dedup_by)
+                    if key_value is not None and key_value not in seen:
+                        seen.add(key_value)
+                        result.append(item)
+                else:
+                    result.append(item)
+        return result
+
+    def _resolve_conflict(self, value1: Any, value2: Any) -> Any:
+        """Resolve conflicting values."""
+        if self.config.conflict_resolver:
+            return self.config.conflict_resolver(value1, value2)
+        if self.config.merge_strategy == "first":
+            return value1
+        elif self.config.merge_strategy == "last":
+            return value2
+        elif self.config.merge_strategy == "combine":
+            if isinstance(value1, list) and isinstance(value2, list):
+                return value1 + value2
+            return [value1, value2]
+        return value1
+
+
+def aggregate_responses(
+    responses: list[Any],
+    strategy: str = "first",
+) -> Any:
+    """Quick aggregate multiple responses.
+
+    Args:
+        responses: List of responses.
+        strategy: Merge strategy.
+
+    Returns:
+        Aggregated result.
     """
-    
-    def __init__(
-        self,
-        default_timeout: float = 30.0,
-        max_concurrent: int = 10
-    ):
-        """
-        Initialize the API Aggregator Action.
-        
-        Args:
-            default_timeout: Default request timeout
-            max_concurrent: Maximum concurrent requests
-        """
-        self.default_timeout = default_timeout
-        self.max_concurrent = max_concurrent
-        self._semaphore: Optional[asyncio.Semaphore] = None
-    
-    async def aggregate(
-        self,
-        requests: List[AggregationRequest],
-        merge_strategy: str = "key_merge"
-    ) -> AggregatedResponse:
-        """
-        Aggregate multiple API requests.
-        
-        Args:
-            requests: List of requests to aggregate
-            merge_strategy: How to merge responses (key_merge, concat, first)
-        
-        Returns:
-            AggregatedResponse with combined results
-        """
-        start_time = time.time()
-        self._semaphore = asyncio.Semaphore(self.max_concurrent)
-        
-        # Execute all requests in parallel
-        tasks = [self._execute_request(req) for req in requests]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Process results
-        aggregation_results = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                aggregation_results.append(AggregationResult(
-                    endpoint=requests[i].endpoint,
-                    success=False,
-                    error=str(result),
-                    duration_ms=0
-                ))
-            else:
-                aggregation_results.append(result)
-        
-        success_count = sum(1 for r in aggregation_results if r.success)
-        failure_count = len(aggregation_results) - success_count
-        
-        # Merge data
-        combined_data = self._merge_responses(
-            [r for r in aggregation_results if r.success],
-            merge_strategy
-        )
-        
-        return AggregatedResponse(
-            results=aggregation_results,
-            total_duration_ms=(time.time() - start_time) * 1000,
-            success_count=success_count,
-            failure_count=failure_count,
-            combined_data=combined_data
-        )
-    
-    async def _execute_request(self, request: AggregationRequest) -> AggregationResult:
-        """Execute a single request."""
-        start_time = time.time()
-        timeout = request.timeout or self.default_timeout
-        
-        try:
-            async with self._semaphore:
-                # In production, would use httpx/aiohttp
-                await asyncio.sleep(0.01)  # Simulate request
-                
-                return AggregationResult(
-                    endpoint=request.endpoint,
-                    success=True,
-                    status_code=200,
-                    data={"result": "ok", "endpoint": request.endpoint},
-                    duration_ms=(time.time() - start_time) * 1000
-                )
-        
-        except asyncio.TimeoutError:
-            return AggregationResult(
-                endpoint=request.endpoint,
-                success=False,
-                error="Request timeout",
-                duration_ms=timeout * 1000
-            )
-        
-        except Exception as e:
-            return AggregationResult(
-                endpoint=request.endpoint,
-                success=False,
-                error=str(e),
-                duration_ms=(time.time() - start_time) * 1000
-            )
-    
-    def _merge_responses(
-        self,
-        results: List[AggregationResult],
-        strategy: str
-    ) -> Dict[str, Any]:
-        """Merge responses based on strategy."""
-        if strategy == "key_merge":
-            merged = {}
-            for result in results:
-                if result.data:
-                    merged[result.endpoint] = result.data
-            return merged
-        
-        elif strategy == "concat":
-            combined = []
-            for result in results:
-                if result.data:
-                    if isinstance(result.data, list):
-                        combined.extend(result.data)
-                    else:
-                        combined.append(result.data)
-            return {"items": combined}
-        
-        elif strategy == "first":
-            if results and results[0].data:
-                return results[0].data
-            return {}
-        
-        return {}
-    
-    async def aggregate_with_fanout(
-        self,
-        base_url: str,
-        items: List[Any],
-        fanout_path: str,
-        method: str = "POST",
-        merge_key: str = "id"
-    ) -> AggregatedResponse:
-        """
-        Fan out requests to multiple items.
-        
-        Args:
-            base_url: Base URL
-            items: Items to fan out
-            fanout_path: Path template (e.g., /users/{id}/activate)
-            method: HTTP method
-            merge_key: Key to use for merging
-        
-        Returns:
-            Aggregated response
-        """
-        requests = []
-        for item in items:
-            item_id = item.get(merge_key, item.get("id", "unknown"))
-            endpoint = fanout_path.replace("{id}", str(item_id))
-            url = f"{base_url}{endpoint}"
-            
-            requests.append(AggregationRequest(
-                endpoint=url,
-                method=method,
-                body=item
-            ))
-        
-        return await self.aggregate(requests)
+    agg = ResponseAggregator(
+        config=AggregationConfig(merge_strategy=strategy)
+    )
+    for response in responses:
+        agg.add_response(response)
+    return agg.merge()
 
 
-if __name__ == "__main__":
-    import asyncio
-    
-    async def main():
-        aggregator = ApiAggregatorAction()
-        
-        requests = [
-            AggregationRequest(endpoint="/api/users", params={"limit": 10}),
-            AggregationRequest(endpoint="/api/orders", params={"limit": 20}),
-            AggregationRequest(endpoint="/api/products", params={"limit": 15}),
-        ]
-        
-        result = await aggregator.aggregate(requests)
-        
-        print(f"Total duration: {result.total_duration_ms:.1f}ms")
-        print(f"Success: {result.success_count}, Failures: {result.failure_count}")
-        print(f"Combined data keys: {list(result.combined_data.keys())}")
-    
-    asyncio.run(main())
+def merge_by_key(
+    items: list[dict[str, Any]],
+    key: str,
+    merge_strategy: str = "first",
+) -> list[dict[str, Any]]:
+    """Merge items with the same key value.
+
+    Args:
+        items: List of dicts.
+        key: Key to merge by.
+        merge_strategy: How to handle conflicts.
+
+    Returns:
+        Merged list.
+    """
+    groups: dict[Any, list[dict[str, Any]]] = defaultdict(list)
+    for item in items:
+        groups[item.get(key)].append(item)
+    result = []
+    for group_key, group_items in groups.items():
+        merged = {}
+        for item in group_items:
+            for k, v in item.items():
+                if k == key:
+                    merged[k] = v
+                elif k not in merged:
+                    merged[k] = v
+                else:
+                    if merge_strategy == "last":
+                        merged[k] = v
+                    elif merge_strategy == "combine":
+                        if isinstance(merged[k], list):
+                            merged[k].append(v) if isinstance(v, list) else merged[k].extend([v])
+                        else:
+                            merged[k] = [merged[k], v]
+        result.append(merged)
+    return result
+
+
+def fan_out_aggregate(
+    func: Callable[..., list[Any]],
+    items: list[Any],
+    max_workers: int = 5,
+) -> list[Any]:
+    """Fan-out execution and aggregate results.
+
+    Args:
+        func: Function that returns a list of results.
+        items: Items to process.
+        max_workers: Maximum parallel workers.
+
+    Returns:
+        Combined results from all executions.
+    """
+    import concurrent.futures
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(func, item) for item in items]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                result = future.result()
+                if isinstance(result, list):
+                    results.extend(result)
+                else:
+                    results.append(result)
+            except Exception as e:
+                logger.error(f"Fan-out task failed: {e}")
+    return results
