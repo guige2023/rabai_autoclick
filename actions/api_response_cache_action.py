@@ -1,365 +1,276 @@
-"""
-API Response Cache Action Module.
+"""API response caching and invalidation action."""
 
-Multi-layer response caching with TTL, tags,
-invalidation patterns, and stale-while-revalidate.
-"""
+from __future__ import annotations
 
-import asyncio
 import hashlib
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
 from typing import Any, Callable, Optional
-import logging
 
-logger = logging.getLogger(__name__)
+
+class CacheStrategy(str, Enum):
+    """Caching strategy."""
+
+    LRU = "lru"
+    LFU = "lfu"
+    FIFO = "fifo"
+    TTL = "ttl"
 
 
 @dataclass
 class CacheEntry:
-    """
-    Cached response entry.
+    """A cached response entry."""
 
-    Attributes:
-        key: Cache key.
-        value: Cached response data.
-        created_at: Timestamp when entry was created.
-        ttl: Time-to-live in seconds.
-        tags: Set of tag identifiers.
-        stale_at: Timestamp when entry becomes stale.
-        hit_count: Number of cache hits.
-    """
     key: str
     value: Any
     created_at: float
-    ttl: float
-    tags: set = field(default_factory=set)
-    stale_at: float = field(default=0.0, init=False)
-    hit_count: int = field(default=0, init=False)
-    is_stale: bool = field(default=False, init=False)
+    accessed_at: float
+    access_count: int = 0
+    size_bytes: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self):
-        """Calculate stale timestamp."""
-        self.stale_at = self.created_at + self.ttl
+
+@dataclass
+class CacheStats:
+    """Cache statistics."""
+
+    hits: int = 0
+    misses: int = 0
+    evictions: int = 0
+    insertions: int = 0
+    invalidations: int = 0
+    total_size_bytes: int = 0
 
 
 @dataclass
 class CacheConfig:
-    """Configuration for response cache."""
-    default_ttl: float = 300.0
-    max_entries: int = 10000
-    stale_while_revalidate: bool = True
-    stale_ttl: float = 60.0
-    eviction_policy: str = "lru"
+    """Configuration for cache."""
+
+    max_entries: int = 1000
+    max_size_bytes: int = 100 * 1024 * 1024  # 100MB
+    default_ttl_seconds: float = 300
+    strategy: CacheStrategy = CacheStrategy.LRU
+    on_evict: Optional[Callable[[str, Any], None]] = None
 
 
 class APIResponseCacheAction:
-    """
-    Multi-layer API response caching with advanced features.
-
-    Example:
-        cache = APIResponseCacheAction()
-        cache.configure(default_ttl=600, max_entries=5000)
-
-        # Check cache first
-        result = cache.get("user:123")
-        if result is None:
-            result = await fetch_user(123)
-            cache.set("user:123", result, tags=["user"])
-    """
+    """Caches API responses with various strategies."""
 
     def __init__(self, config: Optional[CacheConfig] = None):
-        """
-        Initialize API response cache.
+        """Initialize response cache.
 
         Args:
-            config: Cache configuration. Uses defaults if None.
+            config: Cache configuration.
         """
-        self.config = config or CacheConfig()
+        self._config = config or CacheConfig()
         self._cache: dict[str, CacheEntry] = {}
+        self._stats = CacheStats()
         self._access_order: list[str] = []
-        self._tag_index: dict[str, set[str]] = {}
-        self._revalidate_tasks: dict[str, asyncio.Task] = {}
-        self._hits = 0
-        self._misses = 0
+        self._access_counts: dict[str, int] = {}
 
-    def configure(
+    def _generate_key(
         self,
-        default_ttl: Optional[float] = None,
-        max_entries: Optional[int] = None,
-        stale_while_revalidate: Optional[bool] = None
-    ) -> None:
-        """Update cache configuration."""
-        if default_ttl is not None:
-            self.config.default_ttl = default_ttl
-        if max_entries is not None:
-            self.config.max_entries = max_entries
-        if stale_while_revalidate is not None:
-            self.config.stale_while_revalidate = stale_while_revalidate
+        method: str,
+        url: str,
+        params: Optional[dict[str, Any]] = None,
+        headers: Optional[dict[str, str]] = None,
+    ) -> str:
+        """Generate cache key from request components."""
+        key_parts = [method.upper(), url]
+        if params:
+            sorted_params = sorted(params.items())
+            key_parts.append(str(sorted_params))
+        if headers:
+            relevant_headers = {
+                k: v for k, v in headers.items() if k.lower() in ("authorization", "accept", "content-type")
+            }
+            key_parts.append(str(sorted(relevant_headers.items())))
+        key_str = "|".join(key_parts)
+        return hashlib.sha256(key_str.encode()).hexdigest()[:32]
 
-    def _generate_key(self, prefix: str, *args: Any, **kwargs: Any) -> str:
-        """Generate cache key from arguments."""
-        key_data = f"{prefix}:{args}:{sorted(kwargs.items())}"
-        return hashlib.sha256(key_data.encode()).hexdigest()[:32]
+    def _is_expired(self, entry: CacheEntry) -> bool:
+        """Check if entry is expired."""
+        age = time.time() - entry.created_at
+        ttl = entry.metadata.get("ttl", self._config.default_ttl_seconds)
+        return age > ttl
 
-    def get(self, key: str) -> Optional[Any]:
-        """
-        Get cached value by key.
+    def _evict_if_needed(self) -> None:
+        """Evict entries if cache is full."""
+        while len(self._cache) >= self._config.max_entries:
+            self._evict_one()
+
+        while self._stats.total_size_bytes >= self._config.max_size_bytes and self._cache:
+            self._evict_one()
+
+    def _evict_one(self) -> None:
+        """Evict one entry based on strategy."""
+        if not self._cache:
+            return
+
+        if self._config.strategy == CacheStrategy.LRU:
+            if self._access_order:
+                oldest = self._access_order.pop(0)
+            else:
+                oldest = next(iter(self._cache))
+
+        elif self._config.strategy == CacheStrategy.LFU:
+            oldest = min(self._access_counts, key=self._access_counts.get)
+            self._access_counts.pop(oldest, None)
+
+        elif self._config.strategy == CacheStrategy.FIFO:
+            oldest = min(self._cache, key=lambda k: self._cache[k].created_at)
+
+        else:  # TTL - evict oldest
+            oldest = min(self._cache, key=lambda k: self._cache[k].created_at)
+
+        entry = self._cache.pop(oldest, None)
+        if entry:
+            self._stats.total_size_bytes -= entry.size_bytes
+            self._stats.evictions += 1
+            if self._config.on_evict:
+                self._config.on_evict(oldest, entry.value)
+
+        if oldest in self._access_order:
+            self._access_order.remove(oldest)
+
+    def get(
+        self,
+        method: str,
+        url: str,
+        params: Optional[dict[str, Any]] = None,
+        headers: Optional[dict[str, str]] = None,
+    ) -> Optional[Any]:
+        """Get cached response.
 
         Args:
-            key: Cache key.
+            method: HTTP method.
+            url: Request URL.
+            params: Query parameters.
+            headers: Request headers.
 
         Returns:
-            Cached value or None if not found/expired.
+            Cached value or None.
         """
-        if key not in self._cache:
-            self._misses += 1
+        key = self._generate_key(method, url, params, headers)
+        entry = self._cache.get(key)
+
+        if not entry:
+            self._stats.misses += 1
             return None
 
-        entry = self._cache[key]
-        now = time.time()
-
-        if now > entry.stale_at + self.config.stale_ttl:
-            self._evict(key)
-            self._misses += 1
+        if self._is_expired(entry):
+            self.invalidate(key)
+            self._stats.misses += 1
             return None
 
-        if now > entry.stale_at:
-            entry.is_stale = True
-            if self.config.stale_while_revalidate and key not in self._revalidate_tasks:
-                logger.debug(f"Cache stale for key: {key}")
-        else:
-            entry.hit_count += 1
+        entry.accessed_at = time.time()
+        entry.access_count += 1
+        self._stats.hits += 1
 
-        self._hits += 1
-        self._update_access_order(key)
+        if key in self._access_order:
+            self._access_order.remove(key)
+        self._access_order.append(key)
+        self._access_counts[key] = self._access_counts.get(key, 0) + 1
 
         return entry.value
 
-    def set(
+    def put(
         self,
-        key: str,
+        method: str,
+        url: str,
         value: Any,
+        params: Optional[dict[str, Any]] = None,
+        headers: Optional[dict[str, str]] = None,
         ttl: Optional[float] = None,
-        tags: Optional[list[str]] = None
+        metadata: Optional[dict[str, Any]] = None,
     ) -> None:
-        """
-        Set cache value.
+        """Store response in cache.
 
         Args:
-            key: Cache key.
-            value: Value to cache.
+            method: HTTP method.
+            url: Request URL.
+            value: Response value.
+            params: Query parameters.
+            headers: Request headers.
             ttl: Time-to-live in seconds.
-            tags: List of tags for invalidation.
+            metadata: Additional metadata.
         """
-        if len(self._cache) >= self.config.max_entries:
-            self._evict_lru()
+        key = self._generate_key(method, url, params, headers)
+
+        if key in self._cache:
+            old_entry = self._cache[key]
+            self._stats.total_size_bytes -= old_entry.size_bytes
+
+        import sys
+
+        size = len(str(value).encode("utf-8"))
 
         entry = CacheEntry(
             key=key,
             value=value,
             created_at=time.time(),
-            ttl=ttl or self.config.default_ttl,
-            tags=set(tags) if tags else set()
+            accessed_at=time.time(),
+            size_bytes=size,
+            metadata=metadata or {"ttl": ttl or self._config.default_ttl_seconds},
         )
 
+        self._evict_if_needed()
+
         self._cache[key] = entry
+        self._stats.total_size_bytes += size
+        self._stats.insertions += 1
 
-        for tag in entry.tags:
-            if tag not in self._tag_index:
-                self._tag_index[tag] = set()
-            self._tag_index[tag].add(key)
-
-        self._update_access_order(key)
-
-        logger.debug(f"Cached key: {key} (TTL: {entry.ttl}s, tags: {entry.tags})")
+        if key not in self._access_order:
+            self._access_order.append(key)
+        self._access_counts[key] = 1
 
     def invalidate(self, key: str) -> bool:
-        """
-        Invalidate a single cache entry.
-
-        Args:
-            key: Cache key to invalidate.
-
-        Returns:
-            True if key was found and removed.
-        """
-        if key in self._cache:
-            self._evict(key)
+        """Invalidate a cache entry."""
+        entry = self._cache.pop(key, None)
+        if entry:
+            self._stats.total_size_bytes -= entry.size_bytes
+            self._stats.invalidations += 1
+            if key in self._access_order:
+                self._access_order.remove(key)
+            self._access_counts.pop(key, None)
             return True
         return False
 
-    def invalidate_by_tags(self, *tags: str) -> int:
-        """
-        Invalidate all entries with given tags.
-
-        Args:
-            *tags: Tag names to match.
-
-        Returns:
-            Number of entries invalidated.
-        """
-        keys_to_evict: set[str] = set()
-
-        for tag in tags:
-            if tag in self._tag_index:
-                keys_to_evict.update(self._tag_index[tag])
-
-        for key in keys_to_evict:
-            self._evict(key)
-
-        logger.info(f"Invalidated {len(keys_to_evict)} entries by tags: {tags}")
-        return len(keys_to_evict)
-
     def invalidate_pattern(self, pattern: str) -> int:
-        """
-        Invalidate entries matching key pattern.
+        """Invalidate all entries matching pattern."""
+        count = 0
+        keys_to_remove = [k for k in self._cache if pattern in k]
+        for key in keys_to_remove:
+            if self.invalidate(key):
+                count += 1
+        return count
 
-        Args:
-            pattern: Key pattern (supports * wildcard).
-
-        Returns:
-            Number of entries invalidated.
-        """
-        import fnmatch
-
-        keys_to_evict = [
-            key for key in self._cache.keys()
-            if fnmatch.fnmatch(key, pattern)
-        ]
-
-        for key in keys_to_evict:
-            self._evict(key)
-
-        logger.info(f"Invalidated {len(keys_to_evict)} entries matching pattern: {pattern}")
-        return len(keys_to_evict)
-
-    def _evict(self, key: str) -> None:
-        """Remove entry from cache."""
-        if key not in self._cache:
-            return
-
-        entry = self._cache[key]
-
-        for tag in entry.tags:
-            if tag in self._tag_index:
-                self._tag_index[tag].discard(key)
-
-        if key in self._revalidate_tasks:
-            self._revalidate_tasks[key].cancel()
-            del self._revalidate_tasks[key]
-
-        del self._cache[key]
-
-        if key in self._access_order:
-            self._access_order.remove(key)
-
-    def _evict_lru(self) -> None:
-        """Evict least recently used entry."""
-        if not self._access_order:
-            return
-
-        lru_key = self._access_order.pop(0)
-        self._evict(lru_key)
-        logger.debug(f"Evicted LRU key: {lru_key}")
-
-    def _update_access_order(self, key: str) -> None:
-        """Update LRU access order."""
-        if key in self._access_order:
-            self._access_order.remove(key)
-        self._access_order.append(key)
-
-    async def get_or_fetch(
-        self,
-        key: str,
-        fetch_func: Callable,
-        *args: Any,
-        ttl: Optional[float] = None,
-        tags: Optional[list[str]] = None,
-        **kwargs: Any
-    ) -> Any:
-        """
-        Get from cache or fetch if missing.
-
-        Args:
-            key: Cache key.
-            fetch_func: Async function to fetch data.
-            *args: Positional args for fetch_func.
-            ttl: Cache TTL.
-            tags: Cache tags.
-            **kwargs: Keyword args for fetch_func.
-
-        Returns:
-            Cached or freshly fetched value.
-        """
-        cached = self.get(key)
-
-        if cached is not None:
-            entry = self._cache.get(key)
-            if entry and entry.is_stale and self.config.stale_while_revalidate:
-                if key not in self._revalidate_tasks:
-                    self._revalidate_tasks[key] = asyncio.create_task(
-                        self._revalidate(key, fetch_func, *args, ttl=ttl, tags=tags, **kwargs)
-                    )
-            return cached
-
-        if asyncio.iscoroutinefunction(fetch_func):
-            value = await fetch_func(*args, **kwargs)
-        else:
-            value = fetch_func(*args, **kwargs)
-
-        self.set(key, value, ttl=ttl, tags=tags)
-        return value
-
-    async def _revalidate(
-        self,
-        key: str,
-        fetch_func: Callable,
-        *args: Any,
-        ttl: Optional[float] = None,
-        tags: Optional[list[str]] = None,
-        **kwargs: Any
-    ) -> None:
-        """Revalidate stale cache entry."""
-        try:
-            if asyncio.iscoroutinefunction(fetch_func):
-                new_value = await fetch_func(*args, **kwargs)
-            else:
-                new_value = fetch_func(*args, **kwargs)
-
-            self.set(key, new_value, ttl=ttl, tags=tags)
-            logger.debug(f"Revalidated cache key: {key}")
-
-        except Exception as e:
-            logger.error(f"Revalidation failed for {key}: {e}")
-        finally:
-            if key in self._revalidate_tasks:
-                del self._revalidate_tasks[key]
-
-    def clear(self) -> None:
-        """Clear all cache entries."""
+    def invalidate_all(self) -> int:
+        """Invalidate all cache entries."""
+        count = len(self._cache)
         self._cache.clear()
         self._access_order.clear()
-        self._tag_index.clear()
-        self._revalidate_tasks.clear()
-        self._hits = 0
-        self._misses = 0
+        self._access_counts.clear()
+        self._stats.total_size_bytes = 0
+        self._stats.invalidations += count
+        return count
 
-    def get_stats(self) -> dict:
+    def get_stats(self) -> CacheStats:
         """Get cache statistics."""
-        total = self._hits + self._misses
-        hit_rate = self._hits / total if total > 0 else 0.0
+        total = self._stats.hits + self._stats.misses
+        hit_rate = self._stats.hits / total if total > 0 else 0
+        return CacheStats(
+            hits=self._stats.hits,
+            misses=self._stats.misses,
+            evictions=self._stats.evictions,
+            insertions=self._stats.insertions,
+            invalidations=self._stats.invalidations,
+            total_size_bytes=self._stats.total_size_bytes,
+        )
 
-        return {
-            "entries": len(self._cache),
-            "max_entries": self.config.max_entries,
-            "hits": self._hits,
-            "misses": self._misses,
-            "hit_rate": f"{hit_rate:.2%}",
-            "tags": len(self._tag_index),
-            "revalidating": len(self._revalidate_tasks)
-        }
-
-    def get_all_tags(self) -> list[str]:
-        """Get list of all cache tags."""
-        return list(self._tag_index.keys())
+    def get_hit_rate(self) -> float:
+        """Get cache hit rate."""
+        total = self._stats.hits + self._stats.misses
+        return self._stats.hits / total if total > 0 else 0.0

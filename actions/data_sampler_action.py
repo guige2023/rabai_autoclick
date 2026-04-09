@@ -1,125 +1,268 @@
-"""Data Sampler action module for RabAI AutoClick.
+"""Data sampling and statistical sampling action."""
 
-Sampling strategies for data: random, stratified,
-reservoir, and weighted selection.
-"""
+from __future__ import annotations
 
 import random
-import time
-import sys
-import os
-from typing import Any, Dict, List, Optional
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional, Sequence
 
 
-class DataSamplerAction(BaseAction):
-    """Sample data with various strategies.
+@dataclass
+class SamplingConfig:
+    """Configuration for sampling."""
 
-    Random, stratified, reservoir, and weighted sampling
-    for data reduction and testing.
-    """
-    action_type = "data_sampler"
-    display_name = "数据采样器"
-    description = "随机、分层、水库加权采样"
+    sample_size: int
+    method: str = "random"  # random, stratified, systematic, cluster, reservoir
+    seed: Optional[int] = None
+    replace: bool = False
+    weights: Optional[dict[str, float]] = None
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Sample data.
+
+@dataclass
+class SamplingResult:
+    """Result of a sampling operation."""
+
+    original_size: int
+    sample_size: int
+    sample: list[Any]
+    method: str
+    seed: Optional[int] = None
+
+
+class DataSamplerAction:
+    """Provides statistical sampling methods for datasets."""
+
+    def __init__(self, default_seed: Optional[int] = None):
+        """Initialize sampler.
 
         Args:
-            context: Execution context.
-            params: Dict with keys: items, strategy (random/stratified/reservoir/weighted),
-                   sample_size, strata_field, weights_field, seed.
+            default_seed: Default random seed for reproducibility.
+        """
+        self._default_seed = default_seed
+        if default_seed is not None:
+            random.seed(default_seed)
+
+    def sample(
+        self,
+        data: Sequence[Any],
+        config: SamplingConfig,
+    ) -> SamplingResult:
+        """Sample from data using configured method.
+
+        Args:
+            data: Input data.
+            config: Sampling configuration.
 
         Returns:
-            ActionResult with sampled data.
+            SamplingResult with sampled data.
         """
-        start_time = time.time()
-        try:
-            items = params.get('items', [])
-            strategy = params.get('strategy', 'random')
-            sample_size = params.get('sample_size', 10)
-            strata_field = params.get('strata_field')
-            weights_field = params.get('weights_field')
-            seed = params.get('seed')
+        if config.seed is not None:
+            random.seed(config.seed)
+        elif self._default_seed is not None:
+            random.seed(self._default_seed)
 
-            if seed is not None:
-                random.seed(seed)
+        if config.method == "random":
+            return self._random_sample(data, config)
+        elif config.method == "stratified":
+            return self._stratified_sample(data, config)
+        elif config.method == "systematic":
+            return self._systematic_sample(data, config)
+        elif config.method == "cluster":
+            return self._cluster_sample(data, config)
+        elif config.method == "reservoir":
+            return self._reservoir_sample(data, config)
+        else:
+            return self._random_sample(data, config)
 
-            if not items:
-                return ActionResult(success=False, message="items is required", duration=time.time() - start_time)
+    def _random_sample(
+        self,
+        data: Sequence[Any],
+        config: SamplingConfig,
+    ) -> SamplingResult:
+        """Random sampling with optional weights."""
+        sample_size = min(config.sample_size, len(data))
 
-            if strategy == 'random':
-                sample = random.sample(items, min(sample_size, len(items)))
+        if config.weights and not config.replace:
+            weights = [config.weights.get(str(i), 1.0) for i in range(len(data))]
+            total_weight = sum(weights)
+            normalized = [w / total_weight for w in weights]
+            indices = random.choices(
+                range(len(data)),
+                weights=normalized,
+                k=sample_size,
+            )
+            sample = [data[i] for i in indices]
+        elif config.replace:
+            sample = random.choices(list(data), k=sample_size)
+        else:
+            sample = random.sample(list(data), sample_size)
 
-            elif strategy == 'reservoir':
-                sample = self._reservoir_sample(items, sample_size)
+        return SamplingResult(
+            original_size=len(data),
+            sample_size=len(sample),
+            sample=sample,
+            method="random",
+            seed=config.seed,
+        )
 
-            elif strategy == 'stratified':
-                if not strata_field:
-                    return ActionResult(success=False, message="strata_field required for stratified sampling", duration=time.time() - start_time)
-                strata = {}
-                for item in items:
-                    if isinstance(item, dict):
-                        key = item.get(strata_field, 'unknown')
-                    else:
-                        key = str(item)
-                    strata.setdefault(key, []).append(item)
-                sample = []
-                per_strata = max(1, sample_size // max(1, len(strata)))
-                for items_in_strata in strata.values():
-                    sample.extend(random.sample(items_in_strata, min(per_strata, len(items_in_strata))))
-                if len(sample) > sample_size:
-                    sample = sample[:sample_size]
+    def _stratified_sample(
+        self,
+        data: Sequence[Any],
+        config: SamplingConfig,
+    ) -> SamplingResult:
+        """Stratified sampling by group."""
+        if not data:
+            return SamplingResult(0, 0, [], "stratified", config.seed)
 
-            elif strategy == 'weighted':
-                if not weights_field:
-                    return ActionResult(success=False, message="weights_field required for weighted sampling", duration=time.time() - start_time)
-                weights = [item.get(weights_field, 1) if isinstance(item, dict) else 1 for item in items]
-                total = sum(weights)
-                if total == 0:
-                    sample = items[:sample_size]
-                else:
-                    cumsum = 0
-                    cumulative = []
-                    for w in weights:
-                        cumsum += w / total
-                        cumulative.append(cumsum)
-                    sample = []
-                    for _ in range(min(sample_size, len(items))):
-                        r = random.random()
-                        for i, c in enumerate(cumulative):
-                            if r <= c:
-                                if items[i] not in sample:
-                                    sample.append(items[i])
-                                break
-
+        groups: dict[str, list] = {}
+        for item in data:
+            if isinstance(item, dict):
+                key = str(item.get("stratum", item.get("category", "default")))
             else:
-                sample = items[:sample_size]
+                key = "default"
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(item)
 
-            duration = time.time() - start_time
-            return ActionResult(
-                success=True,
-                message=f"Sampled {len(sample)} from {len(items)} ({strategy})",
-                data={'sample': sample, 'count': len(sample), 'total': len(items), 'strategy': strategy},
-                duration=duration,
+        total = len(data)
+        sample = []
+        for group_key, group_data in groups.items():
+            group_proportion = len(group_data) / total
+            group_size = max(1, int(config.sample_size * group_proportion))
+            group_size = min(group_size, len(group_data))
+            group_sample = random.sample(group_data, group_size)
+            sample.extend(group_sample)
+
+        if len(sample) > config.sample_size:
+            sample = sample[: config.sample_size]
+
+        return SamplingResult(
+            original_size=len(data),
+            sample_size=len(sample),
+            sample=sample,
+            method="stratified",
+            seed=config.seed,
+        )
+
+    def _systematic_sample(
+        self,
+        data: Sequence[Any],
+        config: SamplingConfig,
+    ) -> SamplingResult:
+        """Systematic sampling (every kth element)."""
+        if len(data) <= config.sample_size:
+            return SamplingResult(
+                original_size=len(data),
+                sample_size=len(data),
+                sample=list(data),
+                method="systematic",
+                seed=config.seed,
             )
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Sampler error: {str(e)}", duration=time.time() - start_time)
+        step = len(data) // config.sample_size
+        start = random.randint(0, step - 1)
+        indices = range(start, len(data), step)
+        sample = [data[i] for i in indices][: config.sample_size]
 
-    def _reservoir_sample(self, items: List, k: int) -> List:
-        """Reservoir sampling algorithm R."""
-        if k >= len(items):
-            return items[:]
-        reservoir = items[:k]
-        for i in range(k, len(items)):
+        return SamplingResult(
+            original_size=len(data),
+            sample_size=len(sample),
+            sample=sample,
+            method="systematic",
+            seed=config.seed,
+        )
+
+    def _cluster_sample(
+        self,
+        data: Sequence[Any],
+        config: SamplingConfig,
+    ) -> SamplingResult:
+        """Cluster sampling (random clusters)."""
+        n_clusters = min(config.sample_size, len(data))
+        cluster_size = max(1, len(data) // n_clusters)
+
+        data_list = list(data)
+        clusters = [
+            data_list[i : i + cluster_size]
+            for i in range(0, len(data_list), cluster_size)
+        ]
+
+        if config.seed is not None:
+            random.seed(config.seed)
+
+        selected_clusters = random.sample(clusters, min(n_clusters, len(clusters)))
+        sample = [item for cluster in selected_clusters for item in cluster]
+
+        return SamplingResult(
+            original_size=len(data),
+            sample_size=len(sample),
+            sample=sample,
+            method="cluster",
+            seed=config.seed,
+        )
+
+    def _reservoir_sample(
+        self,
+        data: Sequence[Any],
+        config: SamplingConfig,
+    ) -> SamplingResult:
+        """Reservoir sampling (stream-friendly)."""
+        if len(data) <= config.sample_size:
+            return SamplingResult(
+                original_size=len(data),
+                sample_size=len(data),
+                sample=list(data),
+                method="reservoir",
+                seed=config.seed,
+            )
+
+        reservoir = list(data[: config.sample_size])
+
+        for i in range(config.sample_size, len(data)):
             j = random.randint(0, i)
-            if j < k:
-                reservoir[j] = items[i]
-        return reservoir
+            if j < config.sample_size:
+                reservoir[j] = data[i]
+
+        return SamplingResult(
+            original_size=len(data),
+            sample_size=config.sample_size,
+            sample=reservoir,
+            method="reservoir",
+            seed=config.seed,
+        )
+
+    def boot_mean(
+        self,
+        data: list[float],
+        n_iterations: int = 1000,
+        confidence: float = 0.95,
+    ) -> dict[str, float]:
+        """Compute bootstrap confidence interval for mean.
+
+        Args:
+            data: Numeric data.
+            n_iterations: Number of bootstrap iterations.
+            confidence: Confidence level.
+
+        Returns:
+            Dict with mean, lower, upper bounds.
+        """
+        if config.seed is not None:
+            random.seed(config.seed)
+
+        means = []
+        for _ in range(n_iterations):
+            sample = random.choices(data, k=len(data))
+            means.append(sum(sample) / len(sample))
+
+        means.sort()
+        alpha = 1 - confidence
+        lower_idx = int(n_iterations * alpha / 2)
+        upper_idx = int(n_iterations * (1 - alpha / 2))
+
+        return {
+            "mean": sum(data) / len(data),
+            "lower": means[lower_idx],
+            "upper": means[upper_idx],
+            "confidence": confidence,
+        }
