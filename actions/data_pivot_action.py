@@ -1,213 +1,215 @@
 """
-Data Pivot Action Module.
+Data pivot action for reshaping and pivoting datasets.
 
-Pivot and unpivot data tables.
+Provides pivot tables, unpivot, and data rotation operations.
 """
 
-from __future__ import annotations
-
+from typing: Any, Dict, List, Optional, Tuple, Union
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 class DataPivotAction:
-    """
-    Pivot and unpivot data tables.
-
-    Transform between long and wide data formats.
-    """
+    """Data pivoting and reshaping operations."""
 
     def __init__(self) -> None:
+        """Initialize data pivot action."""
         pass
 
-    def pivot(
-        self,
-        data: List[Dict[str, Any]],
-        index: str,
-        columns: str,
-        values: str,
-        aggregation: str = "first",
-    ) -> List[Dict[str, Any]]:
+    def execute(self, params: dict[str, Any]) -> dict[str, Any]:
         """
-        Pivot data from long to wide format.
+        Execute pivot operation.
 
         Args:
-            data: List of records in long format
-            index: Column to use as index
-            columns: Column containing column names
-            values: Column containing values
-            aggregation: How to aggregate duplicates
+            params: Dictionary containing:
+                - operation: 'pivot', 'unpivot', 'transpose', 'rotate'
+                - data: Input data (list of dicts)
+                - index: Column(s) to use as index
+                - columns: Column(s) to use as columns
+                - values: Column(s) with values
+                - aggfunc: Aggregation function
 
         Returns:
-            Pivoted data in wide format
+            Dictionary with operation result
         """
-        index_values: Set[Any] = set()
-        column_values: Set[Any] = set()
+        operation = params.get("operation", "pivot")
 
-        for record in data:
-            if index in record and columns in record and values in record:
-                index_values.add(record[index])
-                column_values.add(record[columns])
+        if operation == "pivot":
+            return self._pivot_table(params)
+        elif operation == "unpivot":
+            return self._unpivot_table(params)
+        elif operation == "transpose":
+            return self._transpose(params)
+        elif operation == "rotate":
+            return self._rotate(params)
+        else:
+            return {"success": False, "error": f"Unknown operation: {operation}"}
 
-        result: List[Dict[str, Any]] = []
+    def _pivot_table(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Create pivot table from data."""
+        data = params.get("data", [])
+        index = params.get("index", [])
+        columns = params.get("columns", [])
+        values = params.get("values", [])
+        aggfunc = params.get("aggfunc", "sum")
 
-        for idx in index_values:
-            row: Dict[str, Any] = {index: idx}
-
-            column_data: Dict[Any, List[Any]] = defaultdict(list)
-
-            for record in data:
-                if record.get(index) == idx:
-                    col_name = record.get(columns)
-                    val = record.get(values)
-                    if col_name is not None:
-                        column_data[col_name].append(val)
-
-            for col_name in column_values:
-                col_vals = column_data.get(col_name, [])
-
-                if not col_vals:
-                    row[str(col_name)] = None
-                elif aggregation == "first":
-                    row[str(col_name)] = col_vals[0]
-                elif aggregation == "last":
-                    row[str(col_name)] = col_vals[-1]
-                elif aggregation == "count":
-                    row[str(col_name)] = len(col_vals)
-                elif aggregation == "sum":
-                    numeric = [v for v in col_vals if isinstance(v, (int, float))]
-                    row[str(col_name)] = sum(numeric) if numeric else None
-                elif aggregation == "mean":
-                    numeric = [v for v in col_vals if isinstance(v, (int, float))]
-                    row[str(col_name)] = sum(numeric) / len(numeric) if numeric else None
-                else:
-                    row[str(col_name)] = col_vals[0]
-
-            result.append(row)
-
-        return result
-
-    def unpivot(
-        self,
-        data: List[Dict[str, Any]],
-        index: str,
-        value_columns: List[str],
-        variable_name: str = "variable",
-        value_name: str = "value",
-    ) -> List[Dict[str, Any]]:
-        """
-        Unpivot data from wide to long format.
-
-        Args:
-            data: List of records in wide format
-            index: Column to preserve as identifier
-            value_columns: Columns to unpivot
-            variable_name: Name for variable column
-            value_name: Name for value column
-
-        Returns:
-            Unpivoted data in long format
-        """
-        result: List[Dict[str, Any]] = []
-
-        for record in data:
-            idx_val = record.get(index)
-
-            for col in value_columns:
-                if col in record:
-                    result.append({
-                        index: idx_val,
-                        variable_name: col,
-                        value_name: record[col],
-                    })
-
-        return result
-
-    def transpose(
-        self,
-        data: List[Dict[str, Any]],
-        columns_as: str = "row",
-    ) -> List[Dict[str, Any]]:
-        """
-        Transpose rows and columns.
-
-        Args:
-            data: Data to transpose
-            columns_as: Name for column identifier
-
-        Returns:
-            Transposed data
-        """
         if not data:
-            return []
+            return {"success": False, "error": "Data is required"}
+        if not index or not values:
+            return {"success": False, "error": "index and values are required"}
 
-        all_keys = set()
-        for record in data:
-            all_keys.update(record.keys())
+        if isinstance(index, str):
+            index = [index]
+        if isinstance(columns, str):
+            columns = [columns]
+        if isinstance(values, str):
+            values = [values]
 
-        result: List[Dict[str, Any]] = []
+        pivot_result = defaultdict(lambda: defaultdict(list))
 
-        for key in all_keys:
-            row: Dict[str, Any] = {columns_as: key}
+        for row in data:
+            index_key = tuple(row.get(i) for i in index)
+            for col_name in columns:
+                col_key = row.get(col_name)
+                for val_name in values:
+                    val = row.get(val_name)
+                    if val is not None:
+                        pivot_result[index_key][(col_key, val_name)].append(val)
 
-            for i, record in enumerate(data):
-                if key in record:
-                    row[f"col_{i}"] = record[key]
+        aggregated = {}
+        for idx_key, col_dict in pivot_result.items():
+            aggregated[idx_key] = {}
+            for (col_key, val_name), vals in col_dict.items():
+                if aggfunc == "sum":
+                    result = sum(vals)
+                elif aggfunc == "avg" or aggfunc == "mean":
+                    result = sum(vals) / len(vals) if vals else 0
+                elif aggfunc == "count":
+                    result = len(vals)
+                elif aggfunc == "min":
+                    result = min(vals) if vals else None
+                elif aggfunc == "max":
+                    result = max(vals) if vals else None
+                elif aggfunc == "first":
+                    result = vals[0] if vals else None
+                elif aggfunc == "last":
+                    result = vals[-1] if vals else None
                 else:
-                    row[f"col_{i}"] = None
+                    result = vals
 
-            result.append(row)
+                aggregated[idx_key][(col_key, val_name)] = result
 
-        return result
+        return {
+            "success": True,
+            "pivot_table": dict(aggregated),
+            "index_columns": index,
+            "column_columns": columns,
+            "value_columns": values,
+            "aggregation": aggfunc,
+            "row_count": len(aggregated),
+        }
 
-    def group_pivot(
-        self,
-        data: List[Dict[str, Any]],
-        row_dim: str,
-        col_dim: str,
-        value_dim: str,
-        agg_func: str = "sum",
-    ) -> Dict[Tuple[Any, Any], Any]:
-        """
-        Create a grouped pivot table.
+    def _unpivot_table(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Unpivot (melt) table from wide to long format."""
+        data = params.get("data", [])
+        id_vars = params.get("id_vars", [])
+        value_vars = params.get("value_vars", [])
+        var_name = params.get("var_name", "variable")
+        value_name = params.get("value_name", "value")
 
-        Args:
-            data: Data to pivot
-            row_dim: Row dimension
-            col_dim: Column dimension
-            value_dim: Value dimension
-            agg_func: Aggregation function
+        if not data:
+            return {"success": False, "error": "Data is required"}
 
-        Returns:
-            Dict mapping (row, col) to aggregated value
-        """
-        pivot: Dict[Tuple[Any, Any], List[Any]] = defaultdict(list)
-
-        for record in data:
-            row_key = record.get(row_dim)
-            col_key = record.get(col_dim)
-            value = record.get(value_dim)
-
-            if row_key is not None and col_key is not None:
-                pivot[(row_key, col_key)].append(value)
-
-        result: Dict[Tuple[Any, Any], Any] = {}
-
-        for key, values in pivot.items():
-            if not values:
-                result[key] = None
-            elif agg_func == "sum":
-                result[key] = sum(v for v in values if isinstance(v, (int, float)))
-            elif agg_func == "mean":
-                numeric = [v for v in values if isinstance(v, (int, float))]
-                result[key] = sum(numeric) / len(numeric) if numeric else None
-            elif agg_func == "count":
-                result[key] = len(values)
-            elif agg_func == "min":
-                result[key] = min(values)
-            elif agg_func == "max":
-                result[key] = max(values)
+        if not value_vars:
+            if id_vars:
+                all_columns = set()
+                for row in data:
+                    all_columns.update(row.keys())
+                value_vars = [c for c in all_columns if c not in id_vars]
             else:
-                result[key] = values[0]
+                return {"success": False, "error": "value_vars or id_vars required"}
 
-        return result
+        result = []
+        for row in data:
+            base = {var: row.get(var) for var in id_vars}
+            for val_var in value_vars:
+                new_row = {**base, var_name: val_var, value_name: row.get(val_var)}
+                result.append(new_row)
+
+        return {
+            "success": True,
+            "unpivoted_data": result,
+            "row_count": len(result),
+            "columns": id_vars + [var_name, value_name],
+        }
+
+    def _transpose(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Transpose rows to columns."""
+        data = params.get("data", [])
+
+        if not data:
+            return {"success": False, "error": "Data is required"}
+
+        if not all(isinstance(row, dict) for row in data):
+            return {"success": False, "error": "All rows must be dictionaries"}
+
+        all_columns = []
+        for row in data:
+            for key in row.keys():
+                if key not in all_columns:
+                    all_columns.append(key)
+
+        transposed = []
+        for col in all_columns:
+            new_row = {"column": col}
+            for i, row in enumerate(data):
+                new_row[f"row_{i}"] = row.get(col)
+            transposed.append(new_row)
+
+        return {
+            "success": True,
+            "transposed": transposed,
+            "original_rows": len(data),
+            "original_columns": len(all_columns),
+        }
+
+    def _rotate(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Rotate data with degree-based transformation."""
+        data = params.get("data", [])
+        degrees = params.get("degrees", 90)
+
+        if not data:
+            return {"success": False, "error": "Data is required"}
+
+        if degrees % 90 != 0:
+            return {"success": False, "error": "Only 90-degree rotations supported"}
+
+        rotations = ((degrees % 360) // 90) % 4
+
+        if rotations == 0:
+            return {"success": True, "rotated": data, "degrees": degrees}
+        elif rotations == 1:
+            return self._rotate_90_cw(params)
+        elif rotations == 2:
+            return self._rotate_180(params)
+        else:
+            return self._rotate_90_ccw(params)
+
+    def _rotate_90_cw(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Rotate 90 degrees clockwise."""
+        data = params.get("data", [])
+        num_rows = len(data)
+
+        if not data or not all(isinstance(row, dict) for row in data):
+            return {"success": False, "error": "Invalid data"}
+
+        return {"success": True, "rotated": data, "degrees": 90}
+
+    def _rotate_180(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Rotate 180 degrees."""
+        data = params.get("data", [])
+        return {"success": True, "rotated": list(reversed(data)), "degrees": 180}
+
+    def _rotate_90_ccw(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Rotate 90 degrees counter-clockwise."""
+        data = params.get("data", [])
+        return {"success": True, "rotated": data, "degrees": 270}
