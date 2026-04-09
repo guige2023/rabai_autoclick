@@ -1,340 +1,347 @@
 """
 Text finding and matching utilities for UI automation.
 
-Provides text search across UI elements, fuzzy matching,
-text pattern matching, and text extraction helpers.
-
-Author: Auto-generated
+This module provides utilities for finding text in UI elements,
+including fuzzy matching, regex search, and accessibility-based
+text retrieval.
 """
 
 from __future__ import annotations
 
-import difflib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Callable, List, Optional, Pattern, Tuple, Dict, Any
 from enum import Enum, auto
-from typing import Callable, Protocol
 
 
-class MatchType(Enum):
-    """Type of text match."""
+class MatchStrategy(Enum):
+    """Text matching strategies."""
     EXACT = auto()
     CONTAINS = auto()
     STARTS_WITH = auto()
     ENDS_WITH = auto()
-    FUZZY = auto()
     REGEX = auto()
+    FUZZY = auto()
     CASE_INSENSITIVE = auto()
 
 
 @dataclass
 class TextMatch:
-    """Result of a text search match."""
+    """
+    Represents a text match result.
+
+    Attributes:
+        text: The matched text.
+        start: Start index of match.
+        end: End index of match.
+        score: Match confidence score (0.0-1.0).
+        context: Surrounding context text.
+    """
     text: str
-    match_type: MatchType
-    confidence: float
-    start_index: int = 0
-    end_index: int = 0
-    metadata: dict = None
-    
-    def __post_init__(self):
-        if self.metadata is None:
-            self.metadata = {}
+    start: int = 0
+    end: int = 0
+    score: float = 1.0
+    context: str = ""
+
+    @property
+    def length(self) -> int:
+        """Get length of the matched text."""
+        return self.end - self.start
+
+    @property
+    def matched(self) -> str:
+        """Get the matched substring."""
+        return self.text[self.start:self.end]
 
 
 @dataclass
-class TextSearchOptions:
-    """Options for text searching."""
-    match_type: MatchType = MatchType.CONTAINS
-    case_sensitive: bool = True
-    trim_whitespace: bool = True
-    min_confidence: float = 0.8
-    use_regex: bool = False
+class TextSearchResult:
+    """
+    Result of a text search operation.
+
+    Attributes:
+        found: Whether text was found.
+        matches: List of text matches.
+        element: The element containing the match.
+        path: Path to the element.
+    """
+    found: bool = False
+    matches: List[TextMatch] = field(default_factory=list)
+    element: Optional[str] = None
+    path: str = ""
 
 
 class TextMatcher:
     """
-    Matches text against patterns with various strategies.
-    
-    Example:
-        matcher = TextMatcher()
-        result = matcher.match("Hello World", "hello", MatchType.CASE_INSENSITIVE)
+    Provides text matching capabilities with multiple strategies.
+
+    Supports exact, substring, wildcard, regex, and fuzzy matching.
     """
-    
-    def __init__(self, default_options: TextSearchOptions | None = None):
-        self._default_options = default_options or TextSearchOptions()
-        self._custom_matchers: dict[str, Callable[[str, str], float]] = {}
-    
+
+    def __init__(self) -> None:
+        self._fuzzy_threshold: float = 0.7
+
+    def set_fuzzy_threshold(self, threshold: float) -> TextMatcher:
+        """Set minimum score for fuzzy matches (0.0-1.0)."""
+        self._fuzzy_threshold = max(0.0, min(1.0, threshold))
+        return self
+
     def match(
         self,
         text: str,
         pattern: str,
-        match_type: MatchType | None = None,
-        options: TextSearchOptions | None = None,
-    ) -> TextMatch:
+        strategy: MatchStrategy = MatchStrategy.EXACT,
+    ) -> Optional[TextMatch]:
         """
-        Match text against a pattern.
-        
-        Args:
-            text: The text to search in
-            pattern: The pattern to search for
-            match_type: Type of match to perform
-            options: Search options
-            
-        Returns:
-            TextMatch with results
+        Match text using the specified strategy.
+
+        Returns TextMatch if found, None otherwise.
         """
-        opts = options or self._default_options
-        match_type = match_type or opts.match_type
-        
-        if opts.trim_whitespace:
-            text = text.strip()
-            pattern = pattern.strip()
-        
-        text_lower = text.lower() if not opts.case_sensitive else text
-        pattern_lower = pattern.lower() if not opts.case_sensitive else pattern
-        
-        if match_type == MatchType.EXACT:
-            return self._match_exact(text, pattern, text_lower, pattern_lower, opts)
-        elif match_type == MatchType.CONTAINS:
-            return self._match_contains(text, pattern, text_lower, pattern_lower, opts)
-        elif match_type == MatchType.STARTS_WITH:
-            return self._match_starts_with(text, pattern, text_lower, pattern_lower, opts)
-        elif match_type == MatchType.ENDS_WITH:
-            return self._match_ends_with(text, pattern, text_lower, pattern_lower, opts)
-        elif match_type == MatchType.FUZZY:
-            return self._match_fuzzy(text, pattern, opts)
-        elif match_type == MatchType.REGEX:
-            return self._match_regex(text, pattern, opts)
-        elif match_type == MatchType.CASE_INSENSITIVE:
-            return self._match_case_insensitive(text, pattern, text_lower, pattern_lower, opts)
-        
-        return TextMatch(text, match_type, 0.0)
-    
-    def _match_exact(
-        self, text: str, pattern: str,
-        text_lower: str, pattern_lower: str,
-        options: TextSearchOptions,
-    ) -> TextMatch:
-        match = text == pattern if options.case_sensitive else text_lower == pattern_lower
-        return TextMatch(
-            text=pattern,
-            match_type=MatchType.EXACT,
-            confidence=1.0 if match else 0.0,
-            start_index=0 if match else -1,
-            end_index=len(pattern) if match else 0,
-        )
-    
-    def _match_contains(
-        self, text: str, pattern: str,
-        text_lower: str, pattern_lower: str,
-        options: TextSearchOptions,
-    ) -> TextMatch:
-        idx = text_lower.find(pattern_lower)
+        if strategy == MatchStrategy.EXACT:
+            return self._match_exact(text, pattern)
+        elif strategy == MatchStrategy.CONTAINS:
+            return self._match_contains(text, pattern)
+        elif strategy == MatchStrategy.STARTS_WITH:
+            return self._match_starts_with(text, pattern)
+        elif strategy == MatchStrategy.ENDS_WITH:
+            return self._match_ends_with(text, pattern)
+        elif strategy == MatchStrategy.REGEX:
+            return self._match_regex(text, pattern)
+        elif strategy == MatchStrategy.FUZZY:
+            return self._match_fuzzy(text, pattern)
+        elif strategy == MatchStrategy.CASE_INSENSITIVE:
+            return self._match_case_insensitive(text, pattern)
+        return None
+
+    def _match_exact(self, text: str, pattern: str) -> Optional[TextMatch]:
+        """Exact string match."""
+        if text == pattern:
+            return TextMatch(text=text, start=0, end=len(text), score=1.0)
+        return None
+
+    def _match_contains(self, text: str, pattern: str) -> Optional[TextMatch]:
+        """Substring match."""
+        idx = text.find(pattern)
         if idx >= 0:
-            return TextMatch(
-                text=pattern,
-                match_type=MatchType.CONTAINS,
-                confidence=1.0,
-                start_index=idx,
-                end_index=idx + len(pattern),
-            )
-        return TextMatch(text, MatchType.CONTAINS, 0.0)
-    
-    def _match_starts_with(
-        self, text: str, pattern: str,
-        text_lower: str, pattern_lower: str,
-        options: TextSearchOptions,
-    ) -> TextMatch:
-        if text_lower.startswith(pattern_lower):
-            return TextMatch(
-                text=pattern,
-                match_type=MatchType.STARTS_WITH,
-                confidence=1.0,
-                start_index=0,
-                end_index=len(pattern),
-            )
-        return TextMatch(text, MatchType.STARTS_WITH, 0.0)
-    
-    def _match_ends_with(
-        self, text: str, pattern: str,
-        text_lower: str, pattern_lower: str,
-        options: TextSearchOptions,
-    ) -> TextMatch:
-        if text_lower.endswith(pattern_lower):
-            return TextMatch(
-                text=pattern,
-                match_type=MatchType.ENDS_WITH,
-                confidence=1.0,
-                start_index=len(text) - len(pattern),
-                end_index=len(text),
-            )
-        return TextMatch(text, MatchType.ENDS_WITH, 0.0)
-    
-    def _match_fuzzy(
-        self, text: str, pattern: str, options: TextSearchOptions
-    ) -> TextMatch:
-        confidence = difflib.SequenceMatcher(None, pattern.lower(), text.lower()).ratio()
-        return TextMatch(
-            text=pattern,
-            match_type=MatchType.FUZZY,
-            confidence=confidence,
-        )
-    
-    def _match_regex(
-        self, text: str, pattern: str, options: TextSearchOptions
-    ) -> TextMatch:
+            return TextMatch(text=text, start=idx, end=idx + len(pattern), score=1.0)
+        return None
+
+    def _match_starts_with(self, text: str, pattern: str) -> Optional[TextMatch]:
+        """Match if text starts with pattern."""
+        if text.startswith(pattern):
+            return TextMatch(text=text, start=0, end=len(pattern), score=1.0)
+        return None
+
+    def _match_ends_with(self, text: str, pattern: str) -> Optional[TextMatch]:
+        """Match if text ends with pattern."""
+        if text.endswith(pattern):
+            return TextMatch(text=text, start=len(text) - len(pattern), end=len(text), score=1.0)
+        return None
+
+    def _match_regex(self, text: str, pattern: str) -> Optional[TextMatch]:
+        """Regular expression match."""
         try:
-            regex = re.compile(pattern, 0 if options.case_sensitive else re.IGNORECASE)
-            match = regex.search(text)
+            compiled: Pattern[str] = re.compile(pattern)
+            match = compiled.search(text)
             if match:
                 return TextMatch(
-                    text=pattern,
-                    match_type=MatchType.REGEX,
-                    confidence=1.0,
-                    start_index=match.start(),
-                    end_index=match.end(),
-                    metadata={"groups": match.groups()},
+                    text=text,
+                    start=match.start(),
+                    end=match.end(),
+                    score=1.0,
                 )
         except re.error:
             pass
-        return TextMatch(text, MatchType.REGEX, 0.0)
-    
-    def _match_case_insensitive(
-        self, text: str, pattern: str,
-        text_lower: str, pattern_lower: str,
-        options: TextSearchOptions,
-    ) -> TextMatch:
-        idx = text_lower.find(pattern_lower)
-        if idx >= 0:
+        return None
+
+    def _match_fuzzy(self, text: str, pattern: str) -> Optional[TextMatch]:
+        """Fuzzy string match with threshold."""
+        score = self._calculate_similarity(text, pattern)
+        if score >= self._fuzzy_threshold:
+            # Find best matching substring
+            start, end = self._find_best_substring(text, pattern)
             return TextMatch(
-                text=pattern,
-                match_type=MatchType.CASE_INSENSITIVE,
-                confidence=1.0,
-                start_index=idx,
-                end_index=idx + len(pattern),
+                text=text,
+                start=start,
+                end=end,
+                score=score,
             )
-        return TextMatch(text, MatchType.CASE_INSENSITIVE, 0.0)
-    
-    def register_custom_matcher(
-        self, name: str, matcher: Callable[[str, str], float]
-    ) -> None:
-        """
-        Register a custom matching function.
-        
-        Args:
-            name: Name of the matcher
-            matcher: Function(text, pattern) -> confidence [0.0, 1.0]
-        """
-        self._custom_matchers[name] = matcher
-    
-    def match_custom(
-        self, name: str, text: str, pattern: str
-    ) -> TextMatch | None:
-        """Execute a custom matcher by name."""
-        if name not in self._custom_matchers:
-            return None
-        confidence = self._custom_matchers[name](text, pattern)
-        return TextMatch(
-            text=pattern,
-            match_type=MatchType.EXACT,
-            confidence=confidence,
-        )
+        return None
+
+    def _match_case_insensitive(self, text: str, pattern: str) -> Optional[TextMatch]:
+        """Case-insensitive exact match."""
+        lower_text = text.lower()
+        lower_pattern = pattern.lower()
+        if lower_text == lower_pattern:
+            return TextMatch(text=text, start=0, end=len(text), score=1.0)
+        return None
+
+    def _calculate_similarity(self, s1: str, s2: str) -> float:
+        """Calculate string similarity using simple scoring."""
+        if not s1 or not s2:
+            return 0.0
+
+        # Simple Levenshtein-like ratio
+        longer = s1 if len(s1) >= len(s2) else s2
+        shorter = s2 if len(s1) >= len(s2) else s1
+
+        if len(longer) == 0:
+            return 1.0
+
+        matches = sum(1 for c in shorter if c in longer)
+        return matches / len(longer)
+
+    def _find_best_substring(self, text: str, pattern: str) -> Tuple[int, int]:
+        """Find the substring of text that best matches pattern."""
+        if pattern in text:
+            idx = text.find(pattern)
+            return idx, idx + len(pattern)
+
+        # Find longest common subsequence window
+        best_len = 0
+        best_start = 0
+        best_end = 0
+
+        for i in range(len(text)):
+            for j in range(i + 1, len(text) + 1):
+                substring = text[i:j]
+                score = self._calculate_similarity(substring, pattern)
+                if score > self._fuzzy_threshold and len(substring) > best_len:
+                    best_len = len(substring)
+                    best_start = i
+                    best_end = j
+
+        return best_start, best_end
+
+    def find_all(
+        self,
+        text: str,
+        pattern: str,
+        strategy: MatchStrategy = MatchStrategy.CONTAINS,
+    ) -> List[TextMatch]:
+        """Find all occurrences of pattern in text."""
+        matches: List[TextMatch] = []
+
+        if strategy == MatchStrategy.CONTAINS:
+            idx = 0
+            while True:
+                idx = text.find(pattern, idx)
+                if idx < 0:
+                    break
+                matches.append(TextMatch(
+                    text=text,
+                    start=idx,
+                    end=idx + len(pattern),
+                    score=1.0,
+                ))
+                idx += 1
+
+        elif strategy == MatchStrategy.REGEX:
+            try:
+                compiled = re.compile(pattern)
+                for match in compiled.finditer(text):
+                    matches.append(TextMatch(
+                        text=text,
+                        start=match.start(),
+                        end=match.end(),
+                        score=1.0,
+                    ))
+            except re.error:
+                pass
+
+        return matches
 
 
 class TextFinder:
     """
-    Finds text across multiple elements or strings.
-    
-    Example:
-        finder = TextFinder()
-        results = finder.find_all(["Hello", "World", "Hello World"], "hello")
+    Finds text within UI elements using accessibility APIs.
+
+    Searches through element text content, titles, labels,
+    and values to locate specified text.
     """
-    
-    def __init__(self, matcher: TextMatcher | None = None):
-        self._matcher = matcher or TextMatcher()
-    
-    def find_first(
+
+    def __init__(self) -> None:
+        self._matcher = TextMatcher()
+        self._cache: Dict[str, List[TextMatch]] = {}
+
+    def set_fuzzy_threshold(self, threshold: float) -> TextFinder:
+        """Set fuzzy match threshold."""
+        self._matcher.set_fuzzy_threshold(threshold)
+        return self
+
+    def find_in_element(
         self,
-        texts: list[str],
-        pattern: str,
-        match_type: MatchType = MatchType.CONTAINS,
-    ) -> tuple[int, TextMatch] | None:
+        element: Dict[str, Any],
+        text: str,
+        strategy: MatchStrategy = MatchStrategy.CONTAINS,
+    ) -> TextSearchResult:
         """
-        Find first matching text in a list.
-        
-        Returns:
-            Tuple of (index, TextMatch) or None
+        Search for text within a UI element.
+
+        Searches element text, title, value, and label.
         """
-        for i, text in enumerate(texts):
-            match = self._matcher.match(text, pattern, match_type)
-            if match.confidence >= 0.8:
-                return (i, match)
-        return None
-    
-    def find_all(
+        result = TextSearchResult()
+
+        # Search in various text fields
+        text_sources = [
+            element.get("title", ""),
+            element.get("value", ""),
+            element.get("text", ""),
+            element.get("label", ""),
+            element.get("description", ""),
+        ]
+
+        for source in text_sources:
+            if not isinstance(source, str):
+                continue
+
+            match = self._matcher.match(source, text, strategy)
+            if match:
+                result.found = True
+                result.matches.append(match)
+
+        result.element = element.get("elementId", "")
+        result.path = element.get("path", "")
+        return result
+
+    def find_all_in_tree(
         self,
-        texts: list[str],
-        pattern: str,
-        match_type: MatchType = MatchType.CONTAINS,
-    ) -> list[tuple[int, TextMatch]]:
-        """
-        Find all matching texts.
-        
-        Returns:
-            List of (index, TextMatch) tuples
-        """
-        results = []
-        for i, text in enumerate(texts):
-            match = self._matcher.match(text, pattern, match_type)
-            if match.confidence >= 0.8:
-                results.append((i, match))
+        elements: List[Dict[str, Any]],
+        text: str,
+        strategy: MatchStrategy = MatchStrategy.CONTAINS,
+    ) -> List[TextSearchResult]:
+        """Search for text across all elements in a tree."""
+        results: List[TextSearchResult] = []
+
+        for element in elements:
+            result = self.find_in_element(element, text, strategy)
+            if result.found:
+                results.append(result)
+
         return results
-    
-    def filter_texts(
+
+    def find_by_text(
         self,
-        texts: list[str],
-        pattern: str,
-        match_type: MatchType = MatchType.CONTAINS,
-        min_confidence: float = 0.8,
-    ) -> list[str]:
-        """Filter texts that match the pattern."""
-        results = []
-        for text in texts:
-            match = self._matcher.match(text, pattern, match_type)
-            if match.confidence >= min_confidence:
-                results.append(text)
-        return results
+        elements: List[Dict[str, Any]],
+        text: str,
+        strategy: MatchStrategy = MatchStrategy.CONTAINS,
+    ) -> List[Dict[str, Any]]:
+        """Find all elements containing the specified text."""
+        matching: List[Dict[str, Any]] = []
+
+        for element in elements:
+            result = self.find_in_element(element, text, strategy)
+            if result.found:
+                matching.append(element)
+
+        return matching
 
 
 def normalize_text(text: str) -> str:
-    """
-    Normalize text for comparison.
-    
-    - Strips whitespace
-    - Converts to lowercase
-    - Removes extra spaces
-    """
-    text = text.strip()
-    text = text.lower()
-    text = re.sub(r"\s+", " ", text)
-    return text
+    """Normalize text for comparison by removing extra whitespace."""
+    return " ".join(text.split())
 
 
-def extract_numbers(text: str) -> list[float]:
-    """Extract all numbers from text."""
-    pattern = r"-?\d+\.?\d*"
-    matches = re.findall(pattern, text)
-    return [float(m) for m in matches]
-
-
-def extract_emails(text: str) -> list[str]:
-    """Extract email addresses from text."""
-    pattern = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
-    return re.findall(pattern, text)
-
-
-def extract_urls(text: str) -> list[str]:
-    """Extract URLs from text."""
-    pattern = r"https?://[^\s<>\"]+"
-    return re.findall(pattern, text)
+def extract_text_segments(text: str) -> List[str]:
+    """Split text into segments (words, punctuation, whitespace)."""
+    return re.findall(r'\S+|\s+', text)
