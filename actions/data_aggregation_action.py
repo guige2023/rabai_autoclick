@@ -1,25 +1,40 @@
 """
-Data Aggregation Action - Aggregates data with grouping and statistics.
+Data Aggregation Action Module
 
-This module provides data aggregation capabilities including group-by,
-rollup, cube operations, and statistical aggregations.
+Streaming and batch data aggregation with support for
+windowing, grouping, and custom aggregation functions.
+
+MIT License - Copyright (c) 2025 RabAi Research
 """
 
 from __future__ import annotations
 
-import statistics
-import math
-from dataclasses import dataclass, field
-from typing import Any, Callable, TypeVar
-from enum import Enum
+import asyncio
+import logging
 from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Set, TypeVar, Generic
 
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+R = TypeVar("R")
 
 
-class AggregationFunction(Enum):
-    """Aggregation functions."""
+class WindowType(Enum):
+    """Windowing types for stream processing."""
+
+    TUMBLING = "tumbling"
+    SLIDING = "sliding"
+    SESSION = "session"
+    FIXED = "fixed"
+
+
+class AggregationType(Enum):
+    """Built-in aggregation types."""
+
     SUM = "sum"
     COUNT = "count"
     AVG = "avg"
@@ -27,267 +42,443 @@ class AggregationFunction(Enum):
     MAX = "max"
     FIRST = "first"
     LAST = "last"
-    MEDIAN = "median"
-    STD_DEV = "std_dev"
-    VARIANCE = "variance"
-    DISTINCT = "distinct"
+    LIST = "list"
+    DICT = "dict"
+    CUSTOM = "custom"
 
 
 @dataclass
-class GroupBySpec:
-    """Specification for group-by operation."""
-    fields: list[str]
-    aggregations: list[tuple[str, AggregationFunction, str]]
-    
+class TimeWindow:
+    """Time-based window for aggregation."""
+
+    window_type: WindowType
+    size_seconds: float
+    slide_seconds: Optional[float] = None
+    start_time: Optional[datetime] = None
+
+    def get_window_end(self, reference_time: datetime) -> datetime:
+        """Get window end time."""
+        if self.start_time is None:
+            return reference_time + timedelta(seconds=self.size_seconds)
+
+        elapsed = (reference_time - self.start_time).total_seconds()
+        window_num = int(elapsed / self.slide_seconds) if self.slide_seconds else 0
+
+        if self.window_type == WindowType.TUMBLING:
+            return self.start_time + timedelta(
+                seconds=(window_num + 1) * self.size_seconds
+            )
+        elif self.window_type == WindowType.SLIDING:
+            return self.start_time + timedelta(
+                seconds=window_num * (self.slide_seconds or 1) + self.size_seconds
+            )
+
+        return reference_time + timedelta(seconds=self.size_seconds)
+
 
 @dataclass
-class AggregationResult:
-    """Result of aggregation operation."""
-    groups: list[dict[str, Any]]
-    group_keys: list[dict[str, Any]]
-    total_records: int
-    group_count: int
+class AggregationConfig:
+    """Configuration for aggregation operations."""
+
+    window_type: WindowType = WindowType.TUMBLING
+    window_size_seconds: float = 60.0
+    slide_interval_seconds: float = 60.0
+    max_window_size: int = 10000
+    emit_on_window_close: bool = True
+    late_arrival_tolerance_seconds: float = 0.0
 
 
-class DataAggregator:
+@dataclass
+class AggregationResult(Generic[R]):
+    """Result of an aggregation operation."""
+
+    window_id: str
+    window_start: datetime
+    window_end: datetime
+    value: R
+    item_count: int
+    is_final: bool = True
+
+
+class Aggregator(Generic[T, R]):
     """
-    Aggregates data with various grouping strategies.
-    
-    Example:
-        aggregator = DataAggregator()
-        result = aggregator.aggregate(
-            records,
-            ["category"],
-            [("amount", AggregationFunction.SUM, "total_amount")]
-        )
+    Base aggregator class for custom aggregation logic.
     """
-    
-    def __init__(self) -> None:
-        self._functions = {
-            AggregationFunction.SUM: self._sum,
-            AggregationFunction.COUNT: self._count,
-            AggregationFunction.AVG: self._avg,
-            AggregationFunction.MIN: self._min,
-            AggregationFunction.MAX: self._max,
-            AggregationFunction.FIRST: self._first,
-            AggregationFunction.LAST: self._last,
-            AggregationFunction.MEDIAN: self._median,
-            AggregationFunction.STD_DEV: self._std_dev,
-            AggregationFunction.VARIANCE: self._variance,
-            AggregationFunction.DISTINCT: self._distinct,
-        }
-    
-    def aggregate(
-        self,
-        data: list[dict[str, Any]],
-        group_fields: list[str],
-        aggregations: list[tuple[str, AggregationFunction, str]],
-    ) -> AggregationResult:
-        """
-        Aggregate data by grouping fields.
-        
-        Args:
-            data: List of records
-            group_fields: Fields to group by
-            aggregations: List of (source_field, function, output_field)
-            
-        Returns:
-            AggregationResult with grouped data
-        """
-        groups: dict[tuple, list[dict[str, Any]]] = defaultdict(list)
-        
-        for record in data:
-            key = tuple(self._get_nested(record, f) for f in group_fields)
-            groups[key].append(record)
-        
-        results: list[dict[str, Any]] = []
-        group_keys: list[dict[str, Any]] = []
-        
-        for key, group_data in groups.items():
-            result: dict[str, Any] = {}
-            
-            for field_name, key_part in zip(group_fields, key):
-                result[field_name] = key_part
-            
-            for source_field, agg_func, output_field in aggregations:
-                values = [self._get_nested(r, source_field) for r in group_data]
-                values = [v for v in values if v is not None]
-                
-                func = self._functions.get(agg_func, self._count)
-                result[output_field] = func(values)
-            
-            results.append(result)
-            group_keys.append(dict(zip(group_fields, key)))
-        
-        return AggregationResult(
-            groups=results,
-            group_keys=group_keys,
-            total_records=len(data),
-            group_count=len(results),
-        )
-    
-    def _sum(self, values: list[Any]) -> float:
-        """Sum of values."""
-        return sum(v for v in values if isinstance(v, (int, float)))
-    
-    def _count(self, values: list[Any]) -> int:
-        """Count of values."""
-        return len(values)
-    
-    def _avg(self, values: list[Any]) -> float | None:
-        """Average of values."""
-        numeric = [v for v in values if isinstance(v, (int, float))]
-        return sum(numeric) / len(numeric) if numeric else None
-    
-    def _min(self, values: list[Any]) -> Any:
-        """Minimum value."""
-        filtered = [v for v in values if v is not None]
-        return min(filtered) if filtered else None
-    
-    def _max(self, values: list[Any]) -> Any:
-        """Maximum value."""
-        filtered = [v for v in values if v is not None]
-        return max(filtered) if filtered else None
-    
-    def _first(self, values: list[Any]) -> Any:
-        """First value."""
-        return values[0] if values else None
-    
-    def _last(self, values: list[Any]) -> Any:
-        """Last value."""
-        return values[-1] if values else None
-    
-    def _median(self, values: list[Any]) -> float | None:
-        """Median of values."""
-        numeric = [v for v in values if isinstance(v, (int, float))]
-        if not numeric:
-            return None
-        sorted_vals = sorted(numeric)
-        n = len(sorted_vals)
-        if n % 2 == 0:
-            return (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2
-        return sorted_vals[n // 2]
-    
-    def _std_dev(self, values: list[Any]) -> float | None:
-        """Standard deviation."""
-        numeric = [v for v in values if isinstance(v, (int, float))]
-        if len(numeric) < 2:
-            return None
-        return statistics.stdev(numeric)
-    
-    def _variance(self, values: list[Any]) -> float | None:
-        """Variance."""
-        numeric = [v for v in values if isinstance(v, (int, float))]
-        if len(numeric) < 2:
-            return None
-        return statistics.variance(numeric)
-    
-    def _distinct(self, values: list[Any]) -> int:
-        """Count of distinct values."""
-        return len(set(values))
-    
-    def _get_nested(self, data: dict[str, Any], path: str) -> Any:
-        """Get nested value using dot notation."""
-        keys = path.split(".")
-        current = data
-        for key in keys:
-            if isinstance(current, dict):
-                current = current.get(key)
+
+    def __init__(self, aggregation_fn: Callable[[List[T]], R]):
+        self.aggregation_fn = aggregation_fn
+        self._items: List[T] = []
+
+    def add(self, item: T) -> None:
+        """Add an item to the aggregation."""
+        self._items.append(item)
+
+    def get_result(self) -> R:
+        """Get the aggregation result."""
+        return self.aggregation_fn(self._items)
+
+    def reset(self) -> None:
+        """Reset the aggregator."""
+        self._items = []
+
+    @property
+    def count(self) -> int:
+        """Get number of items."""
+        return len(self._items)
+
+
+class BuiltInAggregations:
+    """Factory for built-in aggregation functions."""
+
+    @staticmethod
+    def sum(field_name: Optional[str] = None) -> Callable[[List[Dict]], float]:
+        """Sum aggregation."""
+        def agg(items: List[Dict]) -> float:
+            if field_name:
+                return sum(d.get(field_name, 0) for d in items)
+            return sum(d for d in items if isinstance(d, (int, float)))
+        return agg
+
+    @staticmethod
+    def avg(field_name: Optional[str] = None) -> Callable[[List[Dict]], float]:
+        """Average aggregation."""
+        def agg(items: List[Dict]) -> float:
+            if field_name:
+                values = [d.get(field_name, 0) for d in items]
             else:
-                return None
-        return current
+                values = [d for d in items if isinstance(d, (int, float))]
+            return sum(values) / len(values) if values else 0.0
+        return agg
+
+    @staticmethod
+    def count() -> Callable[[List[Any]], int]:
+        """Count aggregation."""
+        return lambda items: len(items)
+
+    @staticmethod
+    def min(field_name: Optional[str] = None) -> Callable[[List[Dict]], Any]:
+        """Minimum aggregation."""
+        def agg(items: List[Dict]) -> Any:
+            if field_name:
+                values = [d.get(field_name) for d in items]
+            else:
+                values = items
+            return min(values) if values else None
+        return agg
+
+    @staticmethod
+    def max(field_name: Optional[str] = None) -> Callable[[List[Dict]], Any]:
+        """Maximum aggregation."""
+        def agg(items: List[Dict]) -> Any:
+            if field_name:
+                values = [d.get(field_name) for d in items]
+            else:
+                values = items
+            return max(values) if values else None
+        return agg
+
+    @staticmethod
+    def list(field_name: Optional[str] = None) -> Callable[[List[Dict]], List]:
+        """List aggregation."""
+        def agg(items: List[Dict]) -> List:
+            if field_name:
+                return [d.get(field_name) for d in items]
+            return list(items)
+        return agg
+
+    @staticmethod
+    def dict(
+        key_field: str,
+        value_field: Optional[str] = None,
+    ) -> Callable[[List[Dict]], Dict]:
+        """Dictionary aggregation."""
+        def agg(items: List[Dict]) -> Dict:
+            result = {}
+            for d in items:
+                key = d.get(key_field)
+                if key is not None:
+                    if value_field:
+                        result[key] = d.get(value_field)
+                    else:
+                        result[key] = d
+            return result
+        return agg
+
+    @staticmethod
+    def percentile(
+        field_name: str,
+        percentile: float,
+    ) -> Callable[[List[Dict]], float]:
+        """Percentile aggregation."""
+        def agg(items: List[Dict]) -> float:
+            values = sorted(d.get(field_name, 0) for d in items)
+            if not values:
+                return 0.0
+            idx = int(len(values) * percentile / 100)
+            return values[min(idx, len(values) - 1)]
+        return agg
 
 
-class RollupAggregator:
-    """Performs rollup aggregations (hierarchical grouping)."""
-    
-    def __init__(self) -> None:
-        self._aggregator = DataAggregator()
-    
-    def rollup(
+class WindowedAggregator(Generic[T]):
+    """
+    Aggregator with time-windowing support.
+    """
+
+    def __init__(
         self,
-        data: list[dict[str, Any]],
-        hierarchy_fields: list[str],
-        aggregations: list[tuple[str, AggregationFunction, str]],
-    ) -> list[dict[str, Any]]:
-        """
-        Perform rollup aggregation across hierarchy levels.
-        
-        Example: Rollup on [year, quarter, month] produces:
-        - year totals
-        - year/quarter totals
-        - year/quarter/month totals
-        """
+        aggregation_fn: Callable[[List[T]], R],
+        config: AggregationConfig,
+    ):
+        self.aggregation_fn = aggregation_fn
+        self.config = config
+        self._windows: Dict[str, List[T]] = defaultdict(list)
+        self._window_times: Dict[str, datetime] = {}
+
+    def add(self, item: T, timestamp: datetime, window_id: str) -> Optional[AggregationResult[R]]:
+        """Add an item and return result if window closes."""
+        self._windows[window_id].append(item)
+
+        if len(self._windows[window_id]) >= self.config.max_window_size:
+            return self._close_window(window_id)
+
+        return None
+
+    def _close_window(self, window_id: str) -> AggregationResult[R]:
+        """Close a window and return results."""
+        items = self._windows.get(window_id, [])
+        result = AggregationResult(
+            window_id=window_id,
+            window_start=self._window_times.get(window_id, datetime.now()),
+            window_end=datetime.now(),
+            value=self.aggregation_fn(items),
+            item_count=len(items),
+        )
+
+        del self._windows[window_id]
+        if window_id in self._window_times:
+            del self._window_times[window_id]
+
+        return result
+
+    def close_old_windows(
+        self,
+        reference_time: datetime,
+    ) -> List[AggregationResult[R]]:
+        """Close windows older than the reference time."""
         results = []
-        
-        for level in range(len(hierarchy_fields)):
-            group_fields = hierarchy_fields[: len(hierarchy_fields) - level]
-            
-            if not group_fields:
-                continue
-            
-            result = self._aggregator.aggregate(data, group_fields, aggregations)
-            
-            for group_result in result.groups:
-                group_result["_rollup_level"] = len(group_fields)
-                results.append(group_result)
-        
+        cutoff = reference_time - timedelta(seconds=self.config.late_arrival_tolerance_seconds)
+
+        for window_id, window_start in list(self._window_times.items()):
+            if window_start < cutoff:
+                result = self._close_window(window_id)
+                if result:
+                    results.append(result)
+
         return results
 
 
-class DataAggregationAction:
+class DataAggregationAction(Generic[T]):
     """
-    Data aggregation action for automation workflows.
-    
-    Example:
+    Main action class for data aggregation.
+
+    Features:
+    - Built-in aggregations (sum, avg, count, min, max, etc.)
+    - Custom aggregation functions
+    - Time-windowing (tumbling, sliding, session)
+    - Group-by aggregation
+    - Streaming aggregation with buffering
+
+    Usage:
         action = DataAggregationAction()
-        result = await action.aggregate(
-            sales_records,
-            group_by=["region", "product"],
-            aggregations=[
-                ("amount", AggregationFunction.SUM, "total_sales"),
-                ("quantity", AggregationFunction.AVG, "avg_quantity"),
-            ]
-        )
+        action.add_aggregation("count", AggregationType.COUNT)
+        action.add_group_by("category")
+        result = await action.aggregate(data)
     """
-    
-    def __init__(self) -> None:
-        self.aggregator = DataAggregator()
-        self.rollup_aggregator = RollupAggregator()
-    
+
+    def __init__(self, config: Optional[AggregationConfig] = None):
+        self.config = config or AggregationConfig()
+        self._aggregations: Dict[str, Callable[[List], Any]] = {}
+        self._group_by_fields: List[str] = []
+        self._window: Optional[TimeWindow] = None
+        self._stats = {
+            "items_processed": 0,
+            "windows_closed": 0,
+            "aggregations_computed": 0,
+        }
+
+    def add_aggregation(
+        self,
+        name: str,
+        agg_type: AggregationType,
+        field_name: Optional[str] = None,
+        **kwargs,
+    ) -> "DataAggregationAction":
+        """Add an aggregation."""
+        if agg_type == AggregationType.SUM:
+            self._aggregations[name] = BuiltInAggregations.sum(field_name)
+        elif agg_type == AggregationType.AVG:
+            self._aggregations[name] = BuiltInAggregations.avg(field_name)
+        elif agg_type == AggregationType.COUNT:
+            self._aggregations[name] = BuiltInAggregations.count()
+        elif agg_type == AggregationType.MIN:
+            self._aggregations[name] = BuiltInAggregations.min(field_name)
+        elif agg_type == AggregationType.MAX:
+            self._aggregations[name] = BuiltInAggregations.max(field_name)
+        elif agg_type == AggregationType.LIST:
+            self._aggregations[name] = BuiltInAggregations.list(field_name)
+        elif agg_type == AggregationType.DICT:
+            self._aggregations[name] = BuiltInAggregations.dict(
+                kwargs.get("key_field", "id"),
+                kwargs.get("value_field"),
+            )
+        else:
+            raise ValueError(f"Unsupported aggregation type: {agg_type}")
+
+        return self
+
+    def add_custom_aggregation(
+        self,
+        name: str,
+        aggregation_fn: Callable[[List[Any]], Any],
+    ) -> "DataAggregationAction":
+        """Add a custom aggregation function."""
+        self._aggregations[name] = aggregation_fn
+        return self
+
+    def add_group_by(self, *fields: str) -> "DataAggregationAction":
+        """Add group-by fields."""
+        self._group_by_fields.extend(fields)
+        return self
+
+    def set_window(
+        self,
+        window_type: WindowType,
+        size_seconds: float,
+        slide_seconds: Optional[float] = None,
+    ) -> "DataAggregationAction":
+        """Set time window configuration."""
+        self._window = TimeWindow(
+            window_type=window_type,
+            size_seconds=size_seconds,
+            slide_seconds=slide_seconds,
+            start_time=datetime.now(),
+        )
+        return self
+
+    def _get_group_key(self, item: Dict[str, Any]) -> str:
+        """Get group key from item."""
+        if not self._group_by_fields:
+            return "_global"
+
+        parts = []
+        for field in self._group_by_fields:
+            value = item.get(field, "__none__")
+            parts.append(f"{field}={value}")
+        return "|".join(parts)
+
     async def aggregate(
         self,
-        data: list[dict[str, Any]],
-        group_by: list[str],
-        aggregations: list[tuple[str, str, str]],
-    ) -> AggregationResult:
-        """Aggregate data with grouping."""
-        agg_specs = [
-            (field, AggregationFunction(agg.upper()), output)
-            for field, agg, output in aggregations
-        ]
-        return self.aggregator.aggregate(data, group_by, agg_specs)
-    
-    async def rollup(
+        data: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Aggregate data."""
+        self._stats["items_processed"] += len(data)
+
+        if self._group_by_fields:
+            # Group-by aggregation
+            groups: Dict[str, List[Dict]] = defaultdict(list)
+            for item in data:
+                key = self._get_group_key(item)
+                groups[key].append(item)
+
+            results = {}
+            for group_key, group_items in groups.items():
+                group_result = {}
+                for name, agg_fn in self._aggregations.items():
+                    group_result[name] = agg_fn(group_items)
+                results[group_key] = group_result
+                self._stats["aggregations_computed"] += 1
+
+            return {"groups": results, "total_groups": len(groups)}
+
+        else:
+            # Simple aggregation
+            result = {}
+            for name, agg_fn in self._aggregations.items():
+                result[name] = agg_fn(data)
+                self._stats["aggregations_computed"] += 1
+
+            return result
+
+    async def aggregate_stream(
         self,
-        data: list[dict[str, Any]],
-        hierarchy: list[str],
-        aggregations: list[tuple[str, str, str]],
-    ) -> list[dict[str, Any]]:
-        """Perform rollup aggregation."""
-        agg_specs = [
-            (field, AggregationFunction(agg.upper()), output)
-            for field, agg, output in aggregations
-        ]
-        return self.rollup_aggregator.rollup(data, hierarchy, agg_specs)
+        data_stream: List[Dict[str, Any]],
+    ) -> List[AggregationResult]:
+        """Aggregate data with windowing."""
+        results: List[AggregationResult] = []
+        window_aggregators: Dict[str, WindowedAggregator] = {}
+
+        for item in data_stream:
+            timestamp = datetime.now()
+            window_id = "default"
+
+            if self._window:
+                window_id = f"window_{int(timestamp.timestamp() / self._window.size_seconds)}"
+
+            if window_id not in window_aggregators:
+                window_aggregators[window_id] = WindowedAggregator(
+                    self._aggregations.get("value", lambda x: x[0]),
+                    self.config,
+                )
+
+            agg = window_aggregators[window_id]
+            result = agg.add(item, timestamp, window_id)
+
+            if result:
+                results.append(result)
+                self._stats["windows_closed"] += 1
+
+        # Close remaining windows
+        for agg in window_aggregators.values():
+            closed = agg.close_old_windows(datetime.now())
+            results.extend(closed)
+
+        return results
+
+    def get_stats(self) -> Dict[str, int]:
+        """Get aggregation statistics."""
+        return self._stats.copy()
 
 
-# Export public API
-__all__ = [
-    "AggregationFunction",
-    "GroupBySpec",
-    "AggregationResult",
-    "DataAggregator",
-    "RollupAggregator",
-    "DataAggregationAction",
-]
+def demo_aggregation():
+    """Demonstrate aggregation usage."""
+    import asyncio
+
+    data = [
+        {"category": "A", "value": 10, "count": 1},
+        {"category": "A", "value": 20, "count": 1},
+        {"category": "B", "value": 15, "count": 1},
+        {"category": "B", "value": 25, "count": 1},
+        {"category": "A", "value": 30, "count": 1},
+    ]
+
+    action = DataAggregationAction()
+    action.add_aggregation("total_value", AggregationType.SUM, "value")
+    action.add_aggregation("avg_value", AggregationType.AVG, "value")
+    action.add_aggregation("min_value", AggregationType.MIN, "value")
+    action.add_aggregation("max_value", AggregationType.MAX, "value")
+    action.add_aggregation("item_count", AggregationType.COUNT)
+
+    result = asyncio.run(action.aggregate(data))
+    print(f"Simple aggregation: {result}")
+
+    # Group by
+    action2 = DataAggregationAction()
+    action2.add_aggregation("total_value", AggregationType.SUM, "value")
+    action2.add_group_by("category")
+
+    result2 = asyncio.run(action2.aggregate(data))
+    print(f"Group-by aggregation: {result2}")
+
+
+if __name__ == "__main__":
+    demo_aggregation()
