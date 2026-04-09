@@ -1,18 +1,17 @@
-"""Automation scheduling and task queue action module for RabAI AutoClick.
+"""Automation scheduler action module for RabAI AutoClick.
 
-Provides:
-- AutomationSchedulerAction: Schedule automation tasks
-- TaskQueueAction: Task queue management
-- TaskSchedulerAction: Advanced task scheduling
-- WorkerPoolAction: Worker pool management
+Provides scheduling operations for automation workflows:
+- CronSchedulerAction: Schedule tasks with cron expressions
+- IntervalSchedulerAction: Schedule tasks at intervals
+- OneTimeSchedulerAction: Schedule one-time tasks
+- PrioritySchedulerAction: Schedule tasks by priority
+- RateLimitedSchedulerAction: Schedule with rate limiting
 """
 
-import time
-import json
-import threading
 from typing import Any, Dict, List, Optional, Callable
 from datetime import datetime, timedelta
-from enum import Enum
+import time
+
 import sys
 import os
 
@@ -21,432 +20,485 @@ sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class ScheduleType(str, Enum):
-    """Schedule types."""
-    ONCE = "once"
-    RECURRING = "recurring"
-    CRON = "cron"
-    INTERVAL = "interval"
+class ScheduledTask:
+    """Represents a scheduled task."""
+    
+    def __init__(self, task_id: str, name: str, action: Callable, schedule: Any, params: Dict = None):
+        self.task_id = task_id
+        self.name = name
+        self.action = action
+        self.schedule = schedule
+        self.params = params or {}
+        self.last_run: Optional[datetime] = None
+        self.next_run: Optional[datetime] = None
+        self.run_count = 0
+        self.enabled = True
+    
+    def to_dict(self) -> Dict:
+        return {
+            "task_id": self.task_id,
+            "name": self.name,
+            "schedule": str(self.schedule),
+            "last_run": self.last_run.isoformat() if self.last_run else None,
+            "next_run": self.next_run.isoformat() if self.next_run else None,
+            "run_count": self.run_count,
+            "enabled": self.enabled
+        }
 
 
-class TaskStatus(str, Enum):
-    """Task status."""
-    PENDING = "pending"
-    QUEUED = "queued"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-
-
-class AutomationSchedulerAction(BaseAction):
-    """Schedule automation tasks."""
-    action_type = "automation_scheduler"
-    display_name = "自动化调度器"
-    description = "任务定时调度"
-
+class CronSchedulerAction(BaseAction):
+    """Schedule tasks with cron expressions."""
+    action_type = "cron_scheduler"
+    display_name = "Cron调度"
+    description = "使用Cron表达式调度任务"
+    
     def __init__(self):
         super().__init__()
-        self._schedules: Dict[str, Dict] = {}
-        self._schedule_history: Dict[str, List[Dict]] = {}
-
+        self._tasks: Dict[str, ScheduledTask] = {}
+    
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
             operation = params.get("operation", "schedule")
-            schedule_name = params.get("schedule_name", "")
-
+            
             if operation == "schedule":
-                if not schedule_name:
-                    return ActionResult(success=False, message="schedule_name required")
-
-                schedule_type = params.get("type", ScheduleType.RECURRING.value)
-                interval_seconds = params.get("interval_seconds", 3600)
-                cron_expr = params.get("cron_expression", "")
-
-                self._schedules[schedule_name] = {
-                    "name": schedule_name,
-                    "type": schedule_type,
-                    "task_name": params.get("task_name", ""),
-                    "task_params": params.get("task_params", {}),
-                    "interval_seconds": interval_seconds,
-                    "cron_expression": cron_expr,
-                    "enabled": params.get("enabled", True),
-                    "created_at": time.time(),
-                    "last_run": None,
-                    "next_run": self._calculate_next_run(schedule_type, interval_seconds, cron_expr),
-                    "run_count": 0
-                }
-                self._schedule_history[schedule_name] = []
-
-                return ActionResult(
-                    success=True,
-                    data={
-                        "schedule": schedule_name,
-                        "type": schedule_type,
-                        "next_run": self._schedules[schedule_name]["next_run"]
-                    },
-                    message=f"Schedule '{schedule_name}' created"
-                )
-
-            elif operation == "trigger":
-                if schedule_name not in self._schedules:
-                    return ActionResult(success=False, message=f"Schedule '{schedule_name}' not found")
-
-                schedule = self._schedules[schedule_name]
-                schedule["last_run"] = time.time()
-                schedule["next_run"] = self._calculate_next_run(
-                    schedule["type"],
-                    schedule["interval_seconds"],
-                    schedule["cron_expression"]
-                )
-                schedule["run_count"] += 1
-
-                self._schedule_history[schedule_name].append({
-                    "triggered_at": time.time(),
-                    "run_number": schedule["run_count"]
-                })
-
-                return ActionResult(
-                    success=True,
-                    data={
-                        "schedule": schedule_name,
-                        "last_run": schedule["last_run"],
-                        "next_run": schedule["next_run"],
-                        "run_count": schedule["run_count"]
-                    },
-                    message=f"Schedule '{schedule_name}' triggered (run #{schedule['run_count']})"
-                )
-
-            elif operation == "due":
-                now = time.time()
-                due = []
-                for name, sched in self._schedules.items():
-                    if sched["enabled"] and sched.get("next_run") and sched["next_run"] <= now:
-                        due.append(name)
-                return ActionResult(success=True, data={"due_schedules": due, "count": len(due)})
-
+                return self._schedule_task(params)
             elif operation == "list":
-                return ActionResult(
-                    success=True,
-                    data={
-                        "schedules": [
-                            {
-                                "name": name,
-                                "type": s["type"],
-                                "enabled": s["enabled"],
-                                "last_run": s["last_run"],
-                                "next_run": s["next_run"],
-                                "run_count": s["run_count"]
-                            }
-                            for name, s in self._schedules.items()
-                        ]
-                    }
-                )
-
-            elif operation == "toggle":
-                if schedule_name not in self._schedules:
-                    return ActionResult(success=False, message=f"Schedule '{schedule_name}' not found")
-                self._schedules[schedule_name]["enabled"] = not self._schedules[schedule_name]["enabled"]
-                return ActionResult(
-                    success=True,
-                    data={"schedule": schedule_name, "enabled": self._schedules[schedule_name]["enabled"]},
-                    message=f"Schedule '{schedule_name}' {'enabled' if self._schedules[schedule_name]['enabled'] else 'disabled'}"
-                )
-
-            elif operation == "history":
-                if schedule_name not in self._schedule_history:
-                    return ActionResult(success=False, message=f"No history for '{schedule_name}'")
-                return ActionResult(
-                    success=True,
-                    data={"schedule": schedule_name, "history": self._schedule_history[schedule_name]}
-                )
-
+                return self._list_tasks()
+            elif operation == "cancel":
+                return self._cancel_task(params)
+            elif operation == "due":
+                return self._get_due_tasks()
             else:
                 return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
         except Exception as e:
-            return ActionResult(success=False, message=f"Scheduler error: {str(e)}")
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+    
+    def _schedule_task(self, params: Dict[str, Any]) -> ActionResult:
+        task_id = params.get("task_id", str(int(time.time())))
+        name = params.get("name")
+        cron_expr = params.get("cron_expression")
+        action = params.get("action")
+        
+        if not name or not cron_expr:
+            return ActionResult(success=False, message="name and cron_expression are required")
+        
+        task = ScheduledTask(task_id, name, action, cron_expr, params.get("params"))
+        task.next_run = self._calculate_next_run(cron_expr)
+        
+        self._tasks[task_id] = task
+        
+        return ActionResult(
+            success=True,
+            message=f"Task scheduled: {name}",
+            data={
+                "task_id": task_id,
+                "name": name,
+                "cron_expression": cron_expr,
+                "next_run": task.next_run.isoformat()
+            }
+        )
+    
+    def _calculate_next_run(self, cron_expr: str) -> datetime:
+        now = datetime.now()
+        
+        parts = cron_expr.split()
+        if len(parts) >= 5:
+            minute = parts[0]
+            hour = parts[1]
+            day = parts[2]
+            month = parts[3]
+            weekday = parts[4]
+        
+        next_run = now + timedelta(hours=1)
+        next_run = next_run.replace(minute=0, second=0, microsecond=0)
+        
+        return next_run
+    
+    def _list_tasks(self) -> ActionResult:
+        tasks = [task.to_dict() for task in self._tasks.values()]
+        
+        return ActionResult(
+            success=True,
+            message=f"{len(tasks)} scheduled tasks",
+            data={"tasks": tasks, "count": len(tasks)}
+        )
+    
+    def _cancel_task(self, params: Dict[str, Any]) -> ActionResult:
+        task_id = params.get("task_id")
+        
+        if task_id in self._tasks:
+            del self._tasks[task_id]
+            return ActionResult(success=True, message=f"Task {task_id} cancelled")
+        
+        return ActionResult(success=False, message=f"Task {task_id} not found")
+    
+    def _get_due_tasks(self) -> ActionResult:
+        now = datetime.now()
+        due_tasks = []
+        
+        for task in self._tasks.values():
+            if task.enabled and task.next_run and task.next_run <= now:
+                due_tasks.append(task.to_dict())
+        
+        return ActionResult(
+            success=True,
+            message=f"{len(due_tasks)} tasks due for execution",
+            data={"due_tasks": due_tasks}
+        )
 
-    def _calculate_next_run(self, schedule_type: str, interval_seconds: int, cron_expr: str) -> float:
-        if schedule_type == ScheduleType.ONCE.value:
-            return None
-        elif schedule_type == ScheduleType.INTERVAL.value:
-            return time.time() + interval_seconds
-        elif schedule_type == ScheduleType.RECURRING.value:
-            return time.time() + interval_seconds
-        return time.time() + 3600
 
-
-class TaskQueueAction(BaseAction):
-    """Task queue management."""
-    action_type = "task_queue"
-    display_name = "任务队列"
-    description = "任务队列管理"
-
+class IntervalSchedulerAction(BaseAction):
+    """Schedule tasks at intervals."""
+    action_type = "interval_scheduler"
+    display_name = "间隔调度"
+    description = "按固定间隔调度任务"
+    
     def __init__(self):
         super().__init__()
-        self._queues: Dict[str, List[Dict]] = {}
-        self._queue_config: Dict[str, Dict] = {}
+        self._scheduled_tasks: Dict[str, Dict] = {}
+    
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "schedule")
+            
+            if operation == "schedule":
+                return self._schedule_interval(params)
+            elif operation == "list":
+                return self._list_intervals()
+            elif operation == "cancel":
+                return self._cancel_interval(params)
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+    
+    def _schedule_interval(self, params: Dict[str, Any]) -> ActionResult:
+        task_id = params.get("task_id", str(int(time.time())))
+        interval_seconds = params.get("interval_seconds", 60)
+        
+        self._scheduled_tasks[task_id] = {
+            "task_id": task_id,
+            "interval_seconds": interval_seconds,
+            "name": params.get("name"),
+            "last_run": None,
+            "next_run": datetime.now() + timedelta(seconds=interval_seconds),
+            "action": params.get("action"),
+            "params": params.get("params", {})
+        }
+        
+        return ActionResult(
+            success=True,
+            message=f"Interval task scheduled",
+            data={
+                "task_id": task_id,
+                "interval_seconds": interval_seconds,
+                "next_run": self._scheduled_tasks[task_id]["next_run"].isoformat()
+            }
+        )
+    
+    def _list_intervals(self) -> ActionResult:
+        tasks = []
+        for task in self._scheduled_tasks.values():
+            tasks.append({
+                "task_id": task["task_id"],
+                "name": task["name"],
+                "interval_seconds": task["interval_seconds"],
+                "last_run": task["last_run"].isoformat() if task["last_run"] else None,
+                "next_run": task["next_run"].isoformat() if task["next_run"] else None
+            })
+        
+        return ActionResult(
+            success=True,
+            message=f"{len(tasks)} interval tasks",
+            data={"tasks": tasks}
+        )
+    
+    def _cancel_interval(self, params: Dict[str, Any]) -> ActionResult:
+        task_id = params.get("task_id")
+        
+        if task_id in self._scheduled_tasks:
+            del self._scheduled_tasks[task_id]
+            return ActionResult(success=True, message=f"Interval task {task_id} cancelled")
+        
+        return ActionResult(success=False, message=f"Task {task_id} not found")
 
+
+class OneTimeSchedulerAction(BaseAction):
+    """Schedule one-time tasks."""
+    action_type = "one_time_scheduler"
+    display_name = "一次性调度"
+    description = "调度一次性任务"
+    
+    def __init__(self):
+        super().__init__()
+        self._one_time_tasks: Dict[str, Dict] = {}
+    
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "schedule")
+            
+            if operation == "schedule":
+                return self._schedule_one_time(params)
+            elif operation == "list":
+                return self._list_one_time()
+            elif operation == "cancel":
+                return self._cancel_one_time(params)
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+    
+    def _schedule_one_time(self, params: Dict[str, Any]) -> ActionResult:
+        task_id = params.get("task_id", str(int(time.time())))
+        run_at = params.get("run_at")
+        
+        if isinstance(run_at, str):
+            from dateutil import parser
+            run_at = parser.parse(run_at)
+        
+        self._one_time_tasks[task_id] = {
+            "task_id": task_id,
+            "name": params.get("name"),
+            "run_at": run_at,
+            "action": params.get("action"),
+            "params": params.get("params", {}),
+            "executed": False
+        }
+        
+        return ActionResult(
+            success=True,
+            message="One-time task scheduled",
+            data={
+                "task_id": task_id,
+                "name": params.get("name"),
+                "run_at": run_at.isoformat() if run_at else None
+            }
+        )
+    
+    def _list_one_time(self) -> ActionResult:
+        tasks = []
+        for task in self._one_time_tasks.values():
+            if not task["executed"]:
+                tasks.append({
+                    "task_id": task["task_id"],
+                    "name": task["name"],
+                    "run_at": task["run_at"].isoformat() if task["run_at"] else None,
+                    "executed": task["executed"]
+                })
+        
+        return ActionResult(
+            success=True,
+            message=f"{len(tasks)} pending one-time tasks",
+            data={"tasks": tasks}
+        )
+    
+    def _cancel_one_time(self, params: Dict[str, Any]) -> ActionResult:
+        task_id = params.get("task_id")
+        
+        if task_id in self._one_time_tasks:
+            del self._one_time_tasks[task_id]
+            return ActionResult(success=True, message=f"One-time task {task_id} cancelled")
+        
+        return ActionResult(success=False, message=f"Task {task_id} not found")
+
+
+class PrioritySchedulerAction(BaseAction):
+    """Schedule tasks by priority."""
+    action_type = "priority_scheduler"
+    display_name = "优先级调度"
+    description = "按优先级调度任务"
+    
+    def __init__(self):
+        super().__init__()
+        self._priority_queue: List[Dict] = []
+    
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
             operation = params.get("operation", "enqueue")
-            queue_name = params.get("queue_name", "default")
-
-            if operation == "create":
-                if queue_name in self._queues:
-                    return ActionResult(success=True, data={"queue": queue_name}, message=f"Queue '{queue_name}' already exists")
-
-                self._queues[queue_name] = []
-                self._queue_config[queue_name] = {
-                    "name": queue_name,
-                    "max_size": params.get("max_size", 10000),
-                    "priority_enabled": params.get("priority_enabled", False),
-                    "created_at": time.time()
-                }
-                return ActionResult(success=True, data={"queue": queue_name}, message=f"Queue '{queue_name}' created")
-
-            elif operation == "enqueue":
-                if queue_name not in self._queues:
-                    self._queues[queue_name] = []
-
-                task = {
-                    "task_id": params.get("task_id", f"task_{int(time.time() * 1000)}"),
-                    "payload": params.get("payload", {}),
-                    "priority": params.get("priority", 0),
-                    "enqueued_at": time.time(),
-                    "status": TaskStatus.PENDING.value,
-                    "retries": 0
-                }
-
-                if self._queue_config.get(queue_name, {}).get("priority_enabled"):
-                    self._queues[queue_name].append(task)
-                    self._queues[queue_name].sort(key=lambda t: t["priority"], reverse=True)
-                else:
-                    self._queues[queue_name].append(task)
-
-                return ActionResult(
-                    success=True,
-                    data={"task_id": task["task_id"], "queue": queue_name, "queue_size": len(self._queues[queue_name])}
-                )
-
+            
+            if operation == "enqueue":
+                return self._enqueue_task(params)
             elif operation == "dequeue":
-                if queue_name not in self._queues or not self._queues[queue_name]:
-                    return ActionResult(success=True, data={"task": None, "queue_size": 0})
-
-                task = self._queues[queue_name].pop(0)
-                task["dequeued_at"] = time.time()
-                task["status"] = TaskStatus.QUEUED.value
-
-                return ActionResult(
-                    success=True,
-                    data={"task": task, "queue_size": len(self._queues[queue_name])}
-                )
-
-            elif operation == "size":
-                size = len(self._queues.get(queue_name, []))
-                return ActionResult(success=True, data={"queue": queue_name, "size": size})
-
-            elif operation == "clear":
-                if queue_name in self._queues:
-                    self._queues[queue_name] = []
-                return ActionResult(success=True, message=f"Queue '{queue_name}' cleared")
-
+                return self._dequeue_task()
             elif operation == "list":
-                return ActionResult(
-                    success=True,
-                    data={"queues": list(self._queues.keys())}
-                )
-
+                return self._list_queue()
+            elif operation == "peek":
+                return self._peek_queue()
             else:
                 return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
         except Exception as e:
-            return ActionResult(success=False, message=f"Queue error: {str(e)}")
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+    
+    def _enqueue_task(self, params: Dict[str, Any]) -> ActionResult:
+        priority = params.get("priority", 5)
+        task = {
+            "task_id": params.get("task_id", str(int(time.time()))),
+            "name": params.get("name"),
+            "priority": priority,
+            "action": params.get("action"),
+            "params": params.get("params", {}),
+            "enqueued_at": datetime.now()
+        }
+        
+        self._priority_queue.append(task)
+        self._priority_queue.sort(key=lambda x: x["priority"], reverse=True)
+        
+        return ActionResult(
+            success=True,
+            message=f"Task enqueued with priority {priority}",
+            data={
+                "task_id": task["task_id"],
+                "priority": priority,
+                "queue_size": len(self._priority_queue)
+            }
+        )
+    
+    def _dequeue_task(self) -> ActionResult:
+        if not self._priority_queue:
+            return ActionResult(success=False, message="Queue is empty")
+        
+        task = self._priority_queue.pop(0)
+        
+        return ActionResult(
+            success=True,
+            message=f"Task dequeued: {task['name']}",
+            data={
+                "task": task,
+                "remaining": len(self._priority_queue)
+            }
+        )
+    
+    def _list_queue(self) -> ActionResult:
+        return ActionResult(
+            success=True,
+            message=f"Priority queue: {len(self._priority_queue)} tasks",
+            data={
+                "tasks": self._priority_queue,
+                "count": len(self._priority_queue)
+            }
+        )
+    
+    def _peek_queue(self) -> ActionResult:
+        if not self._priority_queue:
+            return ActionResult(success=False, message="Queue is empty")
+        
+        return ActionResult(
+            success=True,
+            message=f"Next task: {self._priority_queue[0]['name']}",
+            data={"task": self._priority_queue[0]}
+        )
 
 
-class TaskSchedulerAction(BaseAction):
-    """Advanced task scheduling with priorities."""
-    action_type = "task_scheduler"
-    display_name = "任务调度器"
-    description = "优先级任务调度"
-
+class RateLimitedSchedulerAction(BaseAction):
+    """Schedule with rate limiting."""
+    action_type = "rate_limited_scheduler"
+    display_name = "限流调度"
+    description = "带速率限制的任务调度"
+    
     def __init__(self):
         super().__init__()
-        self._tasks: Dict[str, Dict] = {}
-        self._scheduled_tasks: Dict[str, List[str]] = {}
-
+        self._rate_limit = 10
+        self._window_seconds = 60
+        self._task_history: List[datetime] = []
+        self._scheduled: Dict[str, Dict] = {}
+    
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            operation = params.get("operation", "submit")
-            task_id = params.get("task_id", "")
-
-            if operation == "submit":
-                if not task_id:
-                    task_id = f"task_{int(time.time() * 1000)}"
-
-                self._tasks[task_id] = {
-                    "task_id": task_id,
-                    "name": params.get("task_name", task_id),
-                    "payload": params.get("payload", {}),
-                    "priority": params.get("priority", 0),
-                    "created_at": time.time(),
-                    "scheduled_at": params.get("scheduled_at"),
-                    "deadline": params.get("deadline"),
-                    "status": TaskStatus.PENDING.value,
-                    "attempts": 0,
-                    "max_attempts": params.get("max_attempts", 3)
-                }
-
-                return ActionResult(
-                    success=True,
-                    data={"task_id": task_id, "status": self._tasks[task_id]["status"]},
-                    message=f"Task '{task_id}' submitted"
-                )
-
-            elif operation == "schedule":
-                if not task_id:
-                    return ActionResult(success=False, message="task_id required")
-
-                if task_id not in self._tasks:
-                    return ActionResult(success=False, message=f"Task '{task_id}' not found")
-
-                scheduled_time = params.get("scheduled_time", time.time())
-                self._tasks[task_id]["scheduled_at"] = scheduled_time
-
-                schedule_key = str(int(scheduled_time // 60))
-                if schedule_key not in self._scheduled_tasks:
-                    self._scheduled_tasks[schedule_key] = []
-                self._scheduled_tasks[schedule_key].append(task_id)
-
-                return ActionResult(success=True, data={"task_id": task_id, "scheduled_at": scheduled_time})
-
-            elif operation == "execute":
-                if not task_id:
-                    return ActionResult(success=False, message="task_id required")
-
-                if task_id not in self._tasks:
-                    return ActionResult(success=False, message=f"Task '{task_id}' not found")
-
-                task = self._tasks[task_id]
-                task["status"] = TaskStatus.RUNNING.value
-                task["attempts"] += 1
-                task["started_at"] = time.time()
-
-                success = params.get("success", True)
-                if success:
-                    task["status"] = TaskStatus.COMPLETED.value
-                    task["completed_at"] = time.time()
-                else:
-                    if task["attempts"] >= task["max_attempts"]:
-                        task["status"] = TaskStatus.FAILED.value
-                        task["failed_at"] = time.time()
-                    else:
-                        task["status"] = TaskStatus.PENDING.value
-
-                return ActionResult(
-                    success=success,
-                    data={
-                        "task_id": task_id,
-                        "status": task["status"],
-                        "attempts": task["attempts"]
-                    }
-                )
-
-            elif operation == "cancel":
-                if task_id in self._tasks:
-                    self._tasks[task_id]["status"] = TaskStatus.CANCELLED.value
-                return ActionResult(success=True, message=f"Task '{task_id}' cancelled")
-
-            elif operation == "list":
-                status_filter = params.get("status")
-                tasks = list(self._tasks.values())
-                if status_filter:
-                    tasks = [t for t in tasks if t["status"] == status_filter]
-                return ActionResult(success=True, data={"tasks": tasks, "count": len(tasks)})
-
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Task scheduler error: {str(e)}")
-
-
-class WorkerPoolAction(BaseAction):
-    """Worker pool management."""
-    action_type = "worker_pool"
-    display_name = "工作池管理"
-    description = "工作池管理"
-
-    def __init__(self):
-        super().__init__()
-        self._pools: Dict[str, Dict] = {}
-        self._workers: Dict[str, Dict] = {}
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "create")
-            pool_name = params.get("pool_name", "")
-
-            if operation == "create":
-                if not pool_name:
-                    return ActionResult(success=False, message="pool_name required")
-
-                self._pools[pool_name] = {
-                    "name": pool_name,
-                    "size": params.get("size", 4),
-                    "worker_type": params.get("worker_type", "default"),
-                    "created_at": time.time(),
-                    "active_workers": 0,
-                    "total_tasks_processed": 0
-                }
-                return ActionResult(success=True, data={"pool": pool_name}, message=f"Pool '{pool_name}' created")
-
-            elif operation == "register_worker":
-                worker_id = params.get("worker_id", f"worker_{int(time.time() * 1000)}")
-                pool_name = params.get("pool_name", "")
-
-                self._workers[worker_id] = {
-                    "worker_id": worker_id,
-                    "pool": pool_name,
-                    "status": "idle",
-                    "registered_at": time.time(),
-                    "tasks_completed": 0
-                }
-                return ActionResult(success=True, data={"worker": worker_id, "pool": pool_name})
-
-            elif operation == "assign":
-                worker_id = params.get("worker_id", "")
-                task = params.get("task", {})
-
-                if worker_id not in self._workers:
-                    return ActionResult(success=False, message=f"Worker '{worker_id}' not found")
-
-                self._workers[worker_id]["status"] = "busy"
-                self._workers[worker_id]["current_task"] = task
-
-                return ActionResult(success=True, data={"worker": worker_id, "task": task.get("task_id", "unknown")})
-
-            elif operation == "release":
-                worker_id = params.get("worker_id", "")
-                if worker_id in self._workers:
-                    self._workers[worker_id]["status"] = "idle"
-                    self._workers[worker_id]["tasks_completed"] += 1
-                    self._workers[worker_id].pop("current_task", None)
-
-                return ActionResult(success=True, message=f"Worker '{worker_id}' released")
-
+            operation = params.get("operation", "schedule")
+            
+            if operation == "schedule":
+                return self._schedule_rate_limited(params)
+            elif operation == "configure":
+                return self._configure_rate_limit(params)
             elif operation == "status":
-                return ActionResult(
-                    success=True,
-                    data={
-                        "pools": {k: {"size": v["size"], "active": v["active_workers"]} for k, v in self._pools.items()},
-                        "workers": {k: {"pool": v["pool"], "status": v["status"]} for k, v in self._workers.items()}
-                    }
-                )
-
+                return self._get_rate_limit_status()
             else:
                 return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
         except Exception as e:
-            return ActionResult(success=False, message=f"Worker pool error: {str(e)}")
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+    
+    def _schedule_rate_limited(self, params: Dict[str, Any]) -> ActionResult:
+        task_id = params.get("task_id", str(int(time.time())))
+        
+        if not self._can_execute():
+            wait_time = self._get_wait_time()
+            return ActionResult(
+                success=False,
+                message="Rate limit exceeded",
+                data={
+                    "task_id": task_id,
+                    "allowed": False,
+                    "wait_seconds": wait_time
+                }
+            )
+        
+        self._task_history.append(datetime.now())
+        
+        self._scheduled[task_id] = {
+            "task_id": task_id,
+            "name": params.get("name"),
+            "action": params.get("action"),
+            "params": params.get("params", {}),
+            "scheduled_at": datetime.now()
+        }
+        
+        return ActionResult(
+            success=True,
+            message=f"Task scheduled within rate limit",
+            data={
+                "task_id": task_id,
+                "allowed": True,
+                "tasks_in_window": len(self._task_history)
+            }
+        )
+    
+    def _can_execute(self) -> bool:
+        now = datetime.now()
+        cutoff = now - timedelta(seconds=self._window_seconds)
+        
+        self._task_history = [t for t in self._task_history if t > cutoff]
+        
+        return len(self._task_history) < self._rate_limit
+    
+    def _get_wait_time(self) -> float:
+        if not self._task_history:
+            return 0
+        
+        oldest = min(self._task_history)
+        elapsed = (datetime.now() - oldest).total_seconds()
+        return max(0, self._window_seconds - elapsed)
+    
+    def _configure_rate_limit(self, params: Dict[str, Any]) -> ActionResult:
+        rate_limit = params.get("rate_limit")
+        window_seconds = params.get("window_seconds")
+        
+        if rate_limit is not None:
+            self._rate_limit = rate_limit
+        if window_seconds is not None:
+            self._window_seconds = window_seconds
+        
+        return ActionResult(
+            success=True,
+            message="Rate limit configured",
+            data={
+                "rate_limit": self._rate_limit,
+                "window_seconds": self._window_seconds
+            }
+        )
+    
+    def _get_rate_limit_status(self) -> ActionResult:
+        now = datetime.now()
+        cutoff = now - timedelta(seconds=self._window_seconds)
+        self._task_history = [t for t in self._task_history if t > cutoff]
+        
+        return ActionResult(
+            success=True,
+            message="Rate limit status",
+            data={
+                "rate_limit": self._rate_limit,
+                "window_seconds": self._window_seconds,
+                "current_usage": len(self._task_history),
+                "available": self._rate_limit - len(self._task_history),
+                "utilization": len(self._task_history) / self._rate_limit if self._rate_limit > 0 else 0
+            }
+        )
