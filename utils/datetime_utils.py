@@ -1,323 +1,313 @@
-"""
-Datetime and time utilities.
+"""Date and time utilities.
 
-Provides datetime parsing, formatting, timezone conversion,
-time difference calculations, and business day utilities.
+Provides timezone handling, date parsing, formatting,
+and time-based operations for automation.
 """
-
-from __future__ import annotations
 
 import calendar
-import math
+import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import List, Optional, Tuple, Union
+
+
+@dataclass
+class TimeRange:
+    """Represents a time range."""
+    start: datetime
+    end: datetime
+
+    def contains(self, dt: datetime) -> bool:
+        """Check if datetime is within range."""
+        return self.start <= dt <= self.end
+
+    def duration(self) -> timedelta:
+        """Get duration of range."""
+        return self.end - self.start
+
+    def overlaps(self, other: "TimeRange") -> bool:
+        """Check if ranges overlap."""
+        return self.start < other.end and other.start < self.end
+
+
+def now(tz: Optional[timezone] = None) -> datetime:
+    """Get current datetime.
+
+    Example:
+        now()  # naive datetime
+        now(timezone.utc)  # UTC aware
+    """
+    dt = datetime.now()
+    if tz:
+        dt = dt.astimezone(tz)
+    return dt
+
+
+def today(tz: Optional[timezone] = None) -> datetime:
+    """Get current date at midnight."""
+    n = now(tz)
+    return n.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 def parse_datetime(
     date_str: str,
-    formats: list[str] | None = None,
-) -> datetime | None:
-    """
-    Parse datetime string with multiple format attempts.
+    formats: Optional[List[str]] = None,
+    tz: Optional[timezone] = None,
+) -> Optional[datetime]:
+    """Parse datetime string with fallback formats.
 
-    Args:
-        date_str: Date string
-        formats: List of formats to try (default: common formats)
-
-    Returns:
-        Parsed datetime or None.
+    Example:
+        parse_datetime("2024-01-15 10:30:00")
+        parse_datetime("Jan 15, 2024", ["%b %d, %Y"])
     """
     if formats is None:
         formats = [
             "%Y-%m-%d %H:%M:%S",
-            "%Y-%m-%dT%H:%M:%S",
             "%Y-%m-%d",
+            "%d/%m/%Y %H:%M:%S",
             "%d/%m/%Y",
-            "%m/%d/%Y",
+            "%Y/%m/%d %H:%M:%S",
             "%Y/%m/%d",
-            "%B %d, %Y",
             "%b %d, %Y",
-            "%d %B %Y",
-            "%d %b %Y",
-            "%Y-%m-%d %H:%M",
-            "%Y-%m-%dT%H:%M:%SZ",
-            "%Y-%m-%dT%H:%M:%S.%fZ",
+            "%B %d, %Y",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S.%f",
         ]
+
     for fmt in formats:
         try:
-            return datetime.strptime(date_str, fmt)
+            dt = datetime.strptime(date_str, fmt)
+            if tz:
+                dt = dt.astimezone(tz)
+            return dt
         except ValueError:
             continue
+
     return None
 
 
 def format_datetime(
     dt: datetime,
     format_str: str = "%Y-%m-%d %H:%M:%S",
-    timezone_str: str | None = None,
 ) -> str:
-    """
-    Format datetime with optional timezone.
+    """Format datetime as string.
 
-    Args:
-        dt: Datetime object
-        format_str: Format string
-        timezone_str: Timezone name (e.g., 'UTC', 'America/New_York')
-
-    Returns:
-        Formatted datetime string.
+    Example:
+        format_datetime(now())  # "2024-01-15 10:30:00"
     """
-    if timezone_str:
-        try:
-            tz = timezone.utc if timezone_str == "UTC" else None
-            if tz is None:
-                import pytz
-                tz = pytz.timezone(timezone_str)
-                dt = dt.astimezone(tz)
-        except Exception:
-            pass
     return dt.strftime(format_str)
 
 
-def timestamp_to_datetime(ts: int | float, utc: bool = True) -> datetime:
+def format_relative(dt: datetime) -> str:
+    """Format datetime as relative string.
+
+    Example:
+        format_relative(now() - timedelta(hours=1))  # "1 hour ago"
     """
-    Convert Unix timestamp to datetime.
+    now_dt = now(dt.tzinfo)
+    diff = now_dt - dt
+
+    seconds = diff.total_seconds()
+
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        minutes = int(seconds / 60)
+        return f"{minutes} minute{'s' if minutes > 1 else ''} ago"
+    if seconds < 86400:
+        hours = int(seconds / 3600)
+        return f"{hours} hour{'s' if hours > 1 else ''} ago"
+    if seconds < 604800:
+        days = int(seconds / 86400)
+        return f"{days} day{'s' if days > 1 else ''} ago"
+    if seconds < 2592000:
+        weeks = int(seconds / 604800)
+        return f"{weeks} week{'s' if weeks > 1 else ''} ago"
+    if seconds < 31536000:
+        months = int(seconds / 2592000)
+        return f"{months} month{'s' if months > 1 else ''} ago"
+    years = int(seconds / 31536000)
+    return f"{years} year{'s' if years > 1 else ''} ago"
+
+
+def get_week_range(
+    dt: Optional[datetime] = None,
+    week_start: int = 0,
+) -> TimeRange:
+    """Get start and end of week containing datetime.
 
     Args:
-        ts: Unix timestamp (seconds)
-        utc: If True, treat as UTC
+        dt: Reference datetime (defaults to now).
+        week_start: 0=Monday, 6=Sunday.
 
-    Returns:
-        Datetime object.
+    Example:
+        get_week_range()  # Monday to Sunday of current week
     """
-    if utc:
-        return datetime.utcfromtimestamp(ts)
-    return datetime.fromtimestamp(ts)
+    if dt is None:
+        dt = now()
+
+    days_since_weekstart = (dt.weekday() - week_start) % 7
+    start = dt - timedelta(days=days_since_weekstart)
+    start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=6, hours=23, minutes=59, seconds=59)
+
+    return TimeRange(start=start, end=end)
 
 
-def datetime_to_timestamp(dt: datetime) -> int:
-    """Convert datetime to Unix timestamp."""
-    return int(dt.timestamp())
+def get_month_range(
+    dt: Optional[datetime] = None,
+) -> TimeRange:
+    """Get start and end of month containing datetime.
 
-
-def datetime_diff(dt1: datetime, dt2: datetime) -> timedelta:
-    """Compute difference between two datetimes."""
-    return dt1 - dt2
-
-
-def add_business_days(start_date: datetime, days: int) -> datetime:
+    Example:
+        get_month_range()  # First to last day of current month
     """
-    Add business days to a date (skipping weekends).
+    if dt is None:
+        dt = now()
 
-    Args:
-        start_date: Starting date
-        days: Number of business days to add (can be negative)
+    start = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    _, last_day = calendar.monthrange(dt.year, dt.month)
+    end = dt.replace(day=last_day, hour=23, minute=59, second=59, microsecond=999999)
 
-    Returns:
-        Resulting date.
+    return TimeRange(start=start, end=end)
+
+
+def add_business_days(
+    dt: datetime,
+    days: int,
+) -> datetime:
+    """Add business days to datetime.
+
+    Example:
+        add_business_days(date(2024, 1, 5), 1)  # Monday + 1 = Tuesday
+        add_business_days(date(2024, 1, 5), 3)  # Friday + 3 = Tuesday
     """
-    current = start_date
+    current = dt
     delta = 1 if days >= 0 else -1
     remaining = abs(days)
+
     while remaining > 0:
         current += timedelta(days=delta)
-        if current.weekday() < 5:  # Mon-Fri
+        if current.weekday() < 5:
             remaining -= 1
+
     return current
 
 
-def is_business_day(date: datetime) -> bool:
-    """Check if date is a business day (Mon-Fri)."""
-    return date.weekday() < 5
+def is_business_day(dt: datetime) -> bool:
+    """Check if datetime is a business day (Mon-Fri)."""
+    return dt.weekday() < 5
 
 
-def is_weekend(date: datetime) -> bool:
-    """Check if date is a weekend."""
-    return date.weekday() >= 5
-
-
-def days_in_month(year: int, month: int) -> int:
-    """Get number of days in month."""
-    return calendar.monthrange(year, month)[1]
-
-
-def start_of_month(date: datetime) -> datetime:
-    """Get first day of month."""
-    return date.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-
-def end_of_month(date: datetime) -> datetime:
-    """Get last day of month."""
-    days = days_in_month(date.year, date.month)
-    return date.replace(day=days, hour=23, minute=59, second=59, microsecond=999999)
-
-
-def start_of_week(date: datetime, week_start: int = 0) -> datetime:
-    """Get start of week (week_start: 0=Monday, 6=Sunday)."""
-    days_since_start = (date.weekday() - week_start) % 7
-    return (date - timedelta(days=days_since_start)).replace(hour=0, minute=0, second=0, microsecond=0)
-
-
-def week_number(date: datetime) -> int:
-    """Get ISO week number."""
-    return date.isocalendar()[1]
-
-
-def quarter(date: datetime) -> int:
-    """Get quarter (1-4)."""
-    return (date.month - 1) // 3 + 1
-
-
-def start_of_quarter(date: datetime) -> datetime:
-    """Get first day of quarter."""
-    q = quarter(date)
-    month = (q - 1) * 3 + 1
-    return date.replace(month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
-
-
-def end_of_quarter(date: datetime) -> datetime:
-    """Get last day of quarter."""
-    q = quarter(date)
-    month = q * 3
-    year = date.year
-    if month == 12:
-        month = 12
-    else:
-        year = date.year + 1
-        month = (q % 4) * 3 + 1 if q % 4 != 0 else 12
-    day = days_in_month(year, month if month != 0 else 12)
-    return date.replace(year=year if month != 12 else date.year, month=month if month != 0 else 12, day=day, hour=23, minute=59, second=59)
-
-
-def age_from_birthdate(birthdate: datetime, reference_date: datetime | None = None) -> int:
-    """Calculate age in years."""
-    if reference_date is None:
-        reference_date = datetime.now()
-    age = reference_date.year - birthdate.year
-    if (reference_date.month, reference_date.day) < (birthdate.month, birthdate.day):
-        age -= 1
-    return age
-
-
-def time_ago(dt: datetime) -> str:
-    """
-    Format datetime as 'time ago' string.
-
-    Args:
-        dt: Datetime to format
+def get_quarter(dt: Optional[datetime] = None) -> Tuple[int, int]:
+    """Get quarter and year for datetime.
 
     Returns:
-        Human-readable time difference.
+        Tuple of (year, quarter).
+
+    Example:
+        get_quarter(date(2024, 3, 15))  # (2024, 1)
     """
-    now = datetime.now()
-    diff = now - dt
-    seconds = diff.total_seconds()
-    if seconds < 60:
-        return f"{int(seconds)}s ago"
-    minutes = seconds / 60
-    if minutes < 60:
-        return f"{int(minutes)}m ago"
-    hours = minutes / 60
-    if hours < 24:
-        return f"{int(hours)}h ago"
-    days = hours / 24
-    if days < 30:
-        return f"{int(days)}d ago"
-    months = days / 30
-    if months < 12:
-        return f"{int(months)}mo ago"
-    years = days / 365
-    return f"{int(years)}y ago"
+    if dt is None:
+        dt = now()
+    quarter = (dt.month - 1) // 3 + 1
+    return (dt.year, quarter)
 
 
-def date_range(start: datetime, end: datetime, step_days: int = 1) -> list[datetime]:
+def get_quarter_range(
+    year: int,
+    quarter: int,
+) -> TimeRange:
+    """Get time range for a quarter.
+
+    Example:
+        get_quarter_range(2024, 1)  # Jan 1 - Mar 31, 2024
     """
-    Generate date range.
+    start_month = (quarter - 1) * 3 + 1
+    start = datetime(year, start_month, 1)
 
-    Args:
-        start: Start date
-        end: End date (exclusive)
-        step_days: Number of days between each date
+    end_month = start_month + 2
+    _, last_day = calendar.monthrange(year, end_month)
+    end = datetime(year, end_month, last_day, 23, 59, 59)
 
-    Returns:
-        List of datetime objects.
-    """
-    result: list[datetime] = []
-    current = start
-    while current < end:
-        result.append(current)
-        current += timedelta(days=step_days)
-    return result
+    return TimeRange(start=start, end=end)
 
 
-def business_days_between(start: datetime, end: datetime) -> int:
-    """
-    Count business days between two dates.
+def parse_duration(duration_str: str) -> timedelta:
+    """Parse duration string to timedelta.
 
-    Args:
-        start: Start date
-        end: End date
-
-    Returns:
-        Number of business days.
-    """
-    count = 0
-    current = start
-    while current < end:
-        if is_business_day(current):
-            count += 1
-        current += timedelta(days=1)
-    return count
-
-
-def timezone_convert(dt: datetime, from_tz: str, to_tz: str) -> datetime:
-    """
-    Convert datetime between timezones.
-
-    Args:
-        dt: Datetime to convert
-        from_tz: Source timezone
-        to_tz: Target timezone
-
-    Returns:
-        Converted datetime.
-    """
-    try:
-        from zoneinfo import ZoneInfo
-        aware_dt = dt.replace(tzinfo=ZoneInfo(from_tz))
-        return aware_dt.astimezone(ZoneInfo(to_tz))
-    except Exception:
-        return dt
-
-
-def is_leap_year(year: int) -> bool:
-    """Check if year is a leap year."""
-    return (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0)
-
-
-def iso_calendar_str(date: datetime) -> str:
-    """Format date as ISO calendar string (e.g., 2025-W05-3)."""
-    return date.strftime("%G-W%V-%u")
-
-
-def parse_duration(duration_str: str) -> timedelta | None:
-    """
-    Parse duration string like '1d', '2h30m', '45s'.
-
-    Args:
-        duration_str: Duration string
-
-    Returns:
-        Timedelta or None.
+    Example:
+        parse_duration("1h30m")  # timedelta(hours=1, minutes=30)
+        parse_duration("2 days")  # timedelta(days=2)
     """
     import re
-    pattern = r"(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?"
-    match = re.match(pattern, duration_str)
-    if not match:
-        return None
-    days, hours, minutes, seconds = match.groups()
-    return timedelta(
-        days=int(days or 0),
-        hours=int(hours or 0),
-        minutes=int(minutes or 0),
-        seconds=int(seconds or 0),
-    )
+
+    patterns = [
+        (r"(\d+)d", "days"),
+        (r"(\d+)h", "hours"),
+        (r"(\d+)m", "minutes"),
+        (r"(\d+)s", "seconds"),
+    ]
+
+    kwargs = {}
+    for pattern, unit in patterns:
+        match = re.search(pattern, duration_str)
+        if match:
+            kwargs[unit] = int(match.group(1))
+
+    return timedelta(**kwargs)
+
+
+def timestamp_ms() -> int:
+    """Get current timestamp in milliseconds."""
+    return int(time.time() * 1000)
+
+
+def timestamp_seconds() -> int:
+    """Get current timestamp in seconds."""
+    return int(time.time())
+
+
+def from_timestamp(timestamp: int, tz: Optional[timezone] = None) -> datetime:
+    """Convert timestamp to datetime.
+
+    Args:
+        timestamp: Unix timestamp (seconds or milliseconds).
+        tz: Timezone for result.
+
+    Example:
+        from_timestamp(1704067200)
+    """
+    if timestamp > 10**12:
+        timestamp = timestamp // 1000
+
+    dt = datetime.fromtimestamp(timestamp, tz=tz)
+    return dt
+
+
+def ensure_timezone(dt: datetime, tz: timezone) -> datetime:
+    """Ensure datetime is in specified timezone."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=tz)
+    return dt.astimezone(tz)
+
+
+def is_same_day(dt1: datetime, dt2: datetime) -> bool:
+    """Check if two datetimes are on the same day."""
+    return dt1.year == dt2.year and dt1.month == dt2.month and dt1.day == dt2.day
+
+
+def get_age(birth_date: datetime, ref_date: Optional[datetime] = None) -> int:
+    """Calculate age in years from birth date.
+
+    Example:
+        get_age(date(1990, 5, 15))  # ~33 (in 2024)
+    """
+    if ref_date is None:
+        ref_date = now()
+
+    age = ref_date.year - birth_date.year
+    if (ref_date.month, ref_date.day) < (birth_date.month, birth_date.day):
+        age -= 1
+
+    return age
