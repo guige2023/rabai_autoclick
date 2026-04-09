@@ -1,272 +1,199 @@
-"""
-API Debounce Action Module
+"""API debounce action for debouncing rapid API requests.
 
-Provides debouncing functionality for API calls to prevent excessive requests.
-Debouncing groups rapid successive calls into a single request.
-
-Author: rabai_autoclick team
-Version: 1.0.0
+Provides debounce functionality for preventing excessive
+API calls during burst traffic.
 """
 
-from __future__ import annotations
-
-import asyncio
-import time
-from collections import deque
-from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, TypeVar
-from functools import wraps
+import logging
 import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
 
-T = TypeVar('T')
-CallableType = TypeVar('CallableType', bound=Callable[..., Any])
-
-
-@dataclass
-class DebounceConfig:
-    """Configuration for debounce behavior."""
-    wait_ms: int = 300
-    max_wait_ms: int = 5000
-    leading_call: bool = False
-    trailing_call: bool = True
-    max_size: int = 1000
+logger = logging.getLogger(__name__)
 
 
 @dataclass
-class DebounceCall:
-    """Represents a debounced call."""
-    args: tuple[Any, ...]
-    kwargs: dict[str, Any]
-    timestamp: float
-    call_count: int = 1
+class DebounceRequest:
+    request_id: str
+    func: Callable
+    args: tuple = field(default_factory=tuple)
+    kwargs: dict[str, Any] = field(default_factory=dict)
+    scheduled_at: float = field(default_factory=time.time)
+    executed: bool = False
 
 
-class DebounceResult:
-    """Result of a debounced operation."""
-    
-    def __init__(self, value: Any = None, error: Optional[Exception] = None,
-                 call_count: int = 0, skipped: bool = False):
-        self.value = value
-        self.error = error
-        self.call_count = call_count
-        self.skipped = skipped
-        self.timestamp = time.time()
-    
-    @property
-    def success(self) -> bool:
-        return self.error is None and not self.skipped
-    
-    def __repr__(self) -> str:
-        status = "success" if self.success else "error" if self.error else "skipped"
-        return f"DebounceResult({status}, call_count={self.call_count})"
+class APIDebounceAction:
+    """Debounce rapid API requests to prevent flooding.
 
-
-class ApiDebounceAction:
+    Args:
+        default_delay: Default debounce delay in seconds.
+        max_wait: Maximum time to wait before executing.
     """
-    Debounce manager for API calls.
-    
-    Groups rapid successive calls together and executes only the last one
-    after the debounce period has elapsed.
-    
-    Example:
-        debouncer = ApiDebounceAction(wait_ms=500)
-        
-        @debouncer.debounce()
-        async def fetch_data(query: str):
-            return await api.search(query)
-    """
-    
-    def __init__(self, config: Optional[DebounceConfig] = None):
-        self.config = config or DebounceConfig()
-        self._pending: dict[str, DebounceCall] = {}
-        self._results: dict[str, DebounceResult] = {}
-        self._locks: dict[str, asyncio.Lock] = {}
-        self._timers: dict[str, asyncio.Task] = {}
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._history: deque[str] = deque(maxlen=self.config.max_size)
-        self._stats = {
-            "total_calls": 0,
-            "debounced_calls": 0,
-            "executed_calls": 0,
-            "errors": 0
-        }
+
+    def __init__(
+        self,
+        default_delay: float = 0.5,
+        max_wait: float = 5.0,
+    ) -> None:
+        self._default_delay = default_delay
+        self._max_wait = max_wait
+        self._pending_requests: dict[str, DebounceRequest] = {}
+        self._timers: dict[str, threading.Timer] = {}
         self._lock = threading.Lock()
-    
-    def _get_lock(self, key: str) -> asyncio.Lock:
-        """Get or create a lock for a given key."""
+        self._execution_count = 0
+        self._debounced_count = 0
+
+    def debounce(
+        self,
+        request_id: str,
+        func: Callable,
+        delay: Optional[float] = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Schedule a debounced request.
+
+        Args:
+            request_id: Unique request identifier.
+            func: Function to execute.
+            delay: Debounce delay (uses default if None).
+            args: Positional arguments for func.
+            kwargs: Keyword arguments for func.
+        """
         with self._lock:
-            if key not in self._locks:
-                self._locks[key] = asyncio.Lock()
-            return self._locks[key]
-    
-    def _generate_key(self, func: Callable, args: tuple, kwargs: dict) -> str:
-        """Generate a unique key for this call."""
-        func_id = getattr(func, '__name__', str(id(func)))
-        args_str = str(args) + str(sorted(kwargs.items()))
-        return f"{func_id}:{hash(args_str)}"
-    
-    def debounce(self, key: Optional[str] = None, wait_ms: Optional[int] = None):
-        """
-        Decorator to debounce a function.
-        
-        Args:
-            key: Optional custom key for grouping calls
-            wait_ms: Override default wait time in milliseconds
-        """
-        def decorator(func: CallableType) -> CallableType:
-            @wraps(func)
-            async def async_wrapper(*args, **kwargs):
-                debounce_key = key or self._generate_key(func, args, kwargs)
-                wait = wait_ms or self.config.wait_ms
-                
-                self._stats["total_calls"] += 1
-                
-                async with self._get_lock(debounce_key):
-                    self._pending[debounce_key] = DebounceCall(
-                        args=args,
-                        kwargs=kwargs,
-                        timestamp=time.time(),
-                        call_count=self._pending.get(debounce_key, DebounceCall((), {}, 0)).call_count + 1
-                    )
-                    
-                    if debounce_key in self._timers:
-                        self._timers[debounce_key].cancel()
-                    
-                    self._stats["debounced_calls"] += 1
-                    
-                    try:
-                        await asyncio.sleep(wait / 1000.0)
-                        
-                        call = self._pending.pop(debounce_key, None)
-                        if call:
-                            self._stats["executed_calls"] += 1
-                            result = await func(*call.args, **call.kwargs)
-                            self._results[debounce_key] = DebounceResult(
-                                value=result,
-                                call_count=call.call_count
-                            )
-                            return result
-                    except Exception as e:
-                        self._stats["errors"] += 1
-                        self._results[debounce_key] = DebounceResult(error=e)
-                        raise
-            
-            @wraps(func)
-            def sync_wrapper(*args, **kwargs):
-                debounce_key = key or self._generate_key(func, args, kwargs)
-                wait = wait_ms or self.config.wait_ms
-                
-                self._stats["total_calls"] += 1
-                
-                with self._get_lock(debounce_key):
-                    self._pending[debounce_key] = DebounceCall(
-                        args=args,
-                        kwargs=kwargs,
-                        timestamp=time.time(),
-                        call_count=self._pending.get(debounce_key, DebounceCall((), {}, 0)).call_count + 1
-                    )
-                    
-                    self._stats["debounced_calls"] += 1
-                
-                time.sleep(wait / 1000.0)
-                
-                call = self._pending.pop(debounce_key, None)
-                if call:
-                    self._stats["executed_calls"] += 1
-                    try:
-                        result = func(*call.args, **call.kwargs)
-                        self._results[debounce_key] = DebounceResult(
-                            value=result,
-                            call_count=call.call_count
-                        )
-                        return result
-                    except Exception as e:
-                        self._stats["errors"] += 1
-                        self._results[debounce_key] = DebounceResult(error=e)
-                        raise
-            
-            if asyncio.iscoroutinefunction(func):
-                return async_wrapper
-            return sync_wrapper
-        
-        return decorator
-    
-    async def flush(self, key: str) -> Optional[DebounceResult]:
-        """
-        Immediately execute pending call for a key.
-        
-        Args:
-            key: The debounce key to flush
-            
-        Returns:
-            DebounceResult from the executed call
-        """
-        async with self._get_lock(key):
-            call = self._pending.pop(key, None)
-            if call:
-                try:
-                    result = await call.func(*call.args, **call.kwargs)
-                    return DebounceResult(value=result, call_count=call.call_count)
-                except Exception as e:
-                    return DebounceResult(error=e)
-        return None
-    
-    def get_result(self, key: str) -> Optional[DebounceResult]:
-        """Get the last result for a key."""
-        return self._results.get(key)
-    
-    def get_stats(self) -> dict[str, Any]:
-        """Get debounce statistics."""
-        return {
-            **self._stats,
-            "pending_count": len(self._pending),
-            "debounce_rate": (
-                self._stats["debounced_calls"] / self._stats["total_calls"]
-                if self._stats["total_calls"] > 0 else 0
+            if request_id in self._pending_requests:
+                self._debounced_count += 1
+
+            if request_id in self._timers:
+                self._timers[request_id].cancel()
+
+            debounce_request = DebounceRequest(
+                request_id=request_id,
+                func=func,
+                args=args,
+                kwargs=kwargs,
             )
-        }
-    
-    def clear(self) -> None:
-        """Clear all pending calls and results."""
-        self._pending.clear()
-        self._results.clear()
-        self._history.clear()
-    
-    def cancel_all(self) -> None:
-        """Cancel all pending timers."""
-        for timer in self._timers.values():
-            timer.cancel()
-        self._timers.clear()
 
+            self._pending_requests[request_id] = debounce_request
 
-class DebounceGroup:
-    """
-    Group multiple debouncers together.
-    
-    Allows sharing debounce state across related operations.
-    """
-    
-    def __init__(self):
-        self._debouncers: dict[str, ApiDebounceAction] = {}
-        self._shared_state: dict[str, Any] = {}
-        self._lock = threading.Lock()
-    
-    def get_debouncer(self, name: str, config: Optional[DebounceConfig] = None) -> ApiDebounceAction:
-        """Get or create a named debouncer."""
+            delay_time = delay or self._default_delay
+
+            timer = threading.Timer(delay_time, self._execute_request, args=(request_id,))
+            self._timers[request_id] = timer
+            timer.start()
+
+            logger.debug(f"Debounced request {request_id} with delay {delay_time}s")
+
+    def _execute_request(self, request_id: str) -> None:
+        """Execute a debounced request.
+
+        Args:
+            request_id: Request identifier.
+        """
         with self._lock:
-            if name not in self._debouncers:
-                self._debouncers[name] = ApiDebounceAction(config)
-            return self._debouncers[name]
-    
-    def share_state(self, key: str, value: Any) -> None:
-        """Share state across debouncers in the group."""
+            request = self._pending_requests.pop(request_id, None)
+            timer = self._timers.pop(request_id, None)
+
+        if not request or request.executed:
+            return
+
+        try:
+            request.func(*request.args, **request.kwargs)
+            request.executed = True
+            self._execution_count += 1
+            logger.debug(f"Executed debounced request: {request_id}")
+        except Exception as e:
+            logger.error(f"Debounced request error: {request_id}: {e}")
+
+    def flush(self, request_id: Optional[str] = None) -> bool:
+        """Flush pending requests immediately.
+
+        Args:
+            request_id: Specific request to flush (all if None).
+
+        Returns:
+            True if flush was executed.
+        """
+        if request_id:
+            with self._lock:
+                if request_id in self._timers:
+                    self._timers[request_id].cancel()
+                    del self._timers[request_id]
+
+            self._execute_request(request_id)
+            return True
+        else:
+            with self._lock:
+                for timer in self._timers.values():
+                    timer.cancel()
+                request_ids = list(self._pending_requests.keys())
+
+            for rid in request_ids:
+                self._execute_request(rid)
+
+            return True
+
+    def cancel(self, request_id: str) -> bool:
+        """Cancel a pending debounced request.
+
+        Args:
+            request_id: Request to cancel.
+
+        Returns:
+            True if cancelled.
+        """
         with self._lock:
-            self._shared_state[key] = value
-    
-    def get_shared_state(self, key: str, default: Any = None) -> Any:
-        """Get shared state."""
-        return self._shared_state.get(key, default)
-    
-    def get_all_stats(self) -> dict[str, dict[str, Any]]:
-        """Get stats from all debouncers in the group."""
-        return {name: d.get_stats() for name, d in self._debouncers.items()}
+            if request_id in self._timers:
+                self._timers[request_id].cancel()
+                del self._timers[request_id]
+
+            if request_id in self._pending_requests:
+                del self._pending_requests[request_id]
+
+            return True
+
+        return False
+
+    def get_pending_count(self) -> int:
+        """Get number of pending requests.
+
+        Returns:
+            Number of pending requests.
+        """
+        with self._lock:
+            return len(self._pending_requests)
+
+    def is_pending(self, request_id: str) -> bool:
+        """Check if a request is pending.
+
+        Args:
+            request_id: Request identifier.
+
+        Returns:
+            True if request is pending.
+        """
+        with self._lock:
+            return request_id in self._pending_requests
+
+    def get_stats(self) -> dict[str, Any]:
+        """Get debounce statistics.
+
+        Returns:
+            Dictionary with stats.
+        """
+        with self._lock:
+            return {
+                "pending_requests": len(self._pending_requests),
+                "active_timers": len(self._timers),
+                "total_executed": self._execution_count,
+                "total_debounced": self._debounced_count,
+                "default_delay": self._default_delay,
+                "max_wait": self._max_wait,
+            }
+
+    def reset_stats(self) -> None:
+        """Reset statistics counters."""
+        with self._lock:
+            self._execution_count = 0
+            self._debounced_count = 0
