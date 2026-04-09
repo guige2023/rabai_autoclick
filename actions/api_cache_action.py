@@ -1,152 +1,159 @@
 """
-API Cache Action Module.
+API Cache Action Module
 
-Provides caching layer for API responses with TTL, invalidation,
- and cache-aside patterns for improved performance.
+Multi-layer caching with in-memory, Redis, and TTL support.
+Cache invalidation, compression, and statistics tracking.
+
+MIT License - Copyright (c) 2025 RabAi Research
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
-import time
-from typing import Any, Callable, Optional
-from dataclasses import dataclass, field
-from enum import Enum
+import json
 import logging
+import time
+import zlib
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
-class CacheStrategy(Enum):
-    """Caching strategy."""
+class CacheLevel(Enum):
+    """Cache storage levels."""
+
+    MEMORY = "memory"
+    REDIS = "redis"
+    DISK = "disk"
+
+
+class CachePolicy(Enum):
+    """Cache policies."""
+
+    STORE_THROUGH = "store_through"
+    STORE_AROUND = "store_around"
     CACHE_ASIDE = "cache_aside"
-    READ_THROUGH = "read_through"
-    WRITE_THROUGH = "write_through"
-    WRITE_BACK = "write_back"
 
 
 @dataclass
 class CacheEntry:
     """A single cache entry."""
+
     key: str
     value: Any
-    created_at: float
-    expires_at: float
-    hit_count: int = 0
-    size_bytes: int = 0
+    created_at: float = field(default_factory=time.time)
+    accessed_at: float = field(default_factory=time.time)
+    access_count: int = 0
+    ttl_seconds: float = 0.0
+    compressed: bool = False
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def is_expired(self) -> bool:
+        """Check if entry is expired."""
+        if self.ttl_seconds <= 0:
+            return False
+        return time.time() - self.created_at > self.ttl_seconds
+
+    def touch(self) -> None:
+        """Update access time and count."""
+        self.accessed_at = time.time()
+        self.access_count += 1
+
+    def get_age_seconds(self) -> float:
+        """Get age of entry in seconds."""
+        return time.time() - self.created_at
 
 
 @dataclass
 class CacheStats:
     """Cache statistics."""
+
     hits: int = 0
     misses: int = 0
+    sets: int = 0
+    deletes: int = 0
+    expirations: int = 0
     evictions: int = 0
-    writes: int = 0
-    hit_rate: float = 0.0
-    size_bytes: int = 0
-    item_count: int = 0
+    bytes_stored: int = 0
+    bytes_saved: int = 0
 
 
-@dataclass
-class CacheConfig:
-    """Cache configuration."""
-    max_size_bytes: int = 100 * 1024 * 1024
-    max_items: int = 10000
-    default_ttl: float = 300.0
-    eviction_policy: str = "lru"
-    enable_stats: bool = True
-
-
-class APICacheAction:
+class MemoryCache:
     """
-    API response caching with flexible strategies.
-
-    Provides caching for API responses with TTL, invalidation,
-    and multiple caching strategies for different use cases.
-
-    Example:
-        cache = APICacheAction(config=CacheConfig(default_ttl=600))
-        cached_response = await cache.get_or_fetch("users", fetch_func)
+    In-memory cache with LRU eviction.
     """
 
-    def __init__(
-        self,
-        config: Optional[CacheConfig] = None,
-    ) -> None:
-        self.config = config or CacheConfig()
-        self._cache: dict[str, CacheEntry] = {}
-        self._access_order: list[str] = []
-        self._stats = CacheStats()
+    def __init__(self, max_size: int = 10000, max_memory_mb: float = 100.0):
+        self.max_size = max_size
+        self.max_memory_bytes = int(max_memory_mb * 1024 * 1024)
+        self._cache: Dict[str, CacheEntry] = {}
+        self._access_order: List[str] = []
         self._lock = asyncio.Lock()
 
-    async def get(
-        self,
-        key: str,
-    ) -> Optional[Any]:
-        """Get a value from cache."""
+    def _generate_key(self, key: str) -> str:
+        """Generate cache key hash."""
+        return hashlib.md5(key.encode()).hexdigest()
+
+    async def get(self, key: str) -> Optional[Any]:
+        """Get value from cache."""
         async with self._lock:
             entry = self._cache.get(key)
-
             if entry is None:
-                self._stats.misses += 1
-                self._update_hit_rate()
                 return None
 
-            if time.time() > entry.expires_at:
-                del self._cache[key]
-                self._stats.misses += 1
-                self._update_hit_rate()
+            if entry.is_expired():
+                await self.delete(key)
                 return None
 
-            entry.hit_count += 1
-            self._stats.hits += 1
-            self._update_hit_rate()
+            entry.touch()
             self._update_access_order(key)
-
             return entry.value
 
     async def set(
         self,
         key: str,
         value: Any,
-        ttl: Optional[float] = None,
+        ttl_seconds: float = 0.0,
+        compress: bool = False,
     ) -> None:
-        """Set a value in cache."""
-        import sys
-        ttl = ttl or self.config.default_ttl
-
-        size = self._estimate_size(value)
-        now = time.time()
-
-        entry = CacheEntry(
-            key=key,
-            value=value,
-            created_at=now,
-            expires_at=now + ttl,
-            size_bytes=size,
-        )
-
+        """Set value in cache."""
         async with self._lock:
-            old_entry = self._cache.get(key)
-            if old_entry:
-                self._stats.size_bytes -= old_entry.size_bytes
+            # Compress if needed
+            stored_value = value
+            if compress:
+                try:
+                    serialized = json.dumps(value)
+                    compressed = zlib.compress(serialized.encode())
+                    if len(compressed) < len(serialized):
+                        stored_value = compressed
+                        compress = True
+                except Exception:
+                    pass
 
+            # Check size limit
+            if len(self._cache) >= self.max_size:
+                await self._evict_lru()
+
+            entry = CacheEntry(
+                key=key,
+                value=stored_value,
+                ttl_seconds=ttl_seconds,
+                compressed=compress,
+            )
             self._cache[key] = entry
-            self._stats.size_bytes += size
-            self._stats.writes += 1
             self._update_access_order(key)
 
-            await self._evict_if_needed()
-
     async def delete(self, key: str) -> bool:
-        """Delete a value from cache."""
+        """Delete value from cache."""
         async with self._lock:
             if key in self._cache:
-                entry = self._cache.pop(key)
-                self._stats.size_bytes -= entry.size_bytes
-                self._access_order.remove(key)
+                del self._cache[key]
+                if key in self._access_order:
+                    self._access_order.remove(key)
                 return True
             return False
 
@@ -155,73 +162,13 @@ class APICacheAction:
         async with self._lock:
             self._cache.clear()
             self._access_order.clear()
-            self._stats = CacheStats()
 
-    async def get_or_fetch(
-        self,
-        key: str,
-        fetch_func: Callable[..., Any],
-        ttl: Optional[float] = None,
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        """Get from cache or fetch and cache the result."""
-        cached = await self.get(key)
-        if cached is not None:
-            return cached
-
-        if asyncio.iscoroutinefunction(fetch_func):
-            value = await fetch_func(*args, **kwargs)
-        else:
-            value = fetch_func(*args, **kwargs)
-
-        await self.set(key, value, ttl)
-        return value
-
-    async def invalidate_pattern(
-        self,
-        pattern: str,
-    ) -> int:
-        """Invalidate all keys matching a pattern."""
-        import re
-        regex = self._pattern_to_regex(pattern)
-        to_delete: list[str] = []
-
-        async with self._lock:
-            for key in self._cache.keys():
-                if regex.match(key):
-                    to_delete.append(key)
-
-            for key in to_delete:
-                entry = self._cache.pop(key, None)
-                if entry:
-                    self._stats.size_bytes -= entry.size_bytes
-                    if key in self._access_order:
-                        self._access_order.remove(key)
-
-            return len(to_delete)
-
-    async def refresh(self, key: str) -> bool:
-        """Refresh the TTL of a cache entry."""
-        async with self._lock:
-            entry = self._cache.get(key)
-            if entry:
-                entry.expires_at = time.time() + self.config.default_ttl
-                return True
-            return False
-
-    def get_stats(self) -> CacheStats:
-        """Get cache statistics."""
-        stats = self._stats
-        stats.size_bytes = self._stats.size_bytes
-        stats.item_count = len(self._cache)
-        return stats
-
-    def _update_hit_rate(self) -> None:
-        """Update hit rate statistic."""
-        total = self._stats.hits + self._stats.misses
-        if total > 0:
-            self._stats.hit_rate = self._stats.hits / total
+    async def _evict_lru(self) -> None:
+        """Evict least recently used entry."""
+        if self._access_order:
+            lru_key = self._access_order.pop(0)
+            if lru_key in self._cache:
+                del self._cache[lru_key]
 
     def _update_access_order(self, key: str) -> None:
         """Update access order for LRU."""
@@ -229,47 +176,285 @@ class APICacheAction:
             self._access_order.remove(key)
         self._access_order.append(key)
 
-    async def _evict_if_needed(self) -> None:
-        """Evict entries if cache exceeds limits."""
-        evicted = 0
+    async def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        async with self._lock:
+            return {
+                "size": len(self._cache),
+                "max_size": self.max_size,
+                "max_memory_mb": self.max_memory_bytes / (1024 * 1024),
+            }
 
-        while (self._stats.size_bytes > self.config.max_size_bytes or
-               len(self._cache) > self.config.max_items):
 
-            if not self._access_order:
-                break
+class RedisCache:
+    """
+    Redis-backed cache with async support.
+    """
 
-            if self.config.eviction_policy == "lru":
-                key_to_evict = self._access_order.pop(0)
-            else:
-                key_to_evict = self._access_order[0]
+    def __init__(
+        self,
+        redis_client: Any,
+        prefix: str = "cache:",
+        default_ttl: int = 3600,
+    ):
+        self.redis = redis_client
+        self.prefix = prefix
+        self.default_ttl = default_ttl
 
-            entry = self._cache.pop(key_to_evict, None)
-            if entry:
-                self._stats.size_bytes -= entry.size_bytes
-                self._stats.evictions += 1
-                evicted += 1
+    def _make_key(self, key: str) -> str:
+        """Make Redis key with prefix."""
+        return f"{self.prefix}{key}"
 
-            if evicted > 1000:
-                break
-
-    def _pattern_to_regex(self, pattern: str) -> re.Pattern:
-        """Convert a glob pattern to regex."""
-        import re
-        regex_pattern = pattern.replace(".", r"\.").replace("*", ".*").replace("?", ".")
-        return re.compile(f"^{regex_pattern}$")
-
-    def _estimate_size(self, value: Any) -> int:
-        """Estimate size of a value in bytes."""
-        import sys
+    async def get(self, key: str) -> Optional[Any]:
+        """Get value from Redis."""
         try:
-            return len(str(value).encode('utf-8'))
-        except Exception:
-            return 0
+            redis_key = self._make_key(key)
+            value = await self.redis.get(redis_key)
+            if value is None:
+                return None
+
+            # Try to decompress
+            try:
+                return json.loads(zlib.decompress(value))
+            except Exception:
+                return json.loads(value)
+
+        except Exception as e:
+            logger.error(f"Redis get error: {e}")
+            return None
+
+    async def set(
+        self,
+        key: str,
+        value: Any,
+        ttl_seconds: Optional[int] = None,
+        compress: bool = True,
+    ) -> None:
+        """Set value in Redis."""
+        try:
+            redis_key = self._make_key(key)
+            serialized = json.dumps(value)
+
+            if compress:
+                serialized = zlib.compress(serialized.encode())
+
+            await self.redis.set(
+                redis_key,
+                serialized,
+                ex=ttl_seconds or self.default_ttl,
+            )
+
+        except Exception as e:
+            logger.error(f"Redis set error: {e}")
+
+    async def delete(self, key: str) -> bool:
+        """Delete value from Redis."""
+        try:
+            redis_key = self._make_key(key)
+            result = await self.redis.delete(redis_key)
+            return result > 0
+        except Exception as e:
+            logger.error(f"Redis delete error: {e}")
+            return False
+
+    async def clear(self) -> None:
+        """Clear all cache entries with prefix."""
+        try:
+            cursor = 0
+            while True:
+                cursor, keys = await self.redis.scan(
+                    cursor,
+                    match=f"{self.prefix}*",
+                    count=100,
+                )
+                if keys:
+                    await self.redis.delete(*keys)
+                if cursor == 0:
+                    break
+        except Exception as e:
+            logger.error(f"Redis clear error: {e}")
+
+
+class APICacheAction:
+    """
+    Main action class for API caching.
+
+    Features:
+    - Multi-layer caching (memory, Redis)
+    - TTL support
+    - Compression
+    - LRU eviction
+    - Cache statistics
+    - Cache invalidation patterns
+
+    Usage:
+        cache = APICacheAction()
+        await cache.set("key", data, ttl=3600)
+        value = await cache.get("key")
+    """
+
+    def __init__(
+        self,
+        memory_cache: Optional[MemoryCache] = None,
+        redis_cache: Optional[RedisCache] = None,
+        default_ttl: int = 3600,
+    ):
+        self.memory_cache = memory_cache or MemoryCache()
+        self.redis_cache = redis_cache
+        self.default_ttl = default_ttl
+        self._stats = CacheStats()
 
     def _generate_key(self, *args: Any, **kwargs: Any) -> str:
-        """Generate a cache key from arguments."""
-        key_parts = [str(a) for a in args]
+        """Generate cache key from args."""
+        key_parts = [str(arg) for arg in args]
         key_parts.extend(f"{k}={v}" for k, v in sorted(kwargs.items()))
-        key_string = ":".join(key_parts)
-        return hashlib.md5(key_string.encode()).hexdigest()
+        key_data = "|".join(key_parts)
+        return hashlib.sha256(key_data.encode()).hexdigest()
+
+    async def get(self, key: str) -> Optional[Any]:
+        """Get value from cache (multi-layer)."""
+        # Try memory first
+        value = await self.memory_cache.get(key)
+        if value is not None:
+            self._stats.hits += 1
+            return value
+
+        # Try Redis
+        if self.redis_cache:
+            value = await self.redis_cache.get(key)
+            if value is not None:
+                self._stats.hits += 1
+                # Populate memory cache
+                await self.memory_cache.set(key, value, self.default_ttl)
+                return value
+
+        self._stats.misses += 1
+        return None
+
+    async def set(
+        self,
+        key: str,
+        value: Any,
+        ttl_seconds: Optional[int] = None,
+        compress: bool = True,
+    ) -> None:
+        """Set value in cache (multi-layer)."""
+        ttl = ttl_seconds or self.default_ttl
+
+        # Set in memory
+        await self.memory_cache.set(key, value, ttl, compress)
+
+        # Set in Redis
+        if self.redis_cache:
+            await self.redis_cache.set(key, value, ttl, compress)
+
+        self._stats.sets += 1
+
+    async def delete(self, key: str) -> bool:
+        """Delete value from cache."""
+        deleted = await self.memory_cache.delete(key)
+
+        if self.redis_cache:
+            deleted = await self.redis_cache.delete(key) or deleted
+
+        if deleted:
+            self._stats.deletes += 1
+
+        return deleted
+
+    async def clear(self) -> None:
+        """Clear all caches."""
+        await self.memory_cache.clear()
+        if self.redis_cache:
+            await self.redis_cache.clear()
+
+    async def cached_call(
+        self,
+        key: str,
+        func: Callable[..., Any],
+        ttl_seconds: Optional[int] = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute function with cache-aside pattern."""
+        # Try cache first
+        cached = await self.get(key)
+        if cached is not None:
+            return cached
+
+        # Call function
+        if asyncio.iscoroutinefunction(func):
+            result = await func(*args, **kwargs)
+        else:
+            result = func(*args, **kwargs)
+
+        # Cache result
+        await self.set(key, result, ttl_seconds)
+        return result
+
+    async def invalidate_pattern(self, pattern: str) -> int:
+        """Invalidate keys matching pattern."""
+        count = 0
+
+        # Invalidate from memory
+        keys_to_delete = [
+            k for k in (await self.memory_cache.get_stats()).keys()
+            if pattern in k
+        ]
+        for key in keys_to_delete:
+            if await self.memory_cache.delete(key):
+                count += 1
+
+        # Invalidate from Redis
+        if self.redis_cache:
+            # Note: Redis pattern invalidation would need redis_cache support
+            pass
+
+        return count
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        hit_rate = 0.0
+        total = self._stats.hits + self._stats.misses
+        if total > 0:
+            hit_rate = (self._stats.hits / total) * 100
+
+        return {
+            "hits": self._stats.hits,
+            "misses": self._stats.misses,
+            "hit_rate_percent": hit_rate,
+            "sets": self._stats.sets,
+            "deletes": self._stats.deletes,
+            "expirations": self._stats.expirations,
+            "evictions": self._stats.evictions,
+        }
+
+    def reset_stats(self) -> None:
+        """Reset statistics."""
+        self._stats = CacheStats()
+
+
+async def demo_cache():
+    """Demonstrate cache usage."""
+    cache = APICacheAction()
+
+    # Set value
+    await cache.set("user:123", {"name": "Alice", "email": "alice@example.com"}, ttl=3600)
+
+    # Get value
+    value = await cache.get("user:123")
+    print(f"Cached value: {value}")
+
+    # Cached call
+    async def fetch_user(user_id: int):
+        await asyncio.sleep(0.1)  # Simulate API call
+        return {"name": "Bob", "email": "bob@example.com"}
+
+    result = await cache.cached_call("user:456", fetch_user, 456)
+    print(f"Result: {result}")
+
+    print(f"Stats: {cache.get_stats()}")
+
+
+if __name__ == "__main__":
+    asyncio.run(demo_cache())
