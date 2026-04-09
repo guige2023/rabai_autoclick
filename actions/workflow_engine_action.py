@@ -1,270 +1,402 @@
-"""Workflow engine action module.
+"""
+Workflow Engine Action Module
 
-Provides a programmable workflow execution engine with steps, branching,
-loops, error handling, and state management.
+DAG-based workflow orchestration with parallel execution,
+conditional branching, and error handling. Supports long-running workflows.
+
+MIT License - Copyright (c) 2025 RabAi Research
 """
 
 from __future__ import annotations
 
-import time
+import asyncio
 import logging
-from typing import Optional, Dict, Any, Callable, List
+import time
+import uuid
+from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
 
-class StepStatus(Enum):
-    """Status of a workflow step."""
+class NodeStatus(Enum):
+    """Workflow node status."""
+    
     PENDING = "pending"
     RUNNING = "running"
-    SUCCESS = "success"
+    COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
+    CANCELLED = "cancelled"
+
+
+class WorkflowStatus(Enum):
+    """Workflow execution status."""
+    
+    CREATED = "created"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    PAUSED = "paused"
 
 
 @dataclass
-class WorkflowStep:
-    """A single step in a workflow."""
+class WorkflowNode:
+    """A single node in the workflow DAG."""
+    
+    id: str
     name: str
-    action: Callable[[Dict[str, Any]], Any]
-    condition: Optional[Callable[[Dict[str, Any]], bool]] = None
-    on_error: Optional[Callable[[Exception, Dict[str, Any]], Any]] = None
+    action: Callable
+    dependencies: List[str] = field(default_factory=list)
+    condition: Optional[Callable] = None
+    timeout_seconds: float = 300
     retry_count: int = 0
-    timeout_seconds: float = 60.0
-    description: str = ""
-
-    def __post_init__(self) -> None:
-        if not callable(self.action):
-            raise ValueError(f"Step '{self.name}' action must be callable")
+    max_retries: int = 3
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    status: NodeStatus = NodeStatus.PENDING
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    result: Any = None
+    error: Optional[str] = None
 
 
 @dataclass
-class StepResult:
-    """Result of executing a workflow step."""
-    step_name: str
-    status: StepStatus
-    output: Any = None
-    error: Optional[str] = None
-    started_at: float = 0.0
-    completed_at: float = 0.0
-    duration_ms: float = 0.0
+class Workflow:
+    """Complete workflow definition."""
+    
+    id: str
+    name: str
+    nodes: Dict[str, WorkflowNode] = field(default_factory=dict)
+    entry_point: Optional[str] = None
+    
+    status: WorkflowStatus = WorkflowStatus.CREATED
+    created_at: float = field(default_factory=time.time)
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    results: Dict[str, Any] = field(default_factory=dict)
+    errors: Dict[str, str] = field(default_factory=dict)
 
-    @property
-    def success(self) -> bool:
-        return self.status == StepStatus.SUCCESS
+
+class DAGExecutor:
+    """Executes workflows as directed acyclic graphs."""
+    
+    def __init__(self):
+        self._running_nodes: Set[str] = set()
+        self._completed_nodes: Set[str] = set()
+        self._lock = asyncio.Lock()
+    
+    def validate(self, workflow: Workflow) -> tuple[bool, List[str]]:
+        """Validate workflow DAG for cycles and missing dependencies."""
+        errors = []
+        
+        for node_id, node in workflow.nodes.items():
+            for dep in node.dependencies:
+                if dep not in workflow.nodes:
+                    errors.append(f"Node {node_id} depends on missing node {dep}")
+        
+        if self._has_cycle(workflow):
+            errors.append("Workflow contains a cycle")
+        
+        return len(errors) == 0, errors
+    
+    def _has_cycle(self, workflow: Workflow) -> bool:
+        """Check if workflow contains a cycle."""
+        visited = set()
+        rec_stack = set()
+        
+        def dfs(node_id: str) -> bool:
+            visited.add(node_id)
+            rec_stack.add(node_id)
+            
+            node = workflow.nodes.get(node_id)
+            if node:
+                for dep in node.dependencies:
+                    if dep not in visited:
+                        if dfs(dep):
+                            return True
+                    elif dep in rec_stack:
+                        return True
+            
+            rec_stack.remove(node_id)
+            return False
+        
+        for node_id in workflow.nodes:
+            if node_id not in visited:
+                if dfs(node_id):
+                    return True
+        
+        return False
+    
+    def get_executable_nodes(
+        self,
+        workflow: Workflow
+    ) -> List[WorkflowNode]:
+        """Get all nodes that are ready to execute."""
+        executable = []
+        
+        for node_id, node in workflow.nodes.items():
+            if node.status != NodeStatus.PENDING:
+                continue
+            
+            if node_id in self._completed_nodes:
+                continue
+            
+            deps_satisfied = all(
+                dep in self._completed_nodes
+                for dep in node.dependencies
+            )
+            
+            if deps_satisfied:
+                executable.append(node)
+        
+        return executable
 
 
 class WorkflowEngine:
-    """Workflow execution engine.
-
-    Executes a sequence of steps with branching, loops, and error handling.
-
-    Example:
-        engine = WorkflowEngine()
-
-        engine.step("fetch_data", lambda ctx: fetch(ctx["url"]))
-        engine.step("process", lambda ctx: process(ctx["data"]), condition=lambda ctx: "data" in ctx)
-
-        result = engine.execute({"url": "https://api.example.com"})
-    """
-
-    def __init__(
-        self,
-        name: str = "workflow",
-        on_step_complete: Optional[Callable[[StepResult], None]] = None,
-    ) -> None:
-        """Initialize workflow engine.
-
-        Args:
-            name: Workflow name.
-            on_step_complete: Callback after each step completes.
-        """
-        self.name = name
-        self.on_step_complete = on_step_complete
-        self._steps: List[WorkflowStep] = []
-
-    def step(
+    """Core workflow execution engine."""
+    
+    def __init__(self):
+        self.dag = DAGExecutor()
+        self._workflows: Dict[str, Workflow] = {}
+        self._running: Dict[str, asyncio.Task] = {}
+        self._node_handlers: Dict[str, Callable] = {}
+    
+    def create_workflow(
         self,
         name: str,
-        action: Callable[[Dict[str, Any]], Any],
-        condition: Optional[Callable[[Dict[str, Any]], bool]] = None,
-        on_error: Optional[Callable[[Exception, Dict[str, Any]], Any]] = None,
-        retry_count: int = 0,
-        timeout_seconds: float = 60.0,
-        description: str = "",
-    ) -> "WorkflowEngine":
-        """Add a step to the workflow.
-
-        Args:
-            name: Step name (must be unique).
-            action: Callable that executes the step.
-            condition: Optional condition to skip step.
-            on_error: Optional error handler.
-            retry_count: Number of retries on failure.
-            timeout_seconds: Step timeout.
-            description: Step description.
-
-        Returns:
-            Self for chaining.
-        """
-        step = WorkflowStep(
+        nodes: List[WorkflowNode],
+        entry_point: Optional[str] = None
+    ) -> str:
+        """Create a new workflow."""
+        workflow_id = str(uuid.uuid4())
+        
+        nodes_dict = {node.id: node for node in nodes}
+        
+        workflow = Workflow(
+            id=workflow_id,
             name=name,
-            action=action,
-            condition=condition,
-            on_error=on_error,
-            retry_count=retry_count,
-            timeout_seconds=timeout_seconds,
-            description=description,
+            nodes=nodes_dict,
+            entry_point=entry_point or (nodes[0].id if nodes else None)
         )
-        self._steps.append(step)
-        return self
-
-    def branch(
+        
+        valid, errors = self.dag.validate(workflow)
+        if not valid:
+            raise ValueError(f"Invalid workflow: {errors}")
+        
+        self._workflows[workflow_id] = workflow
+        return workflow_id
+    
+    async def execute(
         self,
-        branches: Dict[str, Callable[[], "WorkflowEngine"]],
-        selector: Callable[[Dict[str, Any]], str],
-    ) -> "WorkflowEngine":
-        """Add branching logic to the workflow.
-
-        Args:
-            branches: Dict of branch_name -> WorkflowEngine factory.
-            selector: Function that returns branch name based on context.
-
-        Returns:
-            Self for chaining.
-        """
-        def branch_action(ctx: Dict[str, Any]) -> Any:
-            branch_name = selector(ctx)
-            if branch_name in branches:
-                branch_engine = branches[branch_name]()
-                return branch_engine.execute(ctx)
-            logger.warning("No branch found for '%s'", branch_name)
-            return None
-
-        return self.step(f"branch_{len(self._steps)}", branch_action, description="Dynamic branch")
-
-    def execute(self, initial_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Execute the workflow.
-
-        Args:
-            initial_context: Initial workflow context.
-
-        Returns:
-            Dict with 'status', 'results', 'context', and 'duration_ms'.
-        """
-        context = initial_context or {}
-        results: List[StepResult] = []
-        start_time = time.time()
-
-        for step in self._steps:
-            result = self._execute_step(step, context)
-            results.append(result)
-
-            if self.on_step_complete:
-                self.on_step_complete(result)
-
-            if not result.success and step.on_error is None:
-                logger.warning("Step '%s' failed, continuing due to no error handler", step.name)
-                context[f"{step.name}_error"] = result.error
-
-        duration_ms = (time.time() - start_time) * 1000
-        overall_status = "success" if all(r.success for r in results) else "failed"
-
-        return {
-            "status": overall_status,
-            "results": [(r.step_name, r.status.value, r.output, r.error) for r in results],
-            "context": context,
-            "duration_ms": duration_ms,
-        }
-
-    def _execute_step(self, step: WorkflowStep, context: Dict[str, Any]) -> StepResult:
-        """Execute a single step with retry and error handling."""
-        if step.condition and not step.condition(context):
-            return StepResult(
-                step_name=step.name,
-                status=StepStatus.SKIPPED,
-                started_at=time.time(),
-                completed_at=time.time(),
-            )
-
-        for attempt in range(step.retry_count + 1):
-            started_at = time.time()
-            try:
-                output = self._run_with_timeout(step, context)
-                completed_at = time.time()
-                return StepResult(
-                    step_name=step.name,
-                    status=StepStatus.SUCCESS,
-                    output=output,
-                    started_at=started_at,
-                    completed_at=completed_at,
-                    duration_ms=(completed_at - started_at) * 1000,
-                )
-            except Exception as e:
-                last_error = e
-                if step.on_error and attempt == step.retry_count:
-                    try:
-                        output = step.on_error(last_error, context)
-                        return StepResult(
-                            step_name=step.name,
-                            status=StepStatus.SUCCESS,
-                            output=output,
-                            started_at=started_at,
-                            completed_at=time.time(),
-                        )
-                    except Exception as err:
-                        last_error = err
-
-        return StepResult(
-            step_name=step.name,
-            status=StepStatus.FAILED,
-            error=str(last_error),
-            started_at=time.time(),
-            completed_at=time.time(),
-        )
-
-    def _run_with_timeout(self, step: WorkflowStep, context: Dict[str, Any]) -> Any:
-        """Run step action with timeout."""
-        import signal
-
-        def timeout_handler(signum, frame):
-            raise TimeoutError(f"Step '{step.name}' timed out after {step.timeout_seconds}s")
-
-        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(int(step.timeout_seconds))
+        workflow_id: str,
+        initial_data: Optional[Dict] = None
+    ) -> Workflow:
+        """Execute a workflow."""
+        workflow = self._workflows.get(workflow_id)
+        if not workflow:
+            raise ValueError(f"Workflow {workflow_id} not found")
+        
+        workflow.status = WorkflowStatus.RUNNING
+        workflow.started_at = time.time()
+        
+        context = initial_data or {}
+        workflow.results = {"_context": context}
+        
         try:
-            result = step.action(context)
+            await self._execute_nodes(workflow)
+            
+            if workflow.errors:
+                workflow.status = WorkflowStatus.FAILED
+            else:
+                workflow.status = WorkflowStatus.COMPLETED
+        
+        except Exception as e:
+            workflow.status = WorkflowStatus.FAILED
+            workflow.errors["_execution"] = str(e)
+        
         finally:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, old_handler)
-
-        return result
+            workflow.completed_at = time.time()
+        
+        return workflow
+    
+    async def _execute_nodes(self, workflow: Workflow) -> None:
+        """Execute workflow nodes respecting dependencies."""
+        while True:
+            executable = self.dag.get_executable_nodes(workflow)
+            
+            if not executable:
+                if workflow.errors:
+                    break
+                all_done = all(
+                    node.status in (NodeStatus.COMPLETED, NodeStatus.SKIPPED)
+                    for node in workflow.nodes.values()
+                )
+                if all_done:
+                    break
+                await asyncio.sleep(0.1)
+                continue
+            
+            tasks = [
+                self._execute_node(workflow, node)
+                for node in executable
+            ]
+            
+            await asyncio.gather(*tasks, return_exceptions=True)
+            
+            await asyncio.sleep(0.01)
+    
+    async def _execute_node(
+        self,
+        workflow: Workflow,
+        node: WorkflowNode
+    ) -> None:
+        """Execute a single workflow node."""
+        node.status = NodeStatus.RUNNING
+        node.started_at = time.time()
+        
+        try:
+            if node.condition:
+                should_run = node.condition(workflow.results.get("_context", {}), workflow.results)
+                if not should_run:
+                    node.status = NodeStatus.SKIPPED
+                    return
+            
+            result = await asyncio.wait_for(
+                self._run_node_action(node),
+                timeout=node.timeout_seconds
+            )
+            
+            node.result = result
+            node.status = NodeStatus.COMPLETED
+            node.completed_at = time.time()
+            workflow.results[node.id] = result
+        
+        except asyncio.TimeoutError:
+            node.status = NodeStatus.FAILED
+            node.error = f"Timeout after {node.timeout_seconds}s"
+            workflow.errors[node.id] = node.error
+        
+        except Exception as e:
+            node.status = NodeStatus.FAILED
+            node.error = str(e)
+            workflow.errors[node.id] = str(e)
+            
+            if node.retry_count < node.max_retries:
+                node.retry_count += 1
+                node.status = NodeStatus.PENDING
+    
+    async def _run_node_action(self, node: WorkflowNode) -> Any:
+        """Run the node's action function."""
+        if asyncio.iscoroutinefunction(node.action):
+            return await node.action(workflow_results)
+        return node.action()
 
 
 class WorkflowEngineAction:
-    """High-level workflow engine wrapper.
-
-    Example:
-        action = WorkflowEngineAction()
-        action.add_step("validate", validate_input, condition=lambda c: c.get("validate"))
-        action.add_step("process", process_data)
-        result = action.run({"validate": True, "data": [1, 2, 3]})
     """
-
-    def __init__(self, name: str = "workflow") -> None:
-        self.engine = WorkflowEngine(name=name)
-
-    def add_step(
+    Main workflow engine action handler.
+    
+    Provides DAG-based workflow orchestration with support
+    for parallel execution, conditional branching, and error handling.
+    """
+    
+    def __init__(self):
+        self.engine = WorkflowEngine()
+        self._middleware: List[Callable] = []
+    
+    def define_workflow(
         self,
         name: str,
-        action: Callable[[Dict[str, Any]], Any],
-        **kwargs,
-    ) -> None:
-        """Add a step to the workflow."""
-        self.engine.step(name, action, **kwargs)
+        nodes: List[Dict],
+        entry_point: Optional[str] = None
+    ) -> str:
+        """Define a workflow from configuration."""
+        workflow_nodes = []
+        
+        for node_config in nodes:
+            node = WorkflowNode(
+                id=node_config["id"],
+                name=node_config["name"],
+                action=self._middleware or (lambda: None),
+                dependencies=node_config.get("dependencies", []),
+                condition=node_config.get("condition"),
+                timeout_seconds=node_config.get("timeout", 300),
+                max_retries=node_config.get("max_retries", 3),
+                metadata=node_config.get("metadata", {})
+            )
+            workflow_nodes.append(node)
+        
+        return self.engine.create_workflow(name, workflow_nodes, entry_point)
+    
+    async def run(
+        self,
+        workflow_id: str,
+        initial_data: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """Run a workflow."""
+        workflow = await self.engine.execute(workflow_id, initial_data)
+        
+        return {
+            "workflow_id": workflow.id,
+            "name": workflow.name,
+            "status": workflow.status.value,
+            "results": workflow.results,
+            "errors": workflow.errors,
+            "duration_ms": (
+                (workflow.completed_at - workflow.started_at) * 1000
+                if workflow.completed_at and workflow.started_at else 0
+            )
+        }
+    
+    async def cancel(self, workflow_id: str) -> bool:
+        """Cancel a running workflow."""
+        workflow = self.engine._workflows.get(workflow_id)
+        if workflow:
+            workflow.status = WorkflowStatus.CANCELLED
+            return True
+        return False
+    
+    def get_workflow(self, workflow_id: str) -> Optional[Dict]:
+        """Get workflow status and details."""
+        workflow = self.engine._workflows.get(workflow_id)
+        if not workflow:
+            return None
+        
+        return {
+            "id": workflow.id,
+            "name": workflow.name,
+            "status": workflow.status.value,
+            "nodes": {
+                node_id: {
+                    "name": node.name,
+                    "status": node.status.value,
+                    "started_at": node.started_at,
+                    "completed_at": node.completed_at,
+                    "error": node.error
+                }
+                for node_id, node in workflow.nodes.items()
+            },
+            "created_at": workflow.created_at,
+            "started_at": workflow.started_at,
+            "completed_at": workflow.completed_at
+        }
+    
+    def list_workflows(self) -> List[Dict]:
+        """List all workflows."""
+        return [
+            {
+                "id": wf.id,
+                "name": wf.name,
+                "status": wf.status.value,
+                "created_at": wf.created_at
+            }
+            for wf in self.engine._workflows.values()
+        ]
 
-    def run(self, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Execute the workflow."""
-        return self.engine.execute(context)
+
+workflow_results = {}
