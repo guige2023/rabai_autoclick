@@ -1,322 +1,496 @@
-"""Function utilities for RabAI AutoClick.
+"""
+Function composition and higher-order utilities for UI automation.
 
-Provides:
-- Function introspection helpers
-- Argument binding and partial application
-- Composition utilities
-- Callable type checking and wrapping
+Provides function composition, partial application, memoization,
+and other functional programming utilities.
 """
 
 from __future__ import annotations
 
+import time
 import functools
 import inspect
 from typing import (
-    Any,
-    Callable,
-    Dict,
-    List,
-    Optional,
-    ParamSpec,
-    TypeVar,
-    Union,
-    overload,
+    TypeVar, Callable, Optional, Any, Union, 
+    ParamSpec, Generic, Iterator, overload
 )
+from collections import OrderedDict
+from dataclasses import dataclass
 
 
-P = ParamSpec("P")
-T = TypeVar("T")
-R = TypeVar("R")
+P = ParamSpec('P')
+T = TypeVar('T')
+U = TypeVar('U')
+V = TypeVar('V')
+R = TypeVar('R')
 
 
-def arity(func: Callable[..., Any]) -> int:
-    """Get the number of parameters a function accepts.
-
-    Args:
-        func: Function to inspect.
-
-    Returns:
-        Number of parameters.
-    """
-    try:
-        sig = inspect.signature(func)
-        return len([
-            p for p in sig.parameters.values()
-            if p.default is inspect.Parameter.VAR_POSITIONAL
-            and p.kind != inspect.Parameter.VAR_KEYWORD
-        ])
-    except (ValueError, TypeError):
-        return -1
-
-
-def full_arg_count(func: Callable[..., Any]) -> int:
-    """Count total positional parameters (required + optional).
-
-    Args:
-        func: Function to inspect.
-
-    Returns:
-        Total parameter count.
-    """
-    try:
-        sig = inspect.signature(func)
-        return len(sig.parameters)
-    except (ValueError, TypeError):
-        return -1
-
-
-def get_arg_names(func: Callable[..., Any]) -> List[str]:
-    """Get names of all parameters.
-
-    Args:
-        func: Function to inspect.
-
-    Returns:
-        List of parameter names.
-    """
-    try:
-        sig = inspect.signature(func)
-        return list(sig.parameters.keys())
-    except (ValueError, TypeError):
-        return []
-
-
-def bind_args(
-    func: Callable[..., R],
-    *args: Any,
-    **kwargs: Any,
-) -> Callable[[], R]:
-    """Partially bind arguments to a function.
-
-    Args:
-        func: Function to bind.
-        *args: Positional args to bind.
-        **kwargs: Keyword args to bind.
-
-    Returns:
-        Callable with bound arguments.
-    """
-    @functools.wraps(func)
-    def wrapper() -> R:
-        return func(*args, **kwargs)
-    return wrapper
-
-
-def compose(
-    *funcs: Callable[[Any], Any],
-) -> Callable[[Any], Any]:
+def compose(*funcs: Callable[[Any], Any]) -> Callable[[Any], Any]:
     """Compose functions right-to-left.
-
+    
     Args:
-        *funcs: Functions to compose (last is leftmost).
-
+        *funcs: Functions to compose
+    
     Returns:
-        Composed function.
+        Composed function
+    
+    Example:
+        f = compose(str, lambda x: x * 2, lambda x: x + 1)
+        f(5)  # str((5 + 1) * 2) = "12"
     """
     if not funcs:
-        raise ValueError("At least one function required")
-
+        return lambda x: x
+    
     def composed(x: Any) -> Any:
         result = x
         for func in reversed(funcs):
             result = func(result)
         return result
-
+    
     return composed
 
 
-def pipe(
-    *funcs: Callable[[Any], Any],
-) -> Callable[[Any], Any]:
+def pipe(*funcs: Callable[[Any], Any]) -> Callable[[Any], Any]:
     """Pipe functions left-to-right.
-
+    
     Args:
-        *funcs: Functions to pipe (first is leftmost).
-
+        *funcs: Functions to pipe
+    
     Returns:
-        Piped function.
+        Piped function
+    
+    Example:
+        f = pipe(lambda x: x + 1, lambda x: x * 2, str)
+        f(5)  # str(5 + 1 * 2) = "12"
     """
     if not funcs:
-        raise ValueError("At least one function required")
-
-    def piped(x: Any) -> Any:
-        result = x
-        for func in funcs:
-            result = func(result)
-        return result
-
-    return piped
+        return lambda x: x
+    
+    return compose(*reversed(funcs))
 
 
-def curry(func: Callable[..., R]) -> Callable[..., R]:
-    """Curry a function to accept arguments one at a time.
-
+def partial(func: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> Callable[[], T]:
+    """Create partial application of function.
+    
     Args:
-        func: Function to curry.
-
+        func: Function to partially apply
+        *args: Positional arguments to bind
+        **kwargs: Keyword arguments to bind
+    
     Returns:
-        Curried function.
+        Function with bound arguments
     """
-    sig = inspect.signature(func)
-    params = list(sig.parameters.values())
-
     @functools.wraps(func)
-    def curried(*args: Any, **kwargs: Any) -> Any:
-        all_args = list(args)
-        remaining = len(params) - len(all_args)
-
-        if remaining <= 0:
-            return func(*all_args, **kwargs)
-
-        def next_arg(a: Any, **kw: Any) -> Any:
-            combined = tuple(list(all_args) + [a])
-            if len(combined) >= len(params):
-                return func(*combined, **kw)
-            return next_arg
-
-        if remaining == 1:
-            return next_arg
-        return next_arg
-
-    return curried  # type: ignore
-
-
-def memoize_call(func: Callable[..., R]) -> Callable[..., R]:
-    """Memoize a function call (not on args, just repeat calls).
-
-    Args:
-        func: Function to memoize.
-
-    Returns:
-        Memoized function that caches the last result.
-    """
-    last_args: tuple = ()
-    last_kwargs: tuple = ()
-    last_result: Any = None
-    cached = False
-
-    @functools.wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> R:
-        nonlocal last_args, last_kwargs, last_result, cached
-        args_key = (args, tuple(sorted(kwargs.items())))
-        if cached and args_key == last_args:
-            return last_result  # type: ignore
-        last_result = func(*args, **kwargs)
-        last_args = args_key
-        last_kwargs = tuple(sorted(kwargs.items()))
-        cached = True
-        return last_result  # type: ignore
-
-    def clear() -> None:
-        nonlocal cached
-        cached = False
-
-    wrapper.clear_cache = clear  # type: ignore
-    return wrapper  # type: ignore
-
-
-def call_if(
-    condition: bool,
-    func: Callable[[], T],
-    default: Optional[T] = None,
-) -> Optional[T]:
-    """Call a function only if a condition is True.
-
-    Args:
-        condition: Whether to call func.
-        func: Function to call.
-        default: Value to return if condition is False.
-
-    Returns:
-        Result of func() or default.
-    """
-    if condition:
-        return func()
-    return default
-
-
-def calls_pending(func: Callable[..., Any]) -> Callable[..., Any]:
-    """Track whether a function has pending calls.
-
-    Args:
-        func: Function to wrap.
-
-    Returns:
-        Wrapped function with pending tracking.
-    """
-    pending = 0
-    lock = __import__("threading").Lock()
-
-    @functools.wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        nonlocal pending
-        with lock:
-            pending += 1
-        try:
-            return func(*args, **kwargs)
-        finally:
-            with lock:
-                pending -= 1
-
-    @property
-    def is_pending() -> bool:
-        return pending > 0
-
-    wrapper.is_pending = is_pending  # type: ignore
+    def wrapper(*more_args: P.args, **more_kwargs: P.kwargs) -> T:
+        return func(*args, *more_args, **kwargs, **more_kwargs)
+    
     return wrapper
 
 
-def is_coroutine_function(func: Callable[..., Any]) -> bool:
-    """Check if a function is a coroutine function.
-
+def curry(func: Callable[P, T]) -> Callable[..., T]:
+    """Curry a function.
+    
     Args:
-        func: Function to check.
-
+        func: Function to curry
+    
     Returns:
-        True if it's async def.
+        Curried function
+    
+    Example:
+        def add(a, b): return a + b
+        curried_add = curry(add)
+        curried_add(1)(2)  # 3
     """
-    return inspect.iscoroutinefunction(func)
+    sig = inspect.signature(func)
+    
+    @functools.wraps(func)
+    def curried(*args: P.args, **kwargs: P.kwargs) -> Any:
+        bound = sig.bind(*args, **kwargs)
+        bound.apply_defaults()
+        
+        if len(bound.arguments) == len(sig.parameters):
+            return func(*bound.args, **bound.kwargs)
+        
+        def next_curry(*more_args: P.args, **more_kwargs: P.kwargs) -> Any:
+            new_args = {**bound.arguments, **more_kwargs}
+            new_positional = list(bound.args) + list(more_args)
+            return curried(*new_positional, **new_args)
+        
+        return next_curry
+    
+    return curried
 
 
-def get_docstring(func: Callable[..., Any]) -> Optional[str]:
-    """Get the docstring of a function.
-
+def flip(func: Callable[[T, U], R]) -> Callable[[U, T], R]:
+    """Flip argument order of a two-argument function.
+    
     Args:
-        func: Function to inspect.
-
+        func: Function to flip
+    
     Returns:
-        Docstring or None.
+        Function with flipped arguments
     """
-    return inspect.getdoc(func)
+    @functools.wraps(func)
+    def flipped(a: U, b: T) -> R:
+        return func(b, a)
+    
+    return flipped
 
 
-def short_repr(func: Callable[..., Any]) -> str:
-    """Get a short representation of a function.
-
+def identity(x: T) -> T:
+    """Identity function.
+    
     Args:
-        func: Function to represent.
-
+        x: Any value
+    
     Returns:
-        Short string representation.
+        The same value
     """
-    mod = getattr(func, "__module__", "?")
-    name = getattr(func, "__name__", "?")
-    qualname = getattr(func, "__qualname__", name)
-    return f"{mod}.{qualname}"
+    return x
 
 
-__all__ = [
-    "arity",
-    "full_arg_count",
-    "get_arg_names",
-    "bind_args",
-    "compose",
-    "pipe",
-    "curry",
-    "memoize_call",
-    "call_if",
-    "calls_pending",
-    "is_coroutine_function",
-    "get_docstring",
-    "short_repr",
-]
+def constant(x: T) -> Callable[[Any], T]:
+    """Create constant function.
+    
+    Args:
+        x: Value to always return
+    
+    Returns:
+        Function that always returns x
+    """
+    return lambda _: x
+
+
+def memoize(
+    func: Optional[Callable[P, T]] = None,
+    *,
+    max_size: int = 128,
+    ttl: Optional[float] = None,
+) -> Callable[[Callable[P, T]], Callable[P, T]]:
+    """Memoize function with optional TTL and size limit.
+    
+    Args:
+        func: Function to memoize
+        max_size: Maximum cache size
+        ttl: Time-to-live in seconds
+    
+    Returns:
+        Memoized function decorator
+    """
+    def decorator(f: Callable[P, T]) -> Callable[P, T]:
+        cache: OrderedDict[tuple, tuple[Any, float]] = OrderedDict()
+        
+        @functools.wraps(f)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+            key = (args, tuple(sorted(kwargs.items())))
+            
+            if key in cache:
+                result, timestamp = cache[key]
+                if ttl is None or time.time() - timestamp < ttl:
+                    cache.move_to_end(key)
+                    return result
+            
+            result = f(*args, **kwargs)
+            cache[key] = (result, time.time())
+            
+            if len(cache) > max_size:
+                cache.popitem(last=False)
+            
+            return result
+        
+        def cache_clear() -> None:
+            cache.clear()
+        
+        wrapper.cache_clear = cache_clear  # type: ignore
+        wrapper.cache_info = lambda: {'size': len(cache), 'max_size': max_size}  # type: ignore
+        
+        return wrapper
+    
+    if func is not None:
+        return decorator(func)
+    return decorator
+
+
+def retry(
+    max_attempts: int = 3,
+    delay: float = 0.0,
+    backoff: float = 1.0,
+    exceptions: tuple = (Exception,),
+) -> Callable[[Callable[P, T]], Callable[P, T]]:
+    """Retry decorator with exponential backoff.
+    
+    Args:
+        max_attempts: Maximum retry attempts
+        delay: Initial delay between retries
+        backoff: Backoff multiplier
+        exceptions: Exceptions to catch
+    
+    Returns:
+        Decorated function with retry logic
+    """
+    def decorator(func: Callable[P, T]) -> Callable[P, T]:
+        @functools.wraps(func)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+            last_exception: Optional[Exception] = None
+            current_delay = delay
+            
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as e:
+                    last_exception = e
+                    if attempt < max_attempts - 1:
+                        time.sleep(current_delay)
+                        current_delay *= backoff
+            
+            raise last_exception  # type: ignore
+        
+        return wrapper
+    
+    return decorator
+
+
+def timeout(seconds: float) -> Callable[[Callable[P, T]], Callable[P, Optional[T]]]:
+    """Add timeout to function execution.
+    
+    Args:
+        seconds: Timeout in seconds
+    
+    Returns:
+        Decorated function with timeout
+    """
+    def decorator(func: Callable[P, T]) -> Callable[P, Optional[T]]:
+        @functools.wraps(func)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> Optional[T]:
+            result: Any = None
+            exception: Optional[Exception] = None
+            
+            def target() -> None:
+                nonlocal result, exception
+                try:
+                    result = func(*args, **kwargs)
+                except Exception as e:
+                    exception = e
+            
+            thread = threading.Thread(target=target)
+            thread.daemon = True
+            thread.start()
+            thread.join(seconds)
+            
+            if thread.is_alive():
+                return None
+            
+            if exception is not None:
+                raise exception
+            
+            return result
+        
+        return wrapper
+    
+    return decorator
+
+
+import threading
+
+
+def debounce(wait: float) -> Callable[[Callable[P, T]], Callable[P, Optional[T]]]:
+    """Debounce function calls.
+    
+    Args:
+        wait: Seconds to wait after last call
+    
+    Returns:
+        Decorated debounced function
+    """
+    def decorator(func: Callable[P, T]) -> Callable[P, Optional[T]]:
+        timer: Optional[threading.Timer] = None
+        
+        @functools.wraps(func)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> Optional[T]:
+            nonlocal timer
+            
+            if timer is not None:
+                timer.cancel()
+            
+            result: T = None  # type: ignore
+            
+            def call() -> None:
+                nonlocal result
+                result = func(*args, **kwargs)
+            
+            timer = threading.Timer(wait, call)
+            timer.start()
+            
+            return None
+        
+        return wrapper
+    
+    return decorator
+
+
+def throttle(rate: float) -> Callable[[Callable[P, T]], Callable[P, Optional[T]]]:
+    """Throttle function calls.
+    
+    Args:
+        rate: Minimum seconds between calls
+    
+    Returns:
+        Decorated throttled function
+    """
+    last_call = [0.0]
+    lock = threading.Lock()
+    
+    def decorator(func: Callable[P, T]) -> Callable[P, Optional[T]]:
+        @functools.wraps(func)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> Optional[T]:
+            with lock:
+                now = time.time()
+                if now - last_call[0] < rate:
+                    return None
+                last_call[0] = now
+            
+            return func(*args, **kwargs)
+        
+        return wrapper
+    
+    return decorator
+
+
+def once(func: Callable[P, T]) -> Callable[P, Optional[T]]:
+    """Call function only once, cache result.
+    
+    Args:
+        func: Function to call once
+    
+    Returns:
+        Function that calls func only on first call
+    """
+    called = [False]
+    result = [None]
+    
+    @functools.wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> Optional[T]:
+        if not called[0]:
+            called[0] = True
+            result[0] = func(*args, **kwargs)
+        return result[0]
+    
+    return wrapper
+
+
+def tap(func: Callable[[T], Any]) -> Callable[[T], T]:
+    """Tap into a pipeline, applying side effect.
+    
+    Args:
+        func: Side effect function
+    
+    Returns:
+        Function that applies func and returns original value
+    
+    Example:
+        result = tap(lambda x: print(f"Value: {x}"))(5)  # prints "Value: 5", returns 5
+    """
+    def decorator(x: T) -> T:
+        func(x)
+        return x
+    
+    return decorator
+
+
+def juxt(*funcs: Callable[[T], U]) -> Callable[[T], list[U]]:
+    """Apply multiple functions to same argument.
+    
+    Args:
+        *funcs: Functions to apply
+    
+    Returns:
+        Function returning list of results
+    
+    Example:
+        f = juxt(len, str.upper, lambda x: x * 2)
+        f("hi")  # [2, 'HI', 'hihi']
+    """
+    def decorator(x: T) -> list[U]:
+        return [f(x) for f in funcs]
+    
+    return decorator
+
+
+def complement(func: Callable[[T], bool]) -> Callable[[T], bool]:
+    """Return complement of predicate function.
+    
+    Args:
+        func: Predicate function
+    
+    Returns:
+        Function returning not func(x)
+    """
+    return lambda x: not func(x)
+
+
+def iterate(func: Callable[[T], T], n: int) -> Callable[[T], Iterator[T]]:
+    """Create iterator that applies func n times.
+    
+    Args:
+        func: Function to apply
+        n: Number of iterations
+    
+    Returns:
+        Function yielding iterated values
+    
+    Example:
+        f = iterate(lambda x: x * 2, 3)
+        list(f(1))  # [2, 4, 8]
+    """
+    def decorator(start: T) -> Iterator[T]:
+        current = start
+        for _ in range(n):
+            current = func(current)
+            yield current
+    
+    return decorator
+
+
+def unfold(
+    func: Callable[[T], Optional[tuple[U, T]]],
+    seed: T,
+) -> Iterator[U]:
+    """Unfold value from seed using function.
+    
+    Args:
+        func: Unfold function returning (value, next_seed) or None
+        seed: Initial seed value
+    
+    Yields:
+        Unfolded values
+    
+    Example:
+        f = lambda x: (x, x + 1) if x < 5 else None
+        list(unfold(f, 0))  # [0, 1, 2, 3, 4]
+    """
+    current = seed
+    while True:
+        result = func(current)
+        if result is None:
+            break
+        value, current = result
+        yield value
+
+
+@dataclass
+class LazyValue:
+    """Lazy evaluated value."""
+    _value: Any = None
+    _evaluated: bool = False
+    
+    def get(self, func: Callable[[], T]) -> T:
+        """Get value, evaluating if needed."""
+        if not self._evaluated:
+            self._value = func()
+            self._evaluated = True
+        return self._value
+    
+    def reset(self) -> None:
+        """Reset lazy value."""
+        self._value = None
+        self._evaluated = False
