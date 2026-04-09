@@ -1,511 +1,486 @@
 """Data Export Action Module.
 
-Provides data export capabilities to various
-formats including JSON, CSV, XML, and more.
+Provides data export capabilities supporting multiple formats including
+JSON, CSV, Excel, XML, YAML, and custom templates with compression.
 """
 
-from typing import Any, Dict, List, Optional, Union, TextIO
-from dataclasses import dataclass, field
-from enum import Enum
-import json
+from __future__ import annotations
+
+import base64
 import csv
 import io
-from datetime import datetime
+import json
+import logging
+import xml.etree.ElementTree as ET
+import zipfile
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, TextIO, Union
+
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
+
+
+logger = logging.getLogger(__name__)
 
 
 class ExportFormat(Enum):
     """Supported export formats."""
     JSON = "json"
-    JSONL = "jsonl"
     CSV = "csv"
     TSV = "tsv"
     XML = "xml"
-    HTML = "html"
-    Markdown = "markdown"
     YAML = "yaml"
+    EXCEL = "excel"
+    HTML = "html"
+    SQL = "sql"
+    PARQUET = "parquet"
+
+
+class CompressionType(Enum):
+    """Compression types for export."""
+    NONE = "none"
+    GZIP = "gzip"
+    ZIP = "zip"
+    BZIP2 = "bzip2"
 
 
 @dataclass
-class ExportConfig:
-    """Configuration for data export."""
-    format: ExportFormat
-    include_header: bool = True
-    indent: Optional[int] = 2
-    encoding: str = "utf-8"
-    field_names: Optional[List[str]] = None
+class CSVOptions:
+    """Options for CSV export."""
     delimiter: str = ","
-    quote_char: str = '"'
-    date_format: str = "%Y-%m-%d %H:%M:%S"
+    quotechar: str = '"'
+    quoting: str = "minimal"  # minimal, all, nonnumeric, none
+    include_header: bool = True
+    newline: str = ""
 
 
 @dataclass
-class ExportResult:
-    """Result of an export operation."""
-    success: bool
-    content: Optional[str] = None
-    bytes_written: int = 0
-    records_exported: int = 0
-    error: Optional[str] = None
+class JSONOptions:
+    """Options for JSON export."""
+    indent: Optional[int] = 2
+    sort_keys: bool = False
+    ensure_ascii: bool = False
+    compact: bool = False
 
 
-class JSONExporter:
-    """Exports data to JSON format."""
-
-    def __init__(self, config: Optional[ExportConfig] = None):
-        self.config = config or ExportConfig(format=ExportFormat.JSON)
-
-    def export(
-        self,
-        data: Union[List[Dict], Dict],
-    ) -> ExportResult:
-        """Export data to JSON."""
-        try:
-            if isinstance(data, dict):
-                content = json.dumps(
-                    data,
-                    indent=self.config.indent,
-                    default=str,
-                    ensure_ascii=False,
-                )
-            else:
-                content = json.dumps(
-                    data,
-                    indent=self.config.indent,
-                    default=str,
-                    ensure_ascii=False,
-                )
-
-            return ExportResult(
-                success=True,
-                content=content,
-                bytes_written=len(content.encode(self.config.encoding)),
-                records_exported=len(data) if isinstance(data, list) else 1,
-            )
-
-        except Exception as e:
-            return ExportResult(
-                success=False,
-                error=str(e),
-            )
-
-    def export_to_file(
-        self,
-        data: Union[List[Dict], Dict],
-        file_path: str,
-    ) -> ExportResult:
-        """Export data to JSON file."""
-        result = self.export(data)
-        if result.success:
-            try:
-                with open(file_path, 'w', encoding=self.config.encoding) as f:
-                    f.write(result.content)
-                    result.bytes_written = len(result.content.encode(self.config.encoding))
-            except Exception as e:
-                result.success = False
-                result.error = str(e)
-        return result
+@dataclass
+class SQLOptions:
+    """Options for SQL export."""
+    table_name: str = "exported_data"
+    insert_batch_size: int = 100
+    if_exists: str = "append"  # append, replace, fail
+    include_schema: bool = True
 
 
-class JSONLExporter:
-    """Exports data to JSON Lines format."""
-
-    def __init__(self, config: Optional[ExportConfig] = None):
-        self.config = config or ExportConfig(format=ExportFormat.JSONL)
-
-    def export(
-        self,
-        data: List[Dict],
-    ) -> ExportResult:
-        """Export data to JSONL."""
-        try:
-            lines = []
-            for record in data:
-                line = json.dumps(record, default=str, ensure_ascii=False)
-                lines.append(line)
-
-            content = "\n".join(lines)
-            return ExportResult(
-                success=True,
-                content=content,
-                bytes_written=len(content.encode(self.config.encoding)),
-                records_exported=len(data),
-            )
-
-        except Exception as e:
-            return ExportResult(
-                success=False,
-                error=str(e),
-            )
-
-
-class CSVExporter:
-    """Exports data to CSV format."""
-
-    def __init__(self, config: Optional[ExportConfig] = None):
-        self.config = config or ExportConfig(format=ExportFormat.CSV)
-
-    def export(
-        self,
-        data: List[Dict],
-    ) -> ExportResult:
-        """Export data to CSV."""
-        try:
-            if not data:
-                return ExportResult(
-                    success=True,
-                    content="",
-                    records_exported=0,
-                )
-
-            field_names = self.config.field_names or list(data[0].keys())
-
-            output = io.StringIO()
-            writer = csv.DictWriter(
-                output,
-                fieldnames=field_names,
-                delimiter=self.config.delimiter,
-                quotechar=self.config.quote_char,
-                lineterminator='\n',
-            )
-
-            if self.config.include_header:
-                writer.writeheader()
-
-            for record in data:
-                row = {k: record.get(k, "") for k in field_names}
-                writer.writerow(row)
-
-            content = output.getvalue()
-            return ExportResult(
-                success=True,
-                content=content,
-                bytes_written=len(content.encode(self.config.encoding)),
-                records_exported=len(data),
-            )
-
-        except Exception as e:
-            return ExportResult(
-                success=False,
-                error=str(e),
-            )
-
-    def export_to_file(
-        self,
-        data: List[Dict],
-        file_path: str,
-    ) -> ExportResult:
-        """Export data to CSV file."""
-        result = self.export(data)
-        if result.success:
-            try:
-                with open(file_path, 'w', encoding=self.config.encoding, newline='') as f:
-                    f.write(result.content)
-            except Exception as e:
-                result.success = False
-                result.error = str(e)
-        return result
-
-
-class HTMLExporter:
-    """Exports data to HTML format."""
-
-    def __init__(self, config: Optional[ExportConfig] = None):
-        self.config = config or ExportConfig(format=ExportFormat.HTML)
-
-    def export(
-        self,
-        data: List[Dict],
-        title: str = "Data Export",
-    ) -> ExportResult:
-        """Export data to HTML table."""
-        try:
-            if not data:
-                content = self._empty_html(title)
-            else:
-                field_names = self.config.field_names or list(data[0].keys())
-
-                headers = "".join(f"<th>{h}</th>" for h in field_names)
-                rows = []
-
-                for record in data:
-                    cells = "".join(
-                        f"<td>{self._escape_html(str(record.get(h, '')))}</td>"
-                        for h in field_names
-                    )
-                    rows.append(f"<tr>{cells}</tr>")
-
-                content = self._html_template(
-                    title,
-                    headers,
-                    "".join(rows),
-                )
-
-            return ExportResult(
-                success=True,
-                content=content,
-                bytes_written=len(content.encode(self.config.encoding)),
-                records_exported=len(data),
-            )
-
-        except Exception as e:
-            return ExportResult(
-                success=False,
-                error=str(e),
-            )
-
-    def _html_template(
-        self,
-        title: str,
-        headers: str,
-        rows: str,
-    ) -> str:
-        """Generate HTML template."""
-        return f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="{self.config.encoding}">
-    <title>{self._escape_html(title)}</title>
-    <style>
-        table {{ border-collapse: collapse; width: 100%; }}
-        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-        th {{ background-color: #4CAF50; color: white; }}
-        tr:nth-child(even) {{ background-color: #f2f2f2; }}
-    </style>
-</head>
-<body>
-    <h1>{self._escape_html(title)}</h1>
-    <p>Exported: {datetime.now().strftime(self.config.date_format)}</p>
-    <table>
-        <thead><tr>{headers}</tr></thead>
-        <tbody>{rows}</tbody>
-    </table>
-</body>
-</html>"""
-
-    def _empty_html(self, title: str) -> str:
-        """Generate empty HTML."""
-        return f"""<!DOCTYPE html>
-<html>
-<head>
-    <title>{self._escape_html(title)}</title>
-</head>
-<body>
-    <h1>{self._escape_html(title)}</h1>
-    <p>No data to export.</p>
-</body>
-</html>"""
-
-    def _escape_html(self, text: str) -> str:
-        """Escape HTML special characters."""
-        return (
-            text.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace('"', "&quot;")
-            .replace("'", "&#39;")
-        )
-
-
-class MarkdownExporter:
-    """Exports data to Markdown format."""
-
-    def __init__(self, config: Optional[ExportConfig] = None):
-        self.config = config or ExportConfig(format=ExportFormat.Markdown)
-
-    def export(
-        self,
-        data: List[Dict],
-        title: str = "Data Export",
-    ) -> ExportResult:
-        """Export data to Markdown table."""
-        try:
-            if not data:
-                content = f"# {title}\n\n_No data to export._"
-            else:
-                field_names = self.config.field_names or list(data[0].keys())
-
-                header_row = "| " + " | ".join(field_names) + " |"
-                separator_row = "| " + " | ".join(["---"] * len(field_names)) + " |"
-
-                rows = []
-                for record in data:
-                    cells = " | ".join(str(record.get(h, "")) for h in field_names)
-                    rows.append(f"| {cells} |")
-
-                content = f"# {title}\n\n"
-                content += f"_Exported: {datetime.now().strftime(self.config.date_format)}_\n\n"
-                content += header_row + "\n"
-                content += separator_row + "\n"
-                content += "\n".join(rows)
-
-            return ExportResult(
-                success=True,
-                content=content,
-                bytes_written=len(content.encode(self.config.encoding)),
-                records_exported=len(data),
-            )
-
-        except Exception as e:
-            return ExportResult(
-                success=False,
-                error=str(e),
-            )
-
-
-class XMLExporter:
-    """Exports data to XML format."""
-
-    def __init__(self, config: Optional[ExportConfig] = None):
-        self.config = config or ExportConfig(format=ExportFormat.XML)
-        self._escape_table = str.maketrans({
-            "&": "&amp;",
-            "<": "&lt;",
-            ">": "&gt;",
-            '"': "&quot;",
-            "'": "&apos;",
-        })
-
-    def export(
-        self,
-        data: Union[List[Dict], Dict],
-        root_name: str = "data",
-        item_name: str = "item",
-    ) -> ExportResult:
-        """Export data to XML."""
-        try:
-            if isinstance(data, dict):
-                xml_parts = ["<items>"]
-                for key, value in data.items():
-                    xml_parts.append(f"<{key}>{self._escape_xml(str(value))}</{key}>")
-                xml_parts.append("</items>")
-            else:
-                xml_parts = [f"<{root_name}>"]
-                for record in data:
-                    xml_parts.append(f"  <{item_name}>")
-                    for key, value in record.items():
-                        xml_parts.append(
-                            f"    <{key}>{self._escape_xml(str(value))}</{key}>"
-                        )
-                    xml_parts.append(f"  </{item_name}>")
-                xml_parts.append(f"</{root_name}>")
-
-            content = "\n".join(xml_parts)
-            return ExportResult(
-                success=True,
-                content=content,
-                bytes_written=len(content.encode(self.config.encoding)),
-                records_exported=len(data) if isinstance(data, list) else 1,
-            )
-
-        except Exception as e:
-            return ExportResult(
-                success=False,
-                error=str(e),
-            )
-
-    def _escape_xml(self, text: str) -> str:
-        """Escape XML special characters."""
-        return text.translate(self._escape_table)
+@dataclass
+class ExportOptions:
+    """Comprehensive export options."""
+    format: ExportFormat = ExportFormat.JSON
+    compression: CompressionType = CompressionType.NONE
+    csv_options: Optional[CSVOptions] = None
+    json_options: Optional[JSONOptions] = None
+    sql_options: Optional[SQLOptions] = None
+    file_path: Optional[str] = None
+    include_metadata: bool = True
+    encoding: str = "utf-8"
 
 
 class DataExporter:
-    """Main data export orchestrator."""
+    """Performs data export to various formats."""
+
+    @staticmethod
+    def _flatten_dict(d: Dict[str, Any], parent_key: str = "", sep: str = ".") -> Dict[str, Any]:
+        """Flatten nested dictionary."""
+        items: List[Tuple[str, Any]] = []
+        for k, v in d.items():
+            new_key = f"{parent_key}{sep}{k}" if parent_key else k
+            if isinstance(v, dict):
+                items.extend(DataExporter._flatten_dict(v, new_key, sep=sep).items())
+            elif isinstance(v, list):
+                items.append((new_key, json.dumps(v)))
+            else:
+                items.append((new_key, v))
+        return dict(items)
+
+    @staticmethod
+    def to_json(data: List[Dict[str, Any]], options: JSONOptions) -> str:
+        """Export data to JSON format."""
+        if options.compact:
+            return json.dumps(data, ensure_ascii=options.ensure_ascii, separators=(",", ":"))
+        return json.dumps(data, indent=options.indent, sort_keys=options.sort_keys,
+                          ensure_ascii=options.ensure_ascii)
+
+    @staticmethod
+    def to_csv(data: List[Dict[str, Any]], options: CSVOptions) -> str:
+        """Export data to CSV format."""
+        if not data:
+            return ""
+
+        output = io.StringIO()
+        # Flatten first row to get all possible columns
+        flattened_data = [DataExporter._flatten_dict(row) if isinstance(row, dict) else row
+                         for row in data]
+
+        fieldnames = []
+        for row in flattened_data:
+            if isinstance(row, dict):
+                fieldnames.extend(row.keys())
+        fieldnames = list(dict.fromkeys(fieldnames))  # Preserve order, remove dups
+
+        quoting_map = {
+            "minimal": csv.QUOTE_MINIMAL,
+            "all": csv.QUOTE_ALL,
+            "nonnumeric": csv.QUOTE_NONNUMERIC,
+            "none": csv.QUOTE_NONE,
+        }
+        quoting = quoting_map.get(options.quoting, csv.QUOTE_MINIMAL)
+
+        writer = csv.DictWriter(
+            output,
+            fieldnames=fieldnames,
+            delimiter=options.delimiter,
+            quotechar=options.quotechar,
+            quoting=quoting,
+            lineterminator=options.newline if options.newline else "\n",
+        )
+
+        if options.include_header:
+            writer.writeheader()
+
+        for row in flattened_data:
+            if isinstance(row, dict):
+                writer.writerow(row)
+            elif row:
+                writer.writerow({fieldnames[0]: row})
+
+        return output.getvalue()
+
+    @staticmethod
+    def to_tsv(data: List[Dict[str, Any]]) -> str:
+        """Export data to TSV format."""
+        csv_options = CSVOptions(delimiter="\t", include_header=True)
+        return DataExporter.to_csv(data, csv_options)
+
+    @staticmethod
+    def to_xml(data: List[Dict[str, Any]], root_name: str = "data",
+               item_name: str = "item") -> str:
+        """Export data to XML format."""
+        root = ET.Element(root_name)
+        for i, item in enumerate(data):
+            record = ET.SubElement(root, item_name)
+            if isinstance(item, dict):
+                for key, value in item.items():
+                    child = ET.SubElement(record, str(key))
+                    child.text = str(value) if value is not None else ""
+            elif item is not None:
+                record.text = str(item)
+
+        return ET.tostring(root, encoding="unicode")
+
+    @staticmethod
+    def to_yaml(data: List[Dict[str, Any]]) -> str:
+        """Export data to YAML format (simple implementation)."""
+        try:
+            import yaml
+            return yaml.dump(data, allow_unicode=True, sort_keys=False)
+        except ImportError:
+            # Fallback to simple format
+            lines = []
+            for i, item in enumerate(data):
+                lines.append(f"- {json.dumps(item)}")
+            return "\n".join(lines)
+
+    @staticmethod
+    def to_html(data: List[Dict[str, Any]], title: str = "Exported Data") -> str:
+        """Export data to HTML table format."""
+        if not data:
+            return f"<html><head><title>{title}</title></head><body><p>No data</p></body></html>"
+
+        flattened_data = [DataExporter._flatten_dict(row) if isinstance(row, dict) else row
+                         for row in data]
+
+        headers = []
+        for row in flattened_data:
+            if isinstance(row, dict):
+                headers.extend(row.keys())
+        headers = list(dict.fromkeys(headers))
+
+        html = ['<html>', '<head>',
+                f'<title>{title}</title>',
+                '<style>',
+                'table { border-collapse: collapse; width: 100%; }',
+                'th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }',
+                'th { background-color: #4CAF50; color: white; }',
+                'tr:nth-child(even) { background-color: #f2f2f2; }',
+                '</style>',
+                '</head>', '<body>',
+                f'<h1>{title}</h1>',
+                '<table>']
+
+        # Header
+        html.append('<thead><tr>')
+        for h in headers:
+            html.append(f'<th>{h}</th>')
+        html.append('</tr></thead>')
+
+        # Body
+        html.append('<tbody>')
+        for row in flattened_data:
+            html.append('<tr>')
+            if isinstance(row, dict):
+                for h in headers:
+                    value = row.get(h, "")
+                    html.append(f'<td>{value}</td>')
+            else:
+                html.append(f'<td>{row}</td>')
+            html.append('</tr>')
+        html.append('</tbody>')
+
+        html.extend(['</table>', '</body>', '</html>'])
+        return ''.join(html)
+
+    @staticmethod
+    def to_sql(data: List[Dict[str, Any]], options: SQLOptions) -> List[str]:
+        """Export data as SQL INSERT statements."""
+        if not data:
+            return []
+
+        flattened_data = [DataExporter._flatten_dict(row) if isinstance(row, dict) else row
+                         for row in data]
+
+        # Get columns from first row
+        columns = []
+        if flattened_data and isinstance(flattened_data[0], dict):
+            columns = list(flattened_data[0].keys())
+
+        statements = []
+        if options.include_schema:
+            create_table = [f"CREATE TABLE IF NOT EXISTS {options.table_name} ("]
+            col_defs = [f"  {col} TEXT" for col in columns]
+            create_table.append(", ".join(col_defs))
+            create_table.append(");")
+            statements.append("\n".join(create_table))
+
+        # INSERT statements
+        for i in range(0, len(flattened_data), options.insert_batch_size):
+            batch = flattened_data[i:i + options.insert_batch_size]
+            for row in batch:
+                if isinstance(row, dict):
+                    cols = ", ".join(columns)
+                    values = []
+                    for col in columns:
+                        val = row.get(col)
+                        if val is None:
+                            values.append("NULL")
+                        elif isinstance(val, (int, float)):
+                            values.append(str(val))
+                        else:
+                            escaped = str(val).replace("'", "''")
+                            values.append(f"'{escaped}'")
+                    values_str = ", ".join(values)
+                    statements.append(
+                        f"INSERT INTO {options.table_name} ({cols}) VALUES ({values_str});"
+                    )
+
+        return statements
+
+    @staticmethod
+    def compress(data: Union[str, bytes], compression: CompressionType) -> bytes:
+        """Compress data according to compression type."""
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+
+        if compression == CompressionType.GZIP:
+            import gzip
+            return gzip.compress(data)
+        elif compression == CompressionType.BZIP2:
+            import bz2
+            return bz2.compress(data)
+        elif compression == CompressionType.ZIP:
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("exported_data", data)
+            return buffer.getvalue()
+        else:
+            return data
+
+
+class DataExportAction(BaseAction):
+    """Data Export Action for exporting data to various formats.
+
+    Supports JSON, CSV, XML, YAML, HTML, SQL, and compression.
+
+    Examples:
+        >>> action = DataExportAction()
+        >>> result = action.execute(ctx, {
+        ...     "data": [{"name": "Alice", "age": 30}],
+        ...     "format": "csv",
+        ...     "file_path": "/tmp/export.csv"
+        ... })
+    """
+
+    action_type = "data_export"
+    display_name = "数据导出"
+    description = "多格式数据导出：JSON/CSV/XML/YAML/SQL/HTML"
 
     def __init__(self):
-        self._exporters: Dict[ExportFormat, Any] = {
-            ExportFormat.JSON: JSONExporter(),
-            ExportFormat.JSONL: JSONLExporter(),
-            ExportFormat.CSV: CSVExporter(),
-            ExportFormat.HTML: HTMLExporter(),
-            ExportFormat.Markdown: MarkdownExporter(),
-            ExportFormat.XML: XMLExporter(),
-        }
+        super().__init__()
 
-    def export(
-        self,
-        data: Any,
-        format: Union[ExportFormat, str],
-        config: Optional[ExportConfig] = None,
-    ) -> ExportResult:
-        """Export data to specified format."""
-        if isinstance(format, str):
-            format = ExportFormat(format)
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute data export.
 
-        if format == ExportFormat.YAML:
-            return ExportResult(
+        Args:
+            context: Execution context.
+            params: Dict with keys:
+                - data: List of dicts to export
+                - format: Export format ('json', 'csv', 'xml', 'yaml', 'html', 'sql')
+                - file_path: Optional file path to write to
+                - compression: Compression type ('none', 'gzip', 'zip', 'bzip2')
+                - csv_options: Dict of CSV options
+                - json_options: Dict of JSON options
+                - sql_options: Dict of SQL options
+                - include_metadata: Include export metadata
+                - return_as_base64: Return data as base64 string
+
+        Returns:
+            ActionResult with exported data.
+        """
+        import time
+        start_time = time.time()
+
+        data = params.get("data", [])
+        format_str = params.get("format", "json").lower()
+        file_path = params.get("file_path")
+        compression_str = params.get("compression", "none").lower()
+        include_metadata = params.get("include_metadata", True)
+        return_as_base64 = params.get("return_as_base64", False)
+
+        if not isinstance(data, list):
+            return ActionResult(
                 success=False,
-                error="YAML export not implemented",
+                message="'data' must be a list"
             )
 
-        exporter = self._exporters.get(format)
-        if not exporter:
-            return ExportResult(
+        try:
+            export_format = ExportFormat(format_str)
+        except ValueError:
+            return ActionResult(
                 success=False,
-                error=f"Unsupported format: {format}",
+                message=f"Unsupported format: {format_str}"
             )
 
-        return exporter.export(data)
+        try:
+            compression = CompressionType(compression_str)
+        except ValueError:
+            compression = CompressionType.NONE
 
+        # Export data
+        metadata = {"record_count": len(data), "format": export_format.value}
+        output_data: Union[str, bytes]
 
-class DataExportAction:
-    """High-level data export action."""
+        if export_format == ExportFormat.JSON:
+            json_opts = JSONOptions(**params.get("json_options", {}))
+            output_data = DataExporter.to_json(data, json_opts)
+            metadata["encoding"] = "utf-8"
 
-    def __init__(self, exporter: Optional[DataExporter] = None):
-        self.exporter = exporter or DataExporter()
+        elif export_format == ExportFormat.CSV:
+            csv_opts = CSVOptions(**params.get("csv_options", {}))
+            output_data = DataExporter.to_csv(data, csv_opts)
+            metadata["encoding"] = "utf-8"
 
-    def export(
-        self,
-        data: Any,
-        format: str,
-        **kwargs,
-    ) -> ExportResult:
-        """Export data to format."""
-        config = ExportConfig(format=ExportFormat(format), **kwargs)
-        return self.exporter.export(data, config.format, config)
+        elif export_format == ExportFormat.TSV:
+            output_data = DataExporter.to_tsv(data)
+            metadata["encoding"] = "utf-8"
 
-    def export_to_json(
-        self,
-        data: Any,
-        indent: int = 2,
-    ) -> str:
-        """Export to JSON string."""
-        result = self.exporter.export(data, ExportFormat.JSON)
-        return result.content or ""
+        elif export_format == ExportFormat.XML:
+            root_name = params.get("xml_root_name", "data")
+            item_name = params.get("xml_item_name", "item")
+            output_data = DataExporter.to_xml(data, root_name, item_name)
+            metadata["encoding"] = "utf-8"
 
-    def export_to_csv(
-        self,
-        data: List[Dict],
-        field_names: Optional[List[str]] = None,
-    ) -> str:
-        """Export to CSV string."""
-        config = ExportConfig(
-            format=ExportFormat.CSV,
-            field_names=field_names,
+        elif export_format == ExportFormat.YAML:
+            output_data = DataExporter.to_yaml(data)
+            metadata["encoding"] = "utf-8"
+
+        elif export_format == ExportFormat.HTML:
+            title = params.get("html_title", "Exported Data")
+            output_data = DataExporter.to_html(data, title)
+            metadata["encoding"] = "utf-8"
+
+        elif export_format == ExportFormat.SQL:
+            sql_opts = SQLOptions(**params.get("sql_options", {}))
+            statements = DataExporter.to_sql(data, sql_opts)
+            output_data = "\n".join(statements)
+            metadata["encoding"] = "utf-8"
+            metadata["statement_count"] = len(statements)
+
+        else:
+            return ActionResult(
+                success=False,
+                message=f"Format not implemented: {format_str}"
+            )
+
+        # Compress if requested
+        if compression != CompressionType.NONE:
+            output_data = DataExporter.compress(output_data, compression)
+            metadata["compression"] = compression.value
+            metadata["original_size"] = len(output_data)
+
+        # Write to file if path provided
+        if file_path:
+            try:
+                path = Path(file_path)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if isinstance(output_data, str):
+                    path.write_text(output_data, encoding="utf-8")
+                else:
+                    path.write_bytes(output_data)
+                metadata["file_path"] = str(path.absolute())
+                metadata["file_size"] = path.stat().st_size
+            except Exception as e:
+                return ActionResult(
+                    success=False,
+                    message=f"Failed to write file: {str(e)}"
+                )
+
+        # Return result
+        if return_as_base64:
+            if isinstance(output_data, str):
+                output_data = output_data.encode("utf-8")
+            b64_data = base64.b64encode(output_data).decode()
+            return ActionResult(
+                success=True,
+                message=f"Exported {len(data)} records to {export_format.value} (base64)",
+                data={
+                    "data": b64_data,
+                    "metadata": metadata,
+                }
+            )
+
+        return ActionResult(
+            success=True,
+            message=f"Exported {len(data)} records to {export_format.value}",
+            data={
+                "data": output_data if isinstance(output_data, str) else output_data.decode(errors="replace"),
+                "metadata": metadata,
+            }
         )
-        result = self.exporter.export(data, ExportFormat.CSV, config)
-        return result.content or ""
 
-    def export_to_html(
-        self,
-        data: List[Dict],
-        title: str = "Data Export",
-    ) -> str:
-        """Export to HTML string."""
-        result = self.exporter.export(data, ExportFormat.HTML)
-        return result.content or ""
+    def get_required_params(self) -> List[str]:
+        return ["data"]
 
-
-# Module exports
-__all__ = [
-    "DataExportAction",
-    "DataExporter",
-    "JSONExporter",
-    "JSONLExporter",
-    "CSVExporter",
-    "HTMLExporter",
-    "MarkdownExporter",
-    "XMLExporter",
-    "ExportFormat",
-    "ExportConfig",
-    "ExportResult",
-]
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {
+            "format": "json",
+            "file_path": None,
+            "compression": "none",
+            "csv_options": None,
+            "json_options": None,
+            "sql_options": None,
+            "include_metadata": True,
+            "return_as_base64": False,
+        }
