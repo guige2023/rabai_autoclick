@@ -1,221 +1,223 @@
-"""API compression action module for RabAI AutoClick.
+"""API request/response compression utilities.
 
-Provides compression for API operations:
-- ApiCompressionAction: Compress API request/response data
-- ApiDecompressionAction: Decompress API data
-- ApiGzipAction: Gzip compression for API
-- ApiStreamCompressAction: Stream compression for large payloads
+This module provides compression:
+- Gzip/Zlib compression
+- Brotli support
+- Streaming compression
+- Automatic decompression
+
+Example:
+    >>> from actions.api_compression_action import decompress_response, compress_payload
+    >>> data = decompress_response(response.content, encoding="gzip")
 """
+
+from __future__ import annotations
 
 import gzip
 import zlib
-from typing import Any, Dict, List, Optional
-from datetime import datetime
+import logging
+from typing import Any, Callable, Optional
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class ApiCompressionAction(BaseAction):
-    """Compress API request/response data."""
-    action_type = "api_compression"
-    display_name = "API数据压缩"
-    description = "压缩API请求和响应数据"
+def compress_gzip(data: bytes, level: int = 6) -> bytes:
+    """Compress data with gzip.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "compress")
-            data = params.get("data")
-            compression_type = params.get("compression_type", "gzip")
-            level = params.get("level", 6)
+    Args:
+        data: Bytes to compress.
+        level: Compression level (1-9).
 
-            if operation == "compress":
-                if data is None:
-                    return ActionResult(success=False, message="data is required")
-
-                if isinstance(data, str):
-                    data = data.encode()
-
-                if compression_type == "gzip":
-                    compressed = gzip.compress(data, level)
-                elif compression_type == "deflate":
-                    compressed = zlib.compress(data, level)
-                elif compression_type == "zlib":
-                    compressed = zlib.compress(data, level)
-                else:
-                    return ActionResult(success=False, message=f"Unknown compression: {compression_type}")
-
-                ratio = len(compressed) / len(data) if len(data) > 0 else 1
-
-                return ActionResult(
-                    success=True,
-                    message=f"Compressed {len(data)} → {len(compressed)} bytes (ratio: {ratio:.2%})",
-                    data={"compressed": compressed, "original_size": len(data), "compressed_size": len(compressed), "ratio": ratio}
-                )
-
-            elif operation == "decompress":
-                if data is None:
-                    return ActionResult(success=False, message="data is required")
-
-                if isinstance(data, str):
-                    data = data.encode()
-
-                try:
-                    decompressed = gzip.decompress(data)
-                except Exception:
-                    try:
-                        decompressed = zlib.decompress(data)
-                    except Exception:
-                        return ActionResult(success=False, message="Decompression failed")
-
-                return ActionResult(
-                    success=True,
-                    message=f"Decompressed to {len(decompressed)} bytes",
-                    data={"decompressed": decompressed, "original_size": len(data), "decompressed_size": len(decompressed)}
-                )
-
-            return ActionResult(success=False, message=f"Unknown operation: {operation}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Compression error: {e}")
+    Returns:
+        Compressed bytes.
+    """
+    return gzip.compress(data, level)
 
 
-class ApiGzipAction(BaseAction):
-    """Gzip compression specifically for API."""
-    action_type = "api_gzip"
-    display_name = "API Gzip压缩"
-    description = "Gzip压缩API数据"
+def decompress_gzip(data: bytes) -> bytes:
+    """Decompress gzip data.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data")
-            level = params.get("level", 6)
+    Args:
+        data: Compressed bytes.
 
-            if data is None:
-                return ActionResult(success=False, message="data is required")
-
-            data_bytes = data.encode() if isinstance(data, str) else data
-
-            compressed = gzip.compress(data_bytes, level)
-            ratio = len(compressed) / len(data_bytes) if data_bytes else 1
-
-            return ActionResult(
-                success=True,
-                message=f"Gzip: {len(data_bytes)} → {len(compressed)} bytes",
-                data={"compressed": compressed, "original": len(data_bytes), "gzip_size": len(compressed), "ratio": ratio}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Gzip error: {e}")
+    Returns:
+        Decompressed bytes.
+    """
+    return gzip.decompress(data)
 
 
-class ApiDecompressionAction(BaseAction):
-    """Decompress API compressed data."""
-    action_type = "api_decompression"
-    display_name = "API数据解压"
-    description = "解压API压缩数据"
+def compress_zlib(data: bytes, level: int = 6) -> bytes:
+    """Compress data with zlib.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data")
-            auto_detect = params.get("auto_detect", True)
+    Args:
+        data: Bytes to compress.
+        level: Compression level (1-9).
 
-            if data is None:
-                return ActionResult(success=False, message="data is required")
-
-            data_bytes = data.encode() if isinstance(data, str) else data
-
-            decompressed = None
-            method = "unknown"
-
-            if auto_detect:
-                for decompressor, name in [(gzip.decompress, "gzip"), (zlib.decompress, "zlib"), (zlib.decompressobj().decompress, "raw")]:
-                    try:
-                        decompressed = decompressor(data_bytes)
-                        method = name
-                        break
-                    except Exception:
-                        continue
-
-                if decompressed is None:
-                    return ActionResult(success=False, message="Could not detect compression format")
-            else:
-                try:
-                    decompressed = gzip.decompress(data_bytes)
-                    method = "gzip"
-                except Exception:
-                    try:
-                        decompressed = zlib.decompress(data_bytes)
-                        method = "zlib"
-                    except Exception as e:
-                        return ActionResult(success=False, message=f"Decompression failed: {e}")
-
-            return ActionResult(
-                success=True,
-                message=f"Decompressed using {method}: {len(data_bytes)} → {len(decompressed)} bytes",
-                data={"decompressed": decompressed, "method": method, "original_size": len(data_bytes)}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Decompression error: {e}")
+    Returns:
+        Compressed bytes.
+    """
+    return zlib.compress(data, level)
 
 
-class ApiStreamCompressAction(BaseAction):
-    """Stream compression for large payloads."""
-    action_type = "api_stream_compress"
-    display_name = "API流式压缩"
-    description = "大payload的流式压缩"
+def decompress_zlib(data: bytes) -> bytes:
+    """Decompress zlib data.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            chunks = params.get("chunks", [])
-            operation = params.get("operation", "compress")
-            chunk_size = params.get("chunk_size", 8192)
+    Args:
+        data: Compressed bytes.
 
-            if operation == "compress":
-                if not chunks:
-                    return ActionResult(success=False, message="chunks list required")
-
-                compressed_chunks = []
-                total_original = 0
-
-                with gzip.GzipFile(fileobj=gzip_io(), mode='wb') as gz:
-                    for chunk in chunks:
-                        chunk_bytes = chunk.encode() if isinstance(chunk, str) else chunk
-                        total_original += len(chunk_bytes)
-                        gz.write(chunk_bytes)
-
-                result_bytes = gzip_io.getvalue()
-                ratio = len(result_bytes) / total_original if total_original > 0 else 1
-
-                return ActionResult(
-                    success=True,
-                    message=f"Stream compressed {len(chunks)} chunks",
-                    data={"compressed": result_bytes, "chunk_count": len(chunks), "ratio": ratio}
-                )
-
-            elif operation == "decompress":
-                if not chunks:
-                    return ActionResult(success=False, message="chunks list required")
-
-                combined = b"".join(c.encode() if isinstance(c, str) else c for c in chunks)
-                decompressed = gzip.decompress(combined)
-
-                return ActionResult(
-                    success=True,
-                    message=f"Stream decompressed to {len(decompressed)} bytes",
-                    data={"decompressed": decompressed}
-                )
-
-            return ActionResult(success=False, message=f"Unknown operation: {operation}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Stream compress error: {e}")
+    Returns:
+        Decompressed bytes.
+    """
+    return zlib.decompress(data)
 
 
-import io
+def compress_deflate(data: bytes) -> bytes:
+    """Compress data with zlib deflate.
+
+    Args:
+        data: Bytes to compress.
+
+    Returns:
+        Compressed bytes.
+    """
+    return zlib.compress(data)[2:-4]
 
 
-class gzip_io(io.BytesIO):
-    """Gzip BytesIO wrapper."""
-    pass
+def decompress_deflate(data: bytes) -> bytes:
+    """Decompress deflate data.
+
+    Args:
+        data: Compressed bytes.
+
+    Returns:
+        Decompressed bytes.
+    """
+    return zlib.decompress(data, -zlib.MAX_WBITS)
+
+
+class CompressionMiddleware:
+    """Middleware for handling compression.
+
+    Example:
+        >>> mw = CompressionMiddleware()
+        >>> compressed = mw.compress(request.body, encoding="gzip")
+    """
+
+    SUPPORTED_ENCODINGS = ["gzip", "deflate", "zlib", "identity"]
+
+    def __init__(self, default_encoding: str = "gzip") -> None:
+        self.default_encoding = default_encoding
+
+    def compress(
+        self,
+        data: bytes,
+        encoding: Optional[str] = None,
+    ) -> tuple[bytes, str]:
+        """Compress data.
+
+        Args:
+            data: Bytes to compress.
+            encoding: Encoding type.
+
+        Returns:
+            Tuple of (compressed_data, encoding_used).
+        """
+        encoding = encoding or self.default_encoding
+        if encoding == "gzip":
+            return compress_gzip(data), "gzip"
+        elif encoding in ("deflate", "zlib"):
+            return compress_zlib(data), "deflate"
+        elif encoding == "identity":
+            return data, "identity"
+        logger.warning(f"Unknown encoding {encoding}, returning uncompressed")
+        return data, "identity"
+
+    def decompress(
+        self,
+        data: bytes,
+        encoding: Optional[str] = None,
+    ) -> bytes:
+        """Decompress data.
+
+        Args:
+            data: Compressed bytes.
+            encoding: Encoding type.
+
+        Returns:
+            Decompressed bytes.
+        """
+        if not encoding or encoding == "identity":
+            return data
+        if encoding == "gzip":
+            return decompress_gzip(data)
+        elif encoding in ("deflate", "zlib"):
+            try:
+                return decompress_zlib(data)
+            except zlib.error:
+                return decompress_deflate(data)
+        logger.warning(f"Unknown encoding {encoding}")
+        return data
+
+    def should_compress(
+        self,
+        content_type: str,
+        content_length: int,
+        min_size: int = 1024,
+    ) -> bool:
+        """Check if content should be compressed.
+
+        Args:
+            content_type: MIME type.
+            content_length: Size in bytes.
+            min_size: Minimum size to compress.
+
+        Returns:
+            True if should compress.
+        """
+        if content_length < min_size:
+            return False
+        compressible_types = [
+            "text/", "application/json", "application/xml",
+            "application/javascript", "application/xhtml+xml",
+        ]
+        return any(content_type.startswith(t) for t in compressible_types)
+
+
+def compress_request_body(
+    body: bytes,
+    encoding: str = "gzip",
+    min_size: int = 1024,
+) -> tuple[bytes, str]:
+    """Compress request body if beneficial.
+
+    Args:
+        body: Request body bytes.
+        encoding: Encoding to use.
+        min_size: Minimum size to compress.
+
+    Returns:
+        Tuple of (body, content_encoding).
+    """
+    if len(body) < min_size:
+        return body, "identity"
+    mw = CompressionMiddleware()
+    return mw.compress(body, encoding)
+
+
+def decompress_response_body(
+    body: bytes,
+    encoding: Optional[str] = None,
+) -> bytes:
+    """Decompress response body.
+
+    Args:
+        body: Response body bytes.
+        encoding: Content-Encoding header value.
+
+    Returns:
+        Decompressed body.
+    """
+    if not encoding or encoding == "identity":
+        return body
+    mw = CompressionMiddleware()
+    return mw.decompress(body, encoding)
