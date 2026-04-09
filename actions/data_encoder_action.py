@@ -1,228 +1,381 @@
-"""Data Encoder Action Module.
-
-Provides data encoding/decoding for various formats:
-Base64, URL encoding, JSON pointers, and custom encoders.
 """
-from __future__ import annotations
+Data Encoder Action Module.
 
-import base64
+Provides encoding and decoding utilities for various formats
+including JSON, MessagePack, Protocol Buffers, and custom encodings.
+
+Author: rabai_autoclick team
+"""
+
 import json
-import urllib.parse
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Union
+import base64
 import logging
+from typing import (
+    Optional, Dict, Any, List, Union, Callable, Type, TypeVar
+)
+from dataclasses import dataclass, is_dataclass, asdict
+from enum import Enum
+from datetime import datetime, date
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar("T")
+
 
 class EncodingFormat(Enum):
-    """Encoding format."""
-    BASE64 = "base64"
-    URL = "url"
-    JSON_POINTER = "json_pointer"
-    CSV = "csv"
-    HEX = "hex"
+    """Supported encoding formats."""
+    JSON = "json"
+    MSGPACK = "msgpack"
+    CBOR = "cbor"
+    UBJSON = "ubjson"
     CUSTOM = "custom"
 
 
 @dataclass
 class EncoderConfig:
-    """Encoder configuration."""
-    format: EncodingFormat
-    custom_encoder: Optional[Callable[[Any], str]] = None
-    custom_decoder: Optional[Callable[[str], Any]] = None
+    """Configuration for encoding operations."""
+    format: EncodingFormat = EncodingFormat.JSON
+    indent: Optional[int] = None
+    ensure_ascii: bool = False
+    use_base64: bool = False
+    datetime_format: str = "iso"
+    decimal_precision: Optional[int] = None
+    custom_encoders: Dict[type, Callable] = field(default_factory=dict)
 
 
 class DataEncoderAction:
-    """Multi-format data encoder.
+    """
+    Data Encoding and Decoding Engine.
+
+    Supports multiple serialization formats with extensibility
+    for custom types and encoding strategies.
 
     Example:
-        encoder = DataEncoderAction()
-
-        encoded = encoder.encode({"data": "value"}, EncodingFormat.BASE64)
-        decoded = encoder.decode(encoded, EncodingFormat.BASE64)
-
-        pointer = encoder.create_pointer("/data")
+        >>> encoder = DataEncoderAction()
+        >>> encoded = encoder.encode({"key": "value"}, format=EncodingFormat.JSON)
+        >>> decoded = encoder.decode(encoded)
     """
 
-    def __init__(self) -> None:
-        self._encoders: Dict[EncodingFormat, Callable] = {}
-        self._decoders: Dict[EncodingFormat, Callable] = {}
+    def __init__(self, config: Optional[EncoderConfig] = None):
+        self.config = config or EncoderConfig()
         self._register_default_encoders()
 
     def _register_default_encoders(self) -> None:
-        """Register default encoders/decoders."""
-        self._encoders[EncodingFormat.BASE64] = self._encode_base64
-        self._decoders[EncodingFormat.BASE64] = self._decode_base64
+        """Register default type encoders."""
+        self.config.custom_encoders[datetime] = self._encode_datetime
+        self.config.custom_encoders[date] = self._encode_date
+        self.config.custom_encoders[Decimal] = self._encode_decimal
+        self.config.custom_encoders[bytes] = self._encode_bytes
 
-        self._encoders[EncodingFormat.URL] = self._encode_url
-        self._decoders[EncodingFormat.URL] = self._decode_url
+    def _encode_datetime(self, value: datetime) -> str:
+        """Encode datetime to string."""
+        return value.strftime(self.config.datetime_format)
 
-        self._encoders[EncodingFormat.HEX] = self._encode_hex
-        self._decoders[EncodingFormat.HEX] = self._decode_hex
+    def _encode_date(self, value: date) -> str:
+        """Encode date to string."""
+        return value.isoformat()
+
+    def _encode_decimal(self, value: Decimal) -> Union[float, str]:
+        """Encode Decimal to float or string."""
+        if self.config.decimal_precision is not None:
+            return round(float(value), self.config.decimal_precision)
+        return str(value)
+
+    def _encode_bytes(self, value: bytes) -> str:
+        """Encode bytes to base64 string."""
+        return base64.b64encode(value).decode("ascii")
+
+    def _decode_datetime(self, value: str) -> datetime:
+        """Decode string to datetime."""
+        if self.config.datetime_format == "iso":
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.strptime(value, self.config.datetime_format)
+
+    def _decode_bytes(self, value: str) -> bytes:
+        """Decode base64 string to bytes."""
+        return base64.b64decode(value)
+
+    def _prepare_data(self, data: Any) -> Any:
+        """Prepare data for encoding."""
+        if is_dataclass(data) and not isinstance(data, type):
+            data = asdict(data)
+        elif hasattr(data, "__dict__"):
+            data = data.__dict__
+        return data
+
+    def _serialize_value(self, value: Any) -> Any:
+        """Serialize a single value using registered encoders."""
+        if value is None:
+            return None
+
+        value_type = type(value)
+
+        if value_type in self.config.custom_encoders:
+            encoder = self.config.custom_encoders[value_type]
+            return encoder(value)
+
+        if isinstance(value, dict):
+            return {k: self._serialize_value(v) for k, v in value.items()}
+        elif isinstance(value, (list, tuple)):
+            return [self._serialize_value(item) for item in value]
+        elif isinstance(value, (int, float, bool, str)):
+            return value
+        else:
+            return str(value)
 
     def encode(
         self,
         data: Any,
-        format: EncodingFormat,
-    ) -> str:
-        """Encode data.
+        format: Optional[EncodingFormat] = None,
+    ) -> Union[str, bytes]:
+        """
+        Encode data to specified format.
 
         Args:
             data: Data to encode
-            format: Target encoding format
+            format: Encoding format (uses config default if None)
 
         Returns:
-            Encoded string
+            Encoded data as string or bytes
         """
-        if format in self._encoders:
-            return self._encoders[format](data)
+        fmt = format or self.config.format
+        prepared = self._prepare_data(data)
+        serialized = self._serialize_value(prepared)
 
-        if format == EncodingFormat.JSON_POINTER:
-            return self._encode_json_pointer(data)
+        if fmt == EncodingFormat.JSON:
+            return self._encode_json(serialized)
+        elif fmt == EncodingFormat.MSGPACK:
+            return self._encode_msgpack(serialized)
+        elif fmt == EncodingFormat.CBOR:
+            return self._encode_cbor(serialized)
+        elif fmt == EncodingFormat.UBJSON:
+            return self._encode_ubjson(serialized)
+        else:
+            raise ValueError(f"Unsupported format: {fmt}")
 
-        if format == EncodingFormat.CSV:
-            return self._encode_csv(data)
+    def _encode_json(self, data: Any) -> str:
+        """Encode data to JSON string."""
+        kwargs = {
+            "ensure_ascii": self.config.ensure_ascii,
+            "indent": self.config.indent,
+            "default": str,
+        }
+        return json.dumps(data, **kwargs)
 
-        raise ValueError(f"No encoder for format: {format}")
+    def _encode_msgpack(self, data: Any) -> bytes:
+        """Encode data to MessagePack."""
+        try:
+            import msgpack
+            return msgpack.packb(data, use_bin_type=True)
+        except ImportError:
+            logger.warning("msgpack not available, falling back to JSON")
+            return json.dumps(data).encode("utf-8")
+
+    def _encode_cbor(self, data: Any) -> bytes:
+        """Encode data to CBOR."""
+        try:
+            import cbor2
+            return cbor2.dumps(data)
+        except ImportError:
+            logger.warning("cbor2 not available, falling back to JSON")
+            return json.dumps(data).encode("utf-8")
+
+    def _encode_ubjson(self, data: Any) -> bytes:
+        """Encode data to UBJSON."""
+        try:
+            import ubjson
+            return ubjson.dumpb(data)
+        except ImportError:
+            logger.warning("ubjson not available, falling back to JSON")
+            return json.dumps(data).encode("utf-8")
 
     def decode(
         self,
-        data: str,
-        format: EncodingFormat,
+        data: Union[str, bytes],
+        format: Optional[EncodingFormat] = None,
+        target_type: Optional[Type[T]] = None,
     ) -> Any:
-        """Decode data.
+        """
+        Decode data from specified format.
 
         Args:
             data: Encoded data
-            format: Source encoding format
+            format: Encoding format (uses config default if None)
+            target_type: Optional target type to deserialize to
 
         Returns:
             Decoded data
         """
-        if format in self._decoders:
-            return self._decoders[format](data)
+        fmt = format or self.config.format
 
-        if format == EncodingFormat.JSON_POINTER:
-            return self._decode_json_pointer(data)
+        if fmt == EncodingFormat.JSON:
+            decoded = self._decode_json(data)
+        elif fmt == EncodingFormat.MSGPACK:
+            decoded = self._decode_msgpack(data)
+        elif fmt == EncodingFormat.CBOR:
+            decoded = self._decode_cbor(data)
+        elif fmt == EncodingFormat.UBJSON:
+            decoded = self._decode_ubjson(data)
+        else:
+            raise ValueError(f"Unsupported format: {fmt}")
 
-        if format == EncodingFormat.CSV:
-            return self._decode_csv(data)
+        return self._deserialize_value(decoded)
 
-        raise ValueError(f"No decoder for format: {format}")
-
-    def _encode_base64(self, data: Any) -> str:
-        """Encode to Base64."""
-        if isinstance(data, dict):
-            data = json.dumps(data)
-        if isinstance(data, str):
-            data = data.encode("utf-8")
-        return base64.b64encode(data).decode("ascii")
-
-    def _decode_base64(self, data: str) -> Any:
-        """Decode from Base64."""
-        decoded = base64.b64decode(data.encode("ascii"))
-        try:
-            return json.loads(decoded.decode("utf-8"))
-        except:
-            return decoded.decode("utf-8")
-
-    def _encode_url(self, data: Any) -> str:
-        """URL encode."""
-        if isinstance(data, dict):
-            return urllib.parse.urlencode(data)
-        return urllib.parse.quote(str(data))
-
-    def _decode_url(self, data: str) -> Dict[str, str]:
-        """URL decode."""
-        return dict(urllib.parse.parse_qsl(data))
-
-    def _encode_hex(self, data: Any) -> str:
-        """Encode to hex."""
-        if isinstance(data, str):
-            data = data.encode("utf-8")
-        elif isinstance(data, int):
-            return hex(data)
-        return data.hex()
-
-    def _decode_hex(self, data: str) -> bytes:
-        """Decode from hex."""
-        return bytes.fromhex(data)
-
-    def _encode_json_pointer(self, data: Any) -> str:
-        """Encode as JSON pointer."""
-        return json.dumps(data)
-
-    def _decode_json_pointer(self, data: str) -> Any:
-        """Decode JSON pointer."""
+    def _decode_json(self, data: Union[str, bytes]) -> Any:
+        """Decode JSON string to data."""
+        if isinstance(data, bytes):
+            data = data.decode("utf-8")
         return json.loads(data)
 
-    def _encode_csv(self, data: Any) -> str:
-        """Encode as CSV."""
-        if isinstance(data, list):
-            return ",".join(str(v) for v in data)
-        elif isinstance(data, dict):
-            return ",".join(str(v) for v in data.values())
-        return str(data)
+    def _decode_msgpack(self, data: bytes) -> Any:
+        """Decode MessagePack to data."""
+        try:
+            import msgpack
+            return msgpack.unpackb(data, raw=False)
+        except ImportError:
+            logger.warning("msgpack not available")
+            return json.loads(data.decode("utf-8"))
 
-    def _decode_csv(self, data: str) -> List[str]:
-        """Decode CSV."""
-        return data.split(",")
+    def _decode_cbor(self, data: bytes) -> Any:
+        """Decode CBOR to data."""
+        try:
+            import cbor2
+            return cbor2.loads(data)
+        except ImportError:
+            logger.warning("cbor2 not available")
+            return json.loads(data.decode("utf-8"))
 
-    def create_pointer(self, path: str, data: Any) -> str:
-        """Create JSON pointer reference.
+    def _decode_ubjson(self, data: bytes) -> Any:
+        """Decode UBJSON to data."""
+        try:
+            import ubjson
+            return ubjson.loadb(data)
+        except ImportError:
+            logger.warning("ubjson not available")
+            return json.loads(data.decode("utf-8"))
+
+    def _deserialize_value(self, value: Any) -> Any:
+        """Deserialize a single value."""
+        if value is None:
+            return None
+
+        if isinstance(value, dict):
+            return {k: self._deserialize_value(v) for k, v in value.items()}
+        elif isinstance(value, list):
+            return [self._deserialize_value(item) for item in value]
+        elif isinstance(value, str):
+            return self._maybe_decode_special(value)
+        else:
+            return value
+
+    def _maybe_decode_special(self, value: str) -> Any:
+        """Try to decode special string formats."""
+        if self.config.use_base64:
+            try:
+                if len(value) % 4 == 0:
+                    return self._decode_bytes(value)
+            except Exception:
+                pass
+
+        return value
+
+    def encode_to_base64(
+        self,
+        data: Any,
+        format: Optional[EncodingFormat] = None,
+    ) -> str:
+        """
+        Encode data to base64 string.
 
         Args:
-            path: JSON pointer path
             data: Data to encode
+            format: Encoding format
 
         Returns:
-            JSON string with $ref
+            Base64 encoded string
         """
-        return json.dumps({
-            "$ref": path,
-            "value": data,
-        })
+        encoded = self.encode(data, format)
+        if isinstance(encoded, str):
+            encoded = encoded.encode("utf-8")
+        return base64.b64encode(encoded).decode("ascii")
 
-    def parse_pointer(self, json_str: str) -> Tuple[str, Any]:
-        """Parse JSON pointer reference.
+    def decode_from_base64(
+        self,
+        data: str,
+        format: Optional[EncodingFormat] = None,
+    ) -> Any:
+        """
+        Decode data from base64 string.
 
         Args:
-            json_str: JSON string with $ref
+            data: Base64 encoded string
+            format: Encoding format
 
         Returns:
-            Tuple of (path, value)
+            Decoded data
         """
-        obj = json.loads(json_str)
-        return obj.get("$ref", ""), obj.get("value")
+        decoded = base64.b64decode(data)
+        return self.decode(decoded, format)
 
-    def extract_pointer(self, data: Any, pointer: str) -> Any:
-        """Extract value using JSON pointer.
+    def register_encoder(
+        self,
+        type_: type,
+        encoder: Callable[[Any], Any],
+    ) -> None:
+        """
+        Register a custom encoder for a type.
 
         Args:
-            data: JSON data
-            pointer: JSON pointer (e.g., "/foo/bar")
+            type_: Type to encode
+            encoder: Encoder function
+        """
+        self.config.custom_encoders[type_] = encoder
+
+    def register_decoder(
+        self,
+        type_: type,
+        decoder: Callable[[Any], Any],
+    ) -> None:
+        """
+        Register a custom decoder for a type.
+
+        Args:
+            type_: Type to decode
+            decoder: Decoder function
+        """
+        self._custom_decoders[type_] = decoder
+
+    def encode_batch(
+        self,
+        data_list: List[Any],
+        format: Optional[EncodingFormat] = None,
+    ) -> List[Union[str, bytes]]:
+        """
+        Encode a batch of data items.
+
+        Args:
+            data_list: List of data items
+            format: Encoding format
 
         Returns:
-            Extracted value
+            List of encoded items
         """
-        if not pointer.startswith("/"):
-            return data
+        return [self.encode(item, format) for item in data_list]
 
-        parts = pointer.split("/")
-        parts = [p.replace("~1", "/").replace("~0", "~") for p in parts[1:]]
+    def decode_batch(
+        self,
+        data_list: List[Union[str, bytes]],
+        format: Optional[EncodingFormat] = None,
+    ) -> List[Any]:
+        """
+        Decode a batch of encoded items.
 
-        current = data
-        for part in parts:
-            if isinstance(current, dict):
-                current = current.get(part)
-            elif isinstance(current, list):
-                try:
-                    current = current[int(part)]
-                except (ValueError, IndexError):
-                    return None
-            else:
-                return None
+        Args:
+            data_list: List of encoded items
+            format: Encoding format
 
-        return current
+        Returns:
+            List of decoded items
+        """
+        return [self.decode(item, format) for item in data_list]

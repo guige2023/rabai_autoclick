@@ -1,273 +1,174 @@
-"""Data hashing action module for RabAI AutoClick.
+"""Data Hashing and Fingerprinting.
 
-Provides data hashing operations:
-- HashGeneratorAction: Generate various hashes of data
-- HashVerifierAction: Verify data integrity using hashes
-- HMACGeneratorAction: Generate HMAC codes
-- ChecksumCalculatorAction: Calculate checksums
+This module provides data hashing capabilities:
+- Multiple hash algorithms (MD5, SHA-256, xxHash)
+- Record fingerprinting
+- Content deduplication
+- Secure comparisons
+
+Example:
+    >>> from actions.data_hash_action import DataHasher
+    >>> hasher = DataHasher()
+    >>> hash_val = hasher.hash_record(record)
 """
 
-import sys
-import os
-import hashlib
-import hmac
-import logging
-from typing import Any, Dict, List, Optional
-from dataclasses import dataclass
+from __future__ import annotations
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+import hashlib
+import logging
+import threading
+from typing import Any, Optional
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
 
-class HashGenerator:
-    """Generate various cryptographic hashes."""
+class DataHasher:
+    """Hashes data for deduplication and fingerprinting."""
 
-    ALGORITHMS = ["md5", "sha1", "sha256", "sha384", "sha512", "sha3_256", "sha3_512", "blake2b", "blake2s"]
+    SUPPORTED_ALGORITHMS = ["md5", "sha1", "sha256", "sha512", "xxhash64"]
 
-    @staticmethod
-    def hash(data: bytes, algorithm: str) -> str:
-        if algorithm == "md5":
+    def __init__(
+        self,
+        algorithm: str = "sha256",
+        ignore_fields: Optional[list[str]] = None,
+    ) -> None:
+        """Initialize the data hasher.
+
+        Args:
+            algorithm: Hash algorithm name.
+            ignore_fields: Fields to exclude from hashing.
+        """
+        if algorithm not in self.SUPPORTED_ALGORITHMS:
+            raise ValueError(f"Unsupported algorithm: {algorithm}")
+
+        self._algorithm = algorithm
+        self._ignore_fields = set(ignore_fields or [])
+        self._lock = threading.Lock()
+        self._stats = {"records_hashed": 0, "hash_collisions": 0}
+
+    def hash_bytes(self, data: bytes) -> str:
+        """Hash bytes data.
+
+        Args:
+            data: Bytes to hash.
+
+        Returns:
+            Hex digest string.
+        """
+        if self._algorithm == "md5":
             return hashlib.md5(data).hexdigest()
-        elif algorithm == "sha1":
+        elif self._algorithm == "sha1":
             return hashlib.sha1(data).hexdigest()
-        elif algorithm == "sha256":
+        elif self._algorithm == "sha256":
             return hashlib.sha256(data).hexdigest()
-        elif algorithm == "sha384":
-            return hashlib.sha384(data).hexdigest()
-        elif algorithm == "sha512":
+        elif self._algorithm == "sha512":
             return hashlib.sha512(data).hexdigest()
-        elif algorithm == "sha3_256":
-            return hashlib.sha3_256(data).hexdigest()
-        elif algorithm == "sha3_512":
-            return hashlib.sha3_512(data).hexdigest()
-        elif algorithm == "blake2b":
-            return hashlib.blake2b(data).hexdigest()
-        elif algorithm == "blake2s":
-            return hashlib.blake2s(data).hexdigest()
-        else:
-            raise ValueError(f"Unsupported algorithm: {algorithm}")
-
-    @staticmethod
-    def hash_file(file_path: str, algorithm: str, chunk_size: int = 8192) -> str:
-        hasher = hashlib.new(algorithm)
-        with open(file_path, "rb") as f:
-            while chunk := f.read(chunk_size):
-                hasher.update(chunk)
-        return hasher.hexdigest()
-
-    @staticmethod
-    def list_algorithms() -> List[str]:
-        return HashGenerator.ALGORITHMS.copy()
-
-
-class HashVerifier:
-    """Verify data integrity using hashes."""
-
-    @staticmethod
-    def verify(data: bytes, expected_hash: str, algorithm: str) -> bool:
-        actual = HashGenerator.hash(data, algorithm)
-        return hmac.compare_digest(actual.lower(), expected_hash.lower())
-
-    @staticmethod
-    def verify_file(file_path: str, expected_hash: str, algorithm: str) -> bool:
-        actual = HashGenerator.hash_file(file_path, algorithm)
-        return hmac.compare_digest(actual.lower(), expected_hash.lower())
-
-
-class HMACGenerator:
-    """Generate HMAC codes."""
-
-    ALGORITHMS = ["sha256", "sha512", "sha3_256", "blake2b"]
-
-    @staticmethod
-    def generate(data: bytes, key: bytes, algorithm: str = "sha256") -> str:
-        if algorithm not in HMACGenerator.ALGORITHMS:
-            raise ValueError(f"Unsupported algorithm: {algorithm}")
-        h = hmac.new(key, data, digestmod=algorithm)
-        return h.hexdigest()
-
-    @staticmethod
-    def verify(data: bytes, key: bytes, expected_hmac: str, algorithm: str = "sha256") -> bool:
-        actual = HMACGenerator.generate(data, key, algorithm)
-        return hmac.compare_digest(actual.lower(), expected_hmac.lower())
-
-
-class ChecksumCalculator:
-    """Calculate various checksums."""
-
-    @staticmethod
-    def crc32(data: bytes) -> str:
-        import zlib
-        return format(zlib.crc32(data) & 0xFFFFFFFF, "08x")
-
-    @staticmethod
-    def adler32(data: bytes) -> str:
-        import zlib
-        return format(zlib.adler32(data) & 0xFFFFFFFF, "08x")
-
-
-class HashGeneratorAction(BaseAction):
-    """Generate various hashes of data."""
-    action_type = "data_hash_generator"
-    display_name = "哈希生成器"
-    description = "生成数据的各种哈希值"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        data = params.get("data", "")
-        algorithm = params.get("algorithm", "sha256")
-        file_path = params.get("file_path", "")
-
-        if file_path:
+        elif self._algorithm == "xxhash64":
             try:
-                hash_value = HashGenerator.hash_file(file_path, algorithm)
-                return ActionResult(
-                    success=True,
-                    message=f"文件哈希已生成: {algorithm}",
-                    data={"algorithm": algorithm, "hash": hash_value, "source": "file"}
-                )
-            except Exception as e:
-                return ActionResult(success=False, message=f"哈希生成失败: {e}")
+                import xxhash
+                return xxhash.xxh64(data).hexdigest()
+            except ImportError:
+                return hashlib.sha256(data).hexdigest()
+        return hashlib.sha256(data).hexdigest()
 
-        if isinstance(data, str):
-            data = data.encode("utf-8")
-        elif not isinstance(data, bytes):
-            return ActionResult(success=False, message="data必须是字符串或字节")
+    def hash_string(self, s: str) -> str:
+        """Hash a string.
 
-        try:
-            hash_value = HashGenerator.hash(data, algorithm)
-            return ActionResult(
-                success=True,
-                message=f"哈希已生成: {algorithm}",
-                data={"algorithm": algorithm, "hash": hash_value, "length": len(data)}
-            )
-        except ValueError as e:
-            return ActionResult(success=False, message=str(e))
+        Args:
+            s: String to hash.
 
+        Returns:
+            Hex digest string.
+        """
+        return self.hash_bytes(s.encode("utf-8"))
 
-class HashVerifierAction(BaseAction):
-    """Verify data integrity using hashes."""
-    action_type = "data_hash_verifier"
-    display_name = "哈希验证器"
-    description = "使用哈希验证数据完整性"
+    def hash_record(self, record: dict[str, Any]) -> str:
+        """Hash a record dict.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        data = params.get("data", "")
-        expected_hash = params.get("expected_hash", "")
-        algorithm = params.get("algorithm", "sha256")
-        file_path = params.get("file_path", "")
+        Args:
+            record: Record to hash.
 
-        if not expected_hash:
-            return ActionResult(success=False, message="expected_hash是必需的")
+        Returns:
+            Hex digest string.
+        """
+        filtered = {k: v for k, v in record.items() if k not in self._ignore_fields}
+        normalized = self._normalize(filtered)
+        data = str(normalized).encode("utf-8")
 
-        if file_path:
-            try:
-                valid = HashVerifier.verify_file(file_path, expected_hash, algorithm)
-                return ActionResult(
-                    success=valid,
-                    message=f"文件哈希验证{'通过' if valid else '失败'}",
-                    data={"valid": valid, "expected": expected_hash, "algorithm": algorithm}
-                )
-            except Exception as e:
-                return ActionResult(success=False, message=f"验证失败: {e}")
+        with self._lock:
+            self._stats["records_hashed"] += 1
 
-        if isinstance(data, str):
-            data = data.encode("utf-8")
-        elif not isinstance(data, bytes):
-            return ActionResult(success=False, message="data必须是字符串或字节")
+        return self.hash_bytes(data)
 
-        try:
-            valid = HashVerifier.verify(data, expected_hash, algorithm)
-            return ActionResult(
-                success=True,
-                message=f"哈希验证{'通过' if valid else '失败'}",
-                data={"valid": valid, "expected": expected_hash, "algorithm": algorithm}
-            )
-        except ValueError as e:
-            return ActionResult(success=False, message=str(e))
+    def hash_record_fingerprint(self, record: dict[str, Any]) -> str:
+        """Create a stable fingerprint for a record.
 
+        Args:
+            record: Record to fingerprint.
 
-class HMACGeneratorAction(BaseAction):
-    """Generate HMAC codes."""
-    action_type = "data_hmac_generator"
-    display_name = "HMAC生成器"
-    description = "生成HMAC认证码"
+        Returns:
+            Fingerprint string (16 chars).
+        """
+        full_hash = self.hash_record(record)
+        return full_hash[:16]
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        data = params.get("data", "")
-        key = params.get("key", "")
-        algorithm = params.get("algorithm", "sha256")
-        operation = params.get("operation", "generate")
+    def _normalize(self, obj: Any) -> Any:
+        """Normalize an object for consistent hashing."""
+        if isinstance(obj, dict):
+            return tuple(sorted((k, self._normalize(v)) for k, v in obj.items()))
+        elif isinstance(obj, (list, tuple)):
+            return tuple(self._normalize(v) for v in obj)
+        elif isinstance(obj, set):
+            return tuple(sorted(self._normalize(v) for v in obj))
+        elif isinstance(obj, float):
+            return round(obj, 10)
+        return obj
 
-        if not key:
-            return ActionResult(success=False, message="key是必需的")
+    def verify_record(self, record: dict[str, Any], expected_hash: str) -> bool:
+        """Verify a record matches an expected hash.
 
-        if isinstance(data, str):
-            data = data.encode("utf-8")
-        if isinstance(key, str):
-            key = key.encode("utf-8")
+        Args:
+            record: Record to verify.
+            expected_hash: Expected hash value.
 
-        if operation == "generate":
-            if isinstance(data, str):
-                data = data.encode("utf-8")
+        Returns:
+            True if hash matches.
+        """
+        actual = self.hash_record(record)
+        return actual == expected_hash
 
-            try:
-                hmac_value = HMACGenerator.generate(data, key, algorithm)
-                return ActionResult(
-                    success=True,
-                    message="HMAC已生成",
-                    data={"hmac": hmac_value, "algorithm": algorithm}
-                )
-            except ValueError as e:
-                return ActionResult(success=False, message=str(e))
+    def compute_similarities(
+        self,
+        records: list[dict[str, Any]],
+    ) -> list[tuple[int, int, float]]:
+        """Compute pairwise similarity between records using hash distance.
 
-        if operation == "verify":
-            expected_hmac = params.get("expected_hmac", "")
-            if not expected_hmac:
-                return ActionResult(success=False, message="expected_hmac是必需的")
+        Args:
+            records: List of records.
 
-            if isinstance(data, str):
-                data = data.encode("utf-8")
+        Returns:
+            List of (i, j, similarity) tuples.
+        """
+        hashes = [(i, self.hash_record(r)) for i, r in enumerate(records)]
+        similarities = []
 
-            try:
-                valid = HMACGenerator.verify(data, key, expected_hmac, algorithm)
-                return ActionResult(
-                    success=True,
-                    message=f"HMAC验证{'通过' if valid else '失败'}",
-                    data={"valid": valid, "algorithm": algorithm}
-                )
-            except ValueError as e:
-                return ActionResult(success=False, message=str(e))
+        for i, (idx_i, hash_i) in enumerate(hashes):
+            for j, (idx_j, hash_j) in enumerate(hashes[i + 1:], start=i + 1):
+                sim = self._hash_similarity(hash_i, hash_j)
+                similarities.append((idx_i, idx_j, sim))
 
-        return ActionResult(success=False, message=f"未知操作: {operation}")
+        return similarities
 
+    def _hash_similarity(self, hash1: str, hash2: str) -> float:
+        """Compute similarity between two hashes (0-1)."""
+        if hash1 == hash2:
+            return 1.0
 
-class ChecksumCalculatorAction(BaseAction):
-    """Calculate checksums."""
-    action_type = "data_checksum_calculator"
-    display_name = "校验和计算器"
-    description = "计算数据校验和"
+        matching = sum(1 for a, b in zip(hash1, hash2) if a == b)
+        return matching / max(len(hash1), len(hash2))
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        data = params.get("data", "")
-        checksum_type = params.get("type", "crc32")
-
-        if isinstance(data, str):
-            data = data.encode("utf-8")
-        elif not isinstance(data, bytes):
-            return ActionResult(success=False, message="data必须是字符串或字节")
-
-        if checksum_type == "crc32":
-            checksum = ChecksumCalculator.crc32(data)
-        elif checksum_type == "adler32":
-            checksum = ChecksumCalculator.adler32(data)
-        else:
-            return ActionResult(success=False, message=f"未知类型: {checksum_type}")
-
-        return ActionResult(
-            success=True,
-            message=f"{checksum_type.upper()} 校验和已计算",
-            data={"type": checksum_type, "checksum": checksum, "length": len(data)}
-        )
+    def get_stats(self) -> dict[str, int]:
+        """Get hashing statistics."""
+        with self._lock:
+            return dict(self._stats)

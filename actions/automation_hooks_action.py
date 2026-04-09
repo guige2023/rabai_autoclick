@@ -1,124 +1,297 @@
-# Copyright (c) 2024. coded by claude
-"""Automation Hooks Action Module.
+"""Automation Hooks and Lifecycle.
 
-Provides hook-based extensibility for automation workflows
-with support for pre/post hooks, error hooks, and custom hook points.
+This module provides automation lifecycle hooks:
+- Pre/post execution hooks
+- Hook ordering and priority
+- Conditional hook execution
+- Hook error handling
+
+Example:
+    >>> from actions.automation_hooks_action import HookManager
+    >>> hooks = HookManager()
+    >>> hooks.register("pre_execute", my_pre_hook, priority=10)
 """
-from typing import Optional, Dict, Any, List, Callable
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
+
+from __future__ import annotations
+
+import time
 import logging
+import threading
+from typing import Any, Callable, Optional
+from dataclasses import dataclass, field
+from enum import IntEnum
 
 logger = logging.getLogger(__name__)
 
 
-class HookPoint(Enum):
-    BEFORE_START = "before_start"
-    AFTER_END = "after_end"
-    BEFORE_ACTION = "before_action"
-    AFTER_ACTION = "after_action"
-    ON_ERROR = "on_error"
-    ON_TIMEOUT = "on_timeout"
-    ON_SUCCESS = "on_success"
-    BEFORE_RETRY = "before_retry"
+class HookPhase(IntEnum):
+    """Lifecycle phases for hooks."""
+    PRE_SETUP = 1
+    POST_SETUP = 2
+    PRE_EXECUTE = 3
+    POST_EXECUTE = 4
+    PRE_CLEANUP = 5
+    POST_CLEANUP = 6
+    ON_ERROR = 7
+    ON_SUCCESS = 8
+    ON_COMPLETE = 9
+
+
+@dataclass
+class Hook:
+    """A lifecycle hook."""
+    name: str
+    phase: HookPhase
+    func: Callable[..., Any]
+    priority: int = 100
+    enabled: bool = True
+    conditional: Optional[Callable[[dict], bool]] = None
+    description: str = ""
+    call_count: int = 0
 
 
 @dataclass
 class HookContext:
-    workflow_id: str
-    step_id: Optional[str]
-    timestamp: datetime
-    data: Dict[str, Any] = field(default_factory=dict)
-    error: Optional[Exception] = None
-
-
-@dataclass
-class HookResult:
-    success: bool
-    modified_data: Optional[Dict[str, Any]] = None
+    """Context passed to hook functions."""
+    phase: HookPhase
+    timestamp: float
+    task_name: str
+    task_id: str
+    args: tuple = field(default_factory=tuple)
+    kwargs: dict[str, Any] = field(default_factory=dict)
+    result: Any = None
     error: Optional[str] = None
 
 
-class AutomationHooks:
-    def __init__(self):
-        self._hooks: Dict[HookPoint, List[Callable]] = {
-            point: [] for point in HookPoint
-        }
-        self._global_hooks: List[Callable] = []
+class HookManager:
+    """Manages automation lifecycle hooks."""
 
-    def register_hook(self, point: HookPoint, hook: Callable) -> None:
-        self._hooks[point].append(hook)
+    def __init__(self) -> None:
+        """Initialize the hook manager."""
+        self._hooks: dict[HookPhase, list[Hook]] = {phase: [] for phase in HookPhase}
+        self._lock = threading.RLock()
+        self._stats = {"hooks_called": 0, "hooks_failed": 0}
 
-    def register_global_hook(self, hook: Callable) -> None:
-        self._global_hooks.append(hook)
+    def register(
+        self,
+        phase: HookPhase,
+        func: Callable[[HookContext], Any],
+        name: str = "",
+        priority: int = 100,
+        conditional: Optional[Callable[[dict], bool]] = None,
+        description: str = "",
+    ) -> Hook:
+        """Register a hook.
 
-    async def execute_pre_start(self, workflow_id: str, context_data: Dict[str, Any]) -> HookResult:
-        return await self._execute_hooks(HookPoint.BEFORE_START, workflow_id, None, context_data)
+        Args:
+            phase: Lifecycle phase.
+            func: Hook function.
+            name: Hook name.
+            priority: Execution priority (lower = earlier).
+            conditional: Optional condition function.
+            description: Hook description.
 
-    async def execute_post_end(self, workflow_id: str, context_data: Dict[str, Any]) -> HookResult:
-        return await self._execute_hooks(HookPoint.AFTER_END, workflow_id, None, context_data)
-
-    async def execute_pre_action(self, workflow_id: str, step_id: str, context_data: Dict[str, Any]) -> HookResult:
-        return await self._execute_hooks(HookPoint.BEFORE_ACTION, workflow_id, step_id, context_data)
-
-    async def execute_post_action(self, workflow_id: str, step_id: str, context_data: Dict[str, Any]) -> HookResult:
-        return await self._execute_hooks(HookPoint.AFTER_ACTION, workflow_id, step_id, context_data)
-
-    async def execute_error(self, workflow_id: str, step_id: Optional[str], context_data: Dict[str, Any], error: Exception) -> HookResult:
-        ctx = HookContext(
-            workflow_id=workflow_id,
-            step_id=step_id,
-            timestamp=datetime.now(),
-            data=context_data,
-            error=error,
+        Returns:
+            Created Hook.
+        """
+        hook_name = name or func.__name__
+        hook = Hook(
+            name=hook_name,
+            phase=phase,
+            func=func,
+            priority=priority,
+            conditional=conditional,
+            description=description,
         )
-        all_hooks = self._hooks[HookPoint.ON_ERROR] + self._global_hooks
-        return await self._run_hooks(all_hooks, ctx)
 
-    async def execute_timeout(self, workflow_id: str, step_id: Optional[str], context_data: Dict[str, Any]) -> HookResult:
-        return await self._execute_hooks(HookPoint.ON_TIMEOUT, workflow_id, step_id, context_data)
+        with self._lock:
+            self._hooks[phase].append(hook)
+            self._hooks[phase].sort(key=lambda h: h.priority)
 
-    async def execute_success(self, workflow_id: str, context_data: Dict[str, Any]) -> HookResult:
-        return await self._execute_hooks(HookPoint.ON_SUCCESS, workflow_id, None, context_data)
+        logger.info("Registered hook: %s (phase=%s, priority=%d)", hook_name, phase.name, priority)
+        return hook
 
-    async def execute_before_retry(self, workflow_id: str, step_id: str, context_data: Dict[str, Any]) -> HookResult:
-        return await self._execute_hooks(HookPoint.BEFORE_RETRY, workflow_id, step_id, context_data)
+    def unregister(self, name: str, phase: Optional[HookPhase] = None) -> bool:
+        """Unregister a hook.
 
-    async def _execute_hooks(self, point: HookPoint, workflow_id: str, step_id: Optional[str], context_data: Dict[str, Any]) -> HookResult:
-        ctx = HookContext(
-            workflow_id=workflow_id,
-            step_id=step_id,
-            timestamp=datetime.now(),
-            data=context_data,
-        )
-        all_hooks = self._hooks[point] + self._global_hooks
-        return await self._run_hooks(all_hooks, ctx)
+        Args:
+            name: Hook name.
+            phase: Specific phase. None = all phases.
 
-    async def _run_hooks(self, hooks: List[Callable], ctx: HookContext) -> HookResult:
-        modified_data = dict(ctx.data)
+        Returns:
+            True if unregistered.
+        """
+        with self._lock:
+            if phase:
+                hooks = [h for h in self._hooks[phase] if h.name != name]
+                self._hooks[phase] = hooks
+                return len(hooks) < len(hooks) + 1
+            else:
+                found = False
+                for p in HookPhase:
+                    before = len(self._hooks[p])
+                    self._hooks[p] = [h for h in self._hooks[p] if h.name != name]
+                    if len(self._hooks[p]) < before:
+                        found = True
+                return found
+
+    def execute_phase(
+        self,
+        phase: HookPhase,
+        context: HookContext,
+    ) -> list[Any]:
+        """Execute all hooks for a phase.
+
+        Args:
+            phase: Lifecycle phase.
+            context: Hook context.
+
+        Returns:
+            List of hook results.
+        """
+        with self._lock:
+            hooks = [h for h in self._hooks[phase] if h.enabled]
+
+        results = []
+
         for hook in hooks:
+            if hook.conditional:
+                try:
+                    if not hook.conditional(context.__dict__):
+                        continue
+                except Exception as e:
+                    logger.error("Hook conditional failed for %s: %s", hook.name, e)
+                    continue
+
             try:
-                result = hook(ctx)
-                if hasattr(result, "__await__"):
-                    result = await result
-                if result and isinstance(result, dict):
-                    modified_data.update(result)
+                result = hook.func(context)
+                hook.call_count += 1
+                self._stats["hooks_called"] += 1
+                results.append(result)
             except Exception as e:
-                logger.error(f"Hook execution failed: {e}")
-                return HookResult(success=False, modified_data=None, error=str(e))
-        return HookResult(success=True, modified_data=modified_data)
+                logger.error("Hook %s failed: %s", hook.name, e)
+                self._stats["hooks_failed"] += 1
 
-    def unregister_hook(self, point: HookPoint, hook: Callable) -> bool:
-        if hook in self._hooks[point]:
-            self._hooks[point].remove(hook)
-            return True
-        return False
+        return results
 
-    def clear_hooks(self, point: Optional[HookPoint] = None) -> None:
-        if point:
-            self._hooks[point].clear()
-        else:
-            for p in HookPoint:
-                self._hooks[p].clear()
-            self._global_hooks.clear()
+    def execute_pre_setup(
+        self,
+        task_name: str,
+        task_id: str,
+        **kwargs,
+    ) -> list[Any]:
+        """Execute pre-setup hooks."""
+        ctx = HookContext(
+            phase=HookPhase.PRE_SETUP,
+            timestamp=time.time(),
+            task_name=task_name,
+            task_id=task_id,
+            kwargs=kwargs,
+        )
+        return self.execute_phase(HookPhase.PRE_SETUP, ctx)
+
+    def execute_post_setup(
+        self,
+        task_name: str,
+        task_id: str,
+        result: Any = None,
+        **kwargs,
+    ) -> list[Any]:
+        """Execute post-setup hooks."""
+        ctx = HookContext(
+            phase=HookPhase.POST_SETUP,
+            timestamp=time.time(),
+            task_name=task_name,
+            task_id=task_id,
+            result=result,
+            kwargs=kwargs,
+        )
+        return self.execute_phase(HookPhase.POST_SETUP, ctx)
+
+    def execute_pre_execute(
+        self,
+        task_name: str,
+        task_id: str,
+        **kwargs,
+    ) -> list[Any]:
+        """Execute pre-execute hooks."""
+        ctx = HookContext(
+            phase=HookPhase.PRE_EXECUTE,
+            timestamp=time.time(),
+            task_name=task_name,
+            task_id=task_id,
+            kwargs=kwargs,
+        )
+        return self.execute_phase(HookPhase.PRE_EXECUTE, ctx)
+
+    def execute_post_execute(
+        self,
+        task_name: str,
+        task_id: str,
+        result: Any = None,
+        **kwargs,
+    ) -> list[Any]:
+        """Execute post-execute hooks."""
+        ctx = HookContext(
+            phase=HookPhase.POST_EXECUTE,
+            timestamp=time.time(),
+            task_name=task_name,
+            task_id=task_id,
+            result=result,
+            kwargs=kwargs,
+        )
+        return self.execute_phase(HookPhase.POST_EXECUTE, ctx)
+
+    def execute_on_error(
+        self,
+        task_name: str,
+        task_id: str,
+        error: str,
+        **kwargs,
+    ) -> list[Any]:
+        """Execute error hooks."""
+        ctx = HookContext(
+            phase=HookPhase.ON_ERROR,
+            timestamp=time.time(),
+            task_name=task_name,
+            task_id=task_id,
+            error=error,
+            kwargs=kwargs,
+        )
+        return self.execute_phase(HookPhase.ON_ERROR, ctx)
+
+    def execute_on_success(
+        self,
+        task_name: str,
+        task_id: str,
+        result: Any = None,
+        **kwargs,
+    ) -> list[Any]:
+        """Execute success hooks."""
+        ctx = HookContext(
+            phase=HookPhase.ON_SUCCESS,
+            timestamp=time.time(),
+            task_name=task_name,
+            task_id=task_id,
+            result=result,
+            kwargs=kwargs,
+        )
+        return self.execute_phase(HookPhase.ON_SUCCESS, ctx)
+
+    def list_hooks(self, phase: Optional[HookPhase] = None) -> list[Hook]:
+        """List registered hooks."""
+        with self._lock:
+            if phase:
+                return list(self._hooks[phase])
+            all_hooks = []
+            for hooks in self._hooks.values():
+                all_hooks.extend(hooks)
+            return all_hooks
+
+    def get_stats(self) -> dict[str, int]:
+        """Get hook statistics."""
+        with self._lock:
+            return {
+                **self._stats,
+                "total_hooks": sum(len(h) for h in self._hooks.values()),
+            }
