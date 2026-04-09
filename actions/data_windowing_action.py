@@ -1,89 +1,293 @@
-"""Data Windowing Action.
+"""Data windowing and time-series aggregation action."""
 
-Windows data streams into time or count-based windows.
-"""
-from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar
+from __future__ import annotations
+
+from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import Enum
-import time
+from typing import Any, Callable, Optional, Sequence
 
 
-class WindowType(Enum):
-    TUMBLING = "tumbling"
-    SLIDING = "sliding"
-    SESSION = "session"
+class WindowType(str, Enum):
+    """Type of window."""
+
+    TUMBLING = "tumbling"  # Non-overlapping fixed size
+    HOPPING = "hopping"  # Overlapping fixed size
+    SLIDING = "sliding"  # Sliding with custom behavior
+    SESSION = "session"  # Session-based with gap detection
+
+
+@dataclass
+class WindowConfig:
+    """Configuration for a window."""
+
+    window_type: WindowType
+    size_seconds: float
+    hop_seconds: Optional[float] = None
+    session_gap_seconds: Optional[float] = None
+    min_samples: int = 1
 
 
 @dataclass
 class Window:
+    """A data window."""
+
     window_id: str
-    window_type: WindowType
-    start_time: float
-    end_time: float
-    items: List[Any] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    start_time: datetime
+    end_time: datetime
+    data: list[Any]
+    is_complete: bool = False
+
+
+@dataclass
+class WindowResult:
+    """Result of windowing operation."""
+
+    total_windows: int
+    complete_windows: int
+    incomplete_windows: int
+    windows: list[Window]
 
 
 class DataWindowingAction:
-    """Windows data streams into time or count-based windows."""
+    """Creates windows from streaming or time-series data."""
 
-    def __init__(
+    def __init__(self):
+        """Initialize windowing action."""
+        self._window_id_counter = 0
+
+    def _next_window_id(self) -> str:
+        """Generate next window ID."""
+        self._window_id_counter += 1
+        return f"window_{self._window_id_counter}"
+
+    def create_tumbling_windows(
         self,
-        window_type: WindowType = WindowType.TUMBLING,
-        window_size_sec: float = 60.0,
-        slide_interval_sec: Optional[float] = None,
-    ) -> None:
-        self.window_type = window_type
-        self.window_size_sec = window_size_sec
-        self.slide_interval_sec = slide_interval_sec or window_size_sec
-        self._buffer: List[tuple[float, Any]] = []
-        self._windows: List[Window] = []
+        data: Sequence[dict[str, Any]],
+        timestamp_field: str,
+        window_size_seconds: float,
+    ) -> WindowResult:
+        """Create tumbling (non-overlapping) windows.
 
-    def add(self, item: Any, timestamp: Optional[float] = None) -> List[Window]:
-        ts = timestamp or time.time()
-        self._buffer.append((ts, item))
-        return self._emit_windows()
+        Args:
+            data: Time-ordered records.
+            timestamp_field: Field containing timestamp.
+            window_size_seconds: Size of each window.
 
-    def _emit_windows(self) -> List[Window]:
-        now = time.time()
-        cutoff = now - self.window_size_sec * 3
-        self._buffer = [(ts, item) for ts, item in self._buffer if ts >= cutoff]
-        if self.window_type == WindowType.TUMBLING:
-            return self._emit_tumbling_windows(now)
-        elif self.window_type == WindowType.SLIDING:
-            return self._emit_sliding_windows(now)
-        return []
+        Returns:
+            WindowResult with all windows.
+        """
+        if not data:
+            return WindowResult(0, 0, 0, [])
 
-    def _emit_tumbling_windows(self, now: float) -> List[Window]:
-        windows = []
-        for i in range(3):
-            window_end = now - i * self.slide_interval_sec
-            window_start = window_end - self.window_size_sec
-            window_items = [
-                item for ts, item in self._buffer
-                if window_start <= ts < window_end
-            ]
-            if window_items:
-                w = Window(
-                    window_id=f"w_{int(window_start)}_{int(window_end)}",
-                    window_type=self.window_type,
+        sorted_data = sorted(data, key=lambda x: x.get(timestamp_field, 0))
+
+        windows: list[Window] = []
+        current_window: list[Any] = []
+        window_start: Optional[datetime] = None
+        window_end_time: Optional[datetime] = None
+
+        for record in sorted_data:
+            ts_value = record.get(timestamp_field)
+            if isinstance(ts_value, datetime):
+                record_time = ts_value
+            elif isinstance(ts_value, (int, float)):
+                record_time = datetime.fromtimestamp(ts_value)
+            else:
+                continue
+
+            if window_start is None:
+                window_start = record_time
+                window_end_time = window_start + timedelta(seconds=window_size_seconds)
+
+            if record_time < window_end_time:
+                current_window.append(record)
+            else:
+                if current_window:
+                    windows.append(
+                        Window(
+                            window_id=self._next_window_id(),
+                            start_time=window_start,
+                            end_time=window_end_time,
+                            data=current_window,
+                            is_complete=True,
+                        )
+                    )
+                window_start = record_time
+                window_end_time = window_start + timedelta(seconds=window_size_seconds)
+                current_window = [record]
+
+        if current_window:
+            windows.append(
+                Window(
+                    window_id=self._next_window_id(),
                     start_time=window_start,
-                    end_time=window_end,
-                    items=window_items,
+                    end_time=window_end_time,
+                    data=current_window,
+                    is_complete=True,
                 )
-                windows.append(w)
-                self._windows.append(w)
-        return windows
+            )
 
-    def _emit_sliding_windows(self, now: float) -> List[Window]:
-        return self._emit_tumbling_windows(now)
+        return WindowResult(
+            total_windows=len(windows),
+            complete_windows=len(windows),
+            incomplete_windows=0,
+            windows=windows,
+        )
 
-    def get_active_windows(self) -> List[Window]:
-        now = time.time()
-        return [w for w in self._windows if w.end_time > now - self.window_size_sec]
+    def create_hopping_windows(
+        self,
+        data: Sequence[dict[str, Any]],
+        timestamp_field: str,
+        window_size_seconds: float,
+        hop_seconds: float,
+    ) -> WindowResult:
+        """Create hopping (overlapping) windows.
 
-    def clear_old_windows(self, max_age_sec: float = 3600.0) -> int:
-        cutoff = time.time() - max_age_sec
-        before = len(self._windows)
-        self._windows = [w for w in self._windows if w.start_time >= cutoff]
-        return before - len(self._windows)
+        Args:
+            data: Time-ordered records.
+            timestamp_field: Field containing timestamp.
+            window_size_seconds: Size of each window.
+            hop_seconds: Hop size (advance amount).
+
+        Returns:
+            WindowResult with all windows.
+        """
+        if not data:
+            return WindowResult(0, 0, 0, [])
+
+        sorted_data = sorted(data, key=lambda x: x.get(timestamp_field, 0))
+
+        first_ts = sorted_data[0].get(timestamp_field, 0)
+        if isinstance(first_ts, datetime):
+            start_time = first_ts
+        else:
+            start_time = datetime.fromtimestamp(first_ts)
+
+        last_ts = sorted_data[-1].get(timestamp_field, 0)
+        if isinstance(last_ts, datetime):
+            end_time = last_ts
+        else:
+            end_time = datetime.fromtimestamp(last_ts)
+
+        windows: list[Window] = []
+        current_start = start_time
+
+        while current_start <= end_time:
+            current_end = current_start + timedelta(seconds=window_size_seconds)
+
+            window_data = [
+                r
+                for r in sorted_data
+                if (r.get(timestamp_field) or 0)
+                >= current_start.timestamp()
+                and (r.get(timestamp_field) or 0) < current_end.timestamp()
+            ]
+
+            is_complete = len(window_data) >= 1
+            windows.append(
+                Window(
+                    window_id=self._next_window_id(),
+                    start_time=current_start,
+                    end_time=current_end,
+                    data=window_data,
+                    is_complete=is_complete,
+                )
+            )
+
+            current_start += timedelta(seconds=hop_seconds)
+
+        complete = sum(1 for w in windows if w.is_complete)
+        return WindowResult(
+            total_windows=len(windows),
+            complete_windows=complete,
+            incomplete_windows=len(windows) - complete,
+            windows=windows,
+        )
+
+    def create_session_windows(
+        self,
+        data: Sequence[dict[str, Any]],
+        timestamp_field: str,
+        session_gap_seconds: float,
+        min_session_size: int = 1,
+    ) -> WindowResult:
+        """Create session-based windows.
+
+        Args:
+            data: Time-ordered records.
+            timestamp_field: Field containing timestamp.
+            session_gap_seconds: Gap threshold to split sessions.
+            min_session_size: Minimum records per session.
+
+        Returns:
+            WindowResult with session windows.
+        """
+        if not data:
+            return WindowResult(0, 0, 0, [])
+
+        sorted_data = sorted(data, key=lambda x: x.get(timestamp_field, 0))
+
+        windows: list[Window] = []
+        current_session: list[Any] = []
+        session_start: Optional[datetime] = None
+        last_ts: Optional[datetime] = None
+
+        for record in sorted_data:
+            ts_value = record.get(timestamp_field)
+            if isinstance(ts_value, datetime):
+                record_time = ts_value
+            elif isinstance(ts_value, (int, float)):
+                record_time = datetime.fromtimestamp(ts_value)
+            else:
+                continue
+
+            if last_ts is not None:
+                gap = (record_time - last_ts).total_seconds()
+                if gap >= session_gap_seconds and len(current_session) >= min_session_size:
+                    windows.append(
+                        Window(
+                            window_id=self._next_window_id(),
+                            start_time=session_start,
+                            end_time=last_ts,
+                            data=current_session,
+                            is_complete=True,
+                        )
+                    )
+                    current_session = []
+                    session_start = None
+
+            current_session.append(record)
+            if session_start is None:
+                session_start = record_time
+            last_ts = record_time
+
+        if len(current_session) >= min_session_size:
+            windows.append(
+                Window(
+                    window_id=self._next_window_id(),
+                    start_time=session_start,
+                    end_time=last_ts,
+                    data=current_session,
+                    is_complete=True,
+                )
+            )
+
+        complete = sum(1 for w in windows if w.is_complete)
+        return WindowResult(
+            total_windows=len(windows),
+            complete_windows=complete,
+            incomplete_windows=len(windows) - complete,
+            windows=windows,
+        )
+
+    def aggregate_window(
+        self,
+        window: Window,
+        agg_func: Callable[[list], float],
+        value_field: str,
+    ) -> float:
+        """Aggregate values within a window."""
+        values = [record.get(value_field, 0) for record in window.data]
+        return agg_func(values)
