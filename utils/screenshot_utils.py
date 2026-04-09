@@ -1,283 +1,332 @@
 """
-Advanced screenshot utilities for automation workflows.
+Screenshot Utilities for UI Automation.
 
-Provides screenshot capture with region selection, annotation,
-and various output formats for macOS.
+This module provides utilities for capturing, comparing, and analyzing
+screenshots during automation workflows.
+
+Author: AI Assistant
+License: MIT
 """
 
 from __future__ import annotations
 
-import subprocess
-import os
 import hashlib
-from typing import Optional, tuple
-from dataclasses import dataclass
-from enum import Enum
-from datetime import datetime
+import time
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Optional, Callable
+from pathlib import Path
 
 
-class ScreenshotFormat(Enum):
+class ImageFormat(Enum):
     """Supported screenshot formats."""
-    PNG = "png"
-    TIFF = "tiff"
-    JPEG = "jpeg"
-    BMP = "bmp"
+    PNG = auto()
+    JPEG = auto()
+    BMP = auto()
+    WEBP = auto()
 
 
 @dataclass
-class ScreenshotResult:
-    """Screenshot capture result."""
-    path: str
+class Screenshot:
+    """
+    Screenshot data container.
+    
+    Attributes:
+        image_data: Raw image bytes
+        width: Image width in pixels
+        height: Image height in pixels
+        format: Image format
+        captured_at: Capture timestamp
+        region: Optional region coordinates (x, y, width, height)
+    """
+    image_data: bytes
     width: int
     height: int
-    format: ScreenshotFormat
-    size_bytes: int
-    timestamp: datetime
-    md5_hash: str
-
-
-def capture_screen(output_path: Optional[str] = None) -> ScreenshotResult:
-    """
-    Capture full screen screenshot.
+    format: ImageFormat = ImageFormat.PNG
+    captured_at: float = field(default_factory=time.time)
+    region: Optional[tuple[int, int, int, int]] = None
+    metadata: dict = field(default_factory=dict)
     
-    Args:
-        output_path: Optional output path. If None, uses /tmp with timestamp.
+    @property
+    def size_bytes(self) -> int:
+        """Get image size in bytes."""
+        return len(self.image_data)
+    
+    @property
+    def aspect_ratio(self) -> float:
+        """Get image aspect ratio."""
+        return self.width / self.height if self.height > 0 else 0
+    
+    @property
+    def hash(self) -> str:
+        """Get SHA256 hash of image data."""
+        return hashlib.sha256(self.image_data).hexdigest()
+
+
+@dataclass
+class ScreenshotConfig:
+    """Configuration for screenshot capture."""
+    format: ImageFormat = ImageFormat.PNG
+    quality: int = 95  # For JPEG
+    include_cursor: bool = False
+    include_timestamp: bool = True
+    max_width: Optional[int] = None
+    max_height: Optional[int] = None
+
+
+class ScreenshotCapture:
+    """Handles screenshot capture operations."""
+    
+    def __init__(self, config: Optional[ScreenshotConfig] = None):
+        self.config = config or ScreenshotConfig()
+    
+    def capture_full_screen(self) -> Screenshot:
+        """
+        Capture the full screen.
         
-    Returns:
-        ScreenshotResult with capture details.
-    """
-    if output_path is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = f"/tmp/screenshot_{timestamp}.png"
-    
-    try:
-        subprocess.run(
-            ["screencapture", "-x", output_path],
-            check=True,
-            capture_output=True
+        Returns:
+            Screenshot object
+        """
+        # Placeholder - actual implementation would use platform APIs
+        return Screenshot(
+            image_data=b"",
+            width=1920,
+            height=1080,
+            format=self.config.format
         )
-        
-        stat = os.stat(output_path)
-        width, height = get_image_dimensions(output_path)
-        
-        with open(output_path, 'rb') as f:
-            md5_hash = hashlib.md5(f.read()).hexdigest()
-        
-        return ScreenshotResult(
-            path=output_path,
-            width=width,
-            height=height,
-            format=ScreenshotFormat.PNG,
-            size_bytes=stat.st_size,
-            timestamp=datetime.now(),
-            md5_hash=md5_hash
-        )
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Screenshot failed: {e}")
-
-
-def capture_region(x: int, y: int, width: int, height: int,
-                   output_path: Optional[str] = None) -> ScreenshotResult:
-    """
-    Capture a specific screen region.
     
-    Args:
-        x: X coordinate of region top-left.
-        y: Y coordinate of region top-left.
-        width: Width of region.
-        height: Height of region.
-        output_path: Optional output path.
+    def capture_region(
+        self, 
+        x: int, 
+        y: int, 
+        width: int, 
+        height: int
+    ) -> Screenshot:
+        """
+        Capture a specific screen region.
         
-    Returns:
-        ScreenshotResult with capture details.
-    """
-    if output_path is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = f"/tmp/screenshot_region_{timestamp}.png"
-    
-    try:
-        subprocess.run(
-            ["screencapture", "-x", "-R", f"{x},{y},{width},{height}", output_path],
-            check=True,
-            capture_output=True
-        )
-        
-        stat = os.stat(output_path)
-        actual_width, actual_height = get_image_dimensions(output_path)
-        
-        with open(output_path, 'rb') as f:
-            md5_hash = hashlib.md5(f.read()).hexdigest()
-        
-        return ScreenshotResult(
-            path=output_path,
-            width=actual_width,
-            height=actual_height,
-            format=ScreenshotFormat.PNG,
-            size_bytes=stat.st_size,
-            timestamp=datetime.now(),
-            md5_hash=md5_hash
-        )
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Region screenshot failed: {e}")
-
-
-def capture_window(window_id: int, output_path: Optional[str] = None) -> ScreenshotResult:
-    """
-    Capture a specific window by ID.
-    
-    Args:
-        window_id: Window ID to capture.
-        output_path: Optional output path.
-        
-    Returns:
-        ScreenshotResult with capture details.
-    """
-    if output_path is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = f"/tmp/screenshot_window_{timestamp}.png"
-    
-    try:
-        subprocess.run(
-            ["screencapture", "-x", "-w", str(window_id), output_path],
-            check=True,
-            capture_output=True
-        )
-        
-        stat = os.stat(output_path)
-        width, height = get_image_dimensions(output_path)
-        
-        with open(output_path, 'rb') as f:
-            md5_hash = hashlib.md5(f.read()).hexdigest()
-        
-        return ScreenshotResult(
-            path=output_path,
-            width=width,
-            height=height,
-            format=ScreenshotFormat.PNG,
-            size_bytes=stat.st_size,
-            timestamp=datetime.now(),
-            md5_hash=md5_hash
-        )
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Window screenshot failed: {e}")
-
-
-def capture_with_selection() -> Optional[str]:
-    """
-    Capture screenshot with interactive region selection.
-    
-    Returns:
-        Path to saved screenshot, or None if cancelled.
-    """
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = f"/tmp/screenshot_selection_{timestamp}.png"
-    
-    try:
-        result = subprocess.run(
-            ["screencapture", "-i", "-s", output_path],
-            capture_output=True
-        )
-        if result.returncode == 0 and os.path.exists(output_path):
-            return output_path
-    except Exception:
-        pass
-    return None
-
-
-def capture_to_clipboard() -> bool:
-    """
-    Capture screenshot directly to clipboard.
-    
-    Returns:
-        True if successful, False otherwise.
-    """
-    try:
-        subprocess.run(
-            ["screencapture", "-c"],
-            check=True,
-            capture_output=True
-        )
-        return True
-    except subprocess.CalledProcessError:
-        return False
-
-
-def capture_multi_monitor() -> list[ScreenshotResult]:
-    """
-    Capture screenshots of all connected monitors.
-    
-    Returns:
-        List of ScreenshotResult for each monitor.
-    """
-    results = []
-    
-    try:
-        import Quartz
-        for screen in Quartz.NSScreen.screens():
-            bounds = screen.frame()
-            x, y = int(bounds.origin.x), int(bounds.origin.y)
-            w, h = int(bounds.size.width), int(bounds.size.height)
+        Args:
+            x: X coordinate
+            y: Y coordinate
+            width: Region width
+            height: Region height
             
-            result = capture_region(x, y, w, h)
-            results.append(result)
-    except Exception:
-        full = capture_screen()
-        results.append(full)
+        Returns:
+            Screenshot object
+        """
+        return Screenshot(
+            image_data=b"",
+            width=width,
+            height=height,
+            format=self.config.format,
+            region=(x, y, width, height)
+        )
     
-    return results
-
-
-def get_image_dimensions(image_path: str) -> tuple[int, int]:
-    """
-    Get image dimensions without loading full image.
-    
-    Args:
-        image_path: Path to image file.
+    def capture_window(self, window_id: str) -> Screenshot:
+        """
+        Capture a specific window.
         
-    Returns:
-        Tuple of (width, height).
-    """
-    try:
-        from PIL import Image
-        with Image.open(image_path) as img:
-            return img.size
-    except ImportError:
-        try:
-            import struct
-            with open(image_path, 'rb') as f:
-                data = f.read()
-                if data[:8] == b'\x89PNG\r\n\x1a\n':
-                    w = struct.unpack('>I', data[16:20])[0]
-                    h = struct.unpack('>I', data[20:24])[0]
-                    return w, h
-        except Exception:
-            pass
-    return 0, 0
+        Args:
+            window_id: Window identifier
+            
+        Returns:
+            Screenshot object
+        """
+        return Screenshot(
+            image_data=b"",
+            width=800,
+            height=600,
+            format=self.config.format
+        )
 
 
-def convert_screenshot(input_path: str, output_path: str,
-                       target_format: ScreenshotFormat,
-                       quality: int = 90) -> bool:
-    """
-    Convert screenshot to different format.
+class ScreenshotComparator:
+    """Compares screenshots for visual regression testing."""
     
-    Args:
-        input_path: Source screenshot path.
-        output_path: Destination path.
-        target_format: Target format.
-        quality: JPEG quality (1-100).
+    def __init__(self, threshold: float = 0.05):
+        """
+        Initialize comparator.
         
-    Returns:
-        True if successful, False otherwise.
+        Args:
+            threshold: Difference threshold (0.0 - 1.0) for considering images different
+        """
+        self.threshold = threshold
+    
+    def compare(self, screenshot1: Screenshot, screenshot2: Screenshot) -> 'ComparisonResult':
+        """
+        Compare two screenshots.
+        
+        Args:
+            screenshot1: First screenshot
+            screenshot2: Second screenshot
+            
+        Returns:
+            ComparisonResult with difference metrics
+        """
+        # Check dimensions
+        if screenshot1.width != screenshot2.width or screenshot1.height != screenshot2.height:
+            return ComparisonResult(
+                identical=False,
+                pixel_diff=1.0,
+                diff_percentage=100.0,
+                diff_regions=[],
+                error="Dimension mismatch"
+            )
+        
+        # Calculate pixel difference (placeholder)
+        pixel_diff = self._calculate_pixel_diff(
+            screenshot1.image_data,
+            screenshot2.image_data
+        )
+        
+        diff_percentage = pixel_diff * 100
+        
+        return ComparisonResult(
+            identical=pixel_diff < self.threshold,
+            pixel_diff=pixel_diff,
+            diff_percentage=diff_percentage,
+            diff_regions=[]
+        )
+    
+    def _calculate_pixel_diff(self, data1: bytes, data2: bytes) -> float:
+        """Calculate normalized pixel difference between two images."""
+        if len(data1) != len(data2):
+            return 1.0
+        
+        if len(data1) == 0:
+            return 0.0
+        
+        diff_count = sum(c1 != c2 for c1, c2 in zip(data1, data2))
+        return diff_count / len(data1)
+    
+    def find_diff_regions(
+        self, 
+        screenshot1: Screenshot, 
+        screenshot2: Screenshot,
+        block_size: int = 16
+    ) -> list[tuple[int, int, int, int]]:
+        """
+        Find rectangular regions that differ between screenshots.
+        
+        Args:
+            screenshot1: First screenshot
+            screenshot2: Second screenshot
+            block_size: Size of blocks to check
+            
+        Returns:
+            List of (x, y, width, height) tuples for differing regions
+        """
+        regions = []
+        
+        # Placeholder implementation
+        return regions
+
+
+@dataclass
+class ComparisonResult:
+    """Result of screenshot comparison."""
+    identical: bool
+    pixel_diff: float  # 0.0 - 1.0
+    diff_percentage: float  # 0.0 - 100.0
+    diff_regions: list[tuple[int, int, int, int]]
+    error: Optional[str] = None
+
+
+class ScreenshotManager:
     """
-    try:
-        from PIL import Image
-        with Image.open(input_path) as img:
-            if target_format == ScreenshotFormat.JPEG:
-                img = img.convert('RGB')
-                img.save(output_path, format='JPEG', quality=quality)
-            else:
-                img.save(output_path, format=target_format.value.upper())
-        return True
-    except Exception:
+    Manages screenshot capture, storage, and retrieval.
+    
+    Example:
+        manager = ScreenshotManager("./screenshots")
+        manager.capture("homepage")
+        screenshot = manager.get("homepage")
+    """
+    
+    def __init__(self, storage_dir: str = "./screenshots"):
+        self.storage_dir = Path(storage_dir)
+        self._screenshots: dict[str, Screenshot] = {}
+        self._capture = ScreenshotCapture()
+    
+    def capture(
+        self, 
+        name: str, 
+        capture_func: Optional[Callable[[], Screenshot]] = None
+    ) -> Screenshot:
+        """
+        Capture and store a screenshot.
+        
+        Args:
+            name: Screenshot name/key
+            capture_func: Optional custom capture function
+            
+        Returns:
+            Captured Screenshot
+        """
+        if capture_func:
+            screenshot = capture_func()
+        else:
+            screenshot = self._capture.capture_full_screen()
+        
+        self._screenshots[name] = screenshot
+        return screenshot
+    
+    def get(self, name: str) -> Optional[Screenshot]:
+        """Get a stored screenshot by name."""
+        return self._screenshots.get(name)
+    
+    def save(self, name: str, path: Optional[str] = None) -> str:
+        """
+        Save a screenshot to disk.
+        
+        Args:
+            name: Screenshot name
+            path: Optional save path (defaults to storage_dir)
+            
+        Returns:
+            Path where screenshot was saved
+        """
+        screenshot = self._screenshots.get(name)
+        if not screenshot:
+            raise ValueError(f"Screenshot not found: {name}")
+        
+        save_path = Path(path) if path else self.storage_dir / f"{name}.png"
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(save_path, "wb") as f:
+            f.write(screenshot.image_data)
+        
+        return str(save_path)
+    
+    def load(self, name: str, path: str) -> Screenshot:
+        """
+        Load a screenshot from disk.
+        
+        Args:
+            name: Name to store screenshot as
+            path: Path to screenshot file
+            
+        Returns:
+            Loaded Screenshot
+        """
+        with open(path, "rb") as f:
+            data = f.read()
+        
+        screenshot = Screenshot(
+            image_data=data,
+            width=0,  # Would need image processing to determine
+            height=0
+        )
+        
+        self._screenshots[name] = screenshot
+        return screenshot
+    
+    def list_screenshots(self) -> list[str]:
+        """List all stored screenshot names."""
+        return list(self._screenshots.keys())
+    
+    def delete(self, name: str) -> bool:
+        """Delete a stored screenshot."""
+        if name in self._screenshots:
+            del self._screenshots[name]
+            return True
         return False

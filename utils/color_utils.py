@@ -1,412 +1,308 @@
-"""Color utilities for RabAI AutoClick.
+"""
+Color Utilities for UI Automation.
 
-Provides:
-- Color conversion (RGB, HEX, HSL, HSV)
-- ANSI color code generation
-- Color manipulation and blending
+This module provides utilities for color manipulation, conversion,
+and comparison for visual testing and UI automation.
+
+Author: AI Assistant
+License: MIT
 """
 
-import re
-from typing import (
-    NamedTuple,
-    Optional,
-    Tuple,
-    Union,
-)
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Tuple, Union
 
 
-class RGB(NamedTuple):
-    """RGB color tuple."""
-    r: int
-    g: int
-    b: int
-
-    def __repr__(self) -> str:
-        return f"RGB({self.r}, {self.g}, {self.b})"
+# Type alias for color values
+ColorValue = Union[str, Tuple[int, int, int], Tuple[int, int, int, float]]
 
 
-class HSL(NamedTuple):
-    """HSL color tuple."""
-    h: float  # 0-360
-    s: float  # 0-100
-    l: float  # 0-100
-
-    def __repr__(self) -> str:
-        return f"HSL({self.h:.1f}, {self.s:.1f}, {self.l:.1f})"
-
-
-class HSV(NamedTuple):
-    """HSV color tuple."""
-    h: float  # 0-360
-    s: float  # 0-100
-    v: float  # 0-100
-
-    def __repr__(self) -> str:
-        return f"HSV({self.h:.1f}, {self.s:.1f}, {self.v:.1f})"
-
-
-def hex_to_rgb(hex_color: str) -> RGB:
-    """Convert HEX color to RGB.
-
-    Args:
-        hex_color: Hex color string (#RGB, #RRGGBB, RGB, RRGGBB).
-
-    Returns:
-        RGB tuple.
-    """
-    hex_color = hex_color.lstrip("#")
-
-    if len(hex_color) == 3:
-        hex_color = "".join(c * 2 for c in hex_color)
-
-    if len(hex_color) != 6:
-        raise ValueError(f"Invalid hex color: {hex_color}")
-
-    return RGB(
-        r=int(hex_color[0:2], 16),
-        g=int(hex_color[2:4], 16),
-        b=int(hex_color[4:6], 16),
-    )
-
-
-def rgb_to_hex(rgb: Union[Tuple[int, int, int], RGB]) -> str:
-    """Convert RGB to HEX color string.
-
-    Args:
-        rgb: RGB tuple (values 0-255).
-
-    Returns:
-        Hex color string (#RRGGBB).
-    """
-    r, g, b = rgb
-    return f"#{r:02x}{g:02x}{b:02x}"
-
-
-def rgb_to_hsl(rgb: Union[Tuple[int, int, int], RGB]) -> HSL:
-    """Convert RGB to HSL.
-
-    Args:
-        rgb: RGB tuple (values 0-255).
-
-    Returns:
-        HSL tuple.
-    """
-    r, g, b = [x / 255.0 for x in rgb]
-    max_c = max(r, g, b)
-    min_c = min(r, g, b)
-    l = (max_c + min_c) / 2.0
-
-    if max_c == min_c:
-        h = 0.0
-        s = 0.0
-    else:
-        d = max_c - min_c
-        s = d / (2.0 - max_c - min_c) if l > 0.5 else d / (max_c + min_c)
-
-        if max_c == r:
-            h = ((g - b) / d + (6 if g < b else 0)) / 6.0
-        elif max_c == g:
-            h = ((b - r) / d + 2) / 6.0
+@dataclass
+class RGB:
+    """RGB color representation."""
+    r: int  # 0-255
+    g: int  # 0-255
+    b: int  # 0-255
+    a: float = 1.0  # 0.0-1.0
+    
+    def __post_init__(self):
+        self.r = max(0, min(255, int(self.r)))
+        self.g = max(0, min(255, int(self.g)))
+        self.b = max(0, min(255, int(self.b)))
+        self.a = max(0.0, min(1.0, float(self.a)))
+    
+    def to_hex(self) -> str:
+        """Convert to hex color string."""
+        if self.a < 1.0:
+            return f"#{self.r:02x}{self.g:02x}{self.b:02x}{int(self.a*255):02x}"
+        return f"#{self.r:02x}{self.g:02x}{self.b:02x}"
+    
+    def to_rgb_tuple(self) -> Tuple[int, int, int]:
+        """Convert to RGB tuple."""
+        return (self.r, self.g, self.b)
+    
+    def to_rgba_tuple(self) -> Tuple[int, int, int, float]:
+        """Convert to RGBA tuple."""
+        return (self.r, self.g, self.b, self.a)
+    
+    def to_hsl(self) -> 'HSL':
+        """Convert to HSL color."""
+        r, g, b = self.r / 255, self.g / 255, self.b / 255
+        
+        max_c = max(r, g, b)
+        min_c = min(r, g, b)
+        l = (max_c + min_c) / 2
+        
+        if max_c == min_c:
+            h = s = 0
         else:
-            h = ((r - g) / d + 4) / 6.0
+            d = max_c - min_c
+            s = l > 0.5 and d / (2 - max_c - min_c) or d / (max_c + min_c)
+            
+            if max_c == r:
+                h = (g - b) / d + (g < b and 6 or 0)
+            elif max_c == g:
+                h = (b - r) / d + 2
+            else:
+                h = (r - g) / d + 4
+            h /= 6
+        
+        return HSL(h=h * 360, s=s, l=l, a=self.a)
+    
+    def distance_to(self, other: 'RGB') -> float:
+        """Calculate Euclidean distance to another RGB color."""
+        dr = self.r - other.r
+        dg = self.g - other.g
+        db = self.b - other.b
+        return math.sqrt(dr*dr + dg*dg + db*db)
+    
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, RGB):
+            return False
+        return (
+            self.r == other.r and
+            self.g == other.g and
+            self.b == other.b and
+            abs(self.a - other.a) < 0.001
+        )
 
-    return HSL(h=h * 360, s=s * 100, l=l * 100)
+
+@dataclass
+class HSL:
+    """HSL color representation."""
+    h: float  # 0-360
+    s: float  # 0.0-1.0
+    l: float  # 0.0-1.0
+    a: float = 1.0  # 0.0-1.0
+    
+    def __post_init__(self):
+        self.h = self.h % 360
+        self.s = max(0.0, min(1.0, float(self.s)))
+        self.l = max(0.0, min(1.0, float(self.l)))
+        self.a = max(0.0, min(1.0, float(self.a)))
+    
+    def to_rgb(self) -> RGB:
+        """Convert to RGB color."""
+        h, s, l = self.h / 360, self.s, self.l
+        
+        if s == 0:
+            gray = int(l * 255)
+            return RGB(r=gray, g=gray, b=gray, a=self.a)
+        
+        def hue_to_rgb(p: float, q: float, t: float) -> float:
+            if t < 0: t += 1
+            if t > 1: t -= 1
+            if t < 1/6: return p + (q - p) * 6 * t
+            if t < 1/2: return q
+            if t < 2/3: return p + (q - p) * (2/3 - t) * 6
+            return p
+        
+        q = l < 0.5 and l * (1 + s) or l + s - l * s
+        p = 2 * l - q
+        
+        r = int(hue_to_rgb(p, q, h + 1/3) * 255)
+        g = int(hue_to_rgb(p, q, h) * 255)
+        b = int(hue_to_rgb(p, q, h - 1/3) * 255)
+        
+        return RGB(r=r, g=g, b=b, a=self.a)
+    
+    def to_hex(self) -> str:
+        """Convert to hex color string."""
+        return self.to_rgb().to_hex()
 
 
-def hsl_to_rgb(hsl: Union[Tuple[float, float, float], HSL]) -> RGB:
-    """Convert HSL to RGB.
+@dataclass
+class HSV:
+    """HSV color representation."""
+    h: float  # 0-360
+    s: float  # 0.0-1.0
+    v: float  # 0.0-1.0
+    a: float = 1.0  # 0.0-1.0
+    
+    def to_rgb(self) -> RGB:
+        """Convert to RGB color."""
+        h, s, v = self.h / 360, self.s, self.v
+        
+        if s == 0:
+            gray = int(v * 255)
+            return RGB(r=gray, g=gray, b=gray, a=self.a)
+        
+        i = int(h * 6)
+        f = h * 6 - i
+        p = v * (1 - s)
+        q = v * (1 - f * s)
+        t = v * (1 - (1 - f) * s)
+        
+        i = i % 6
+        options = [
+            (v, t, p),
+            (q, v, p),
+            (p, v, t),
+            (p, q, v),
+            (t, p, v),
+            (v, p, q)
+        ]
+        
+        r, g, b = options[i]
+        return RGB(r=int(r*255), g=int(g*255), b=int(b*255), a=self.a)
 
-    Args:
-        hsl: HSL tuple (h: 0-360, s: 0-100, l: 0-100).
 
-    Returns:
-        RGB tuple (values 0-255).
+def parse_color(color_str: str) -> RGB:
     """
-    h, s, l = [x / 100.0 if i > 0 else x / 360.0 for i, x in enumerate(hsl)]
-
-    if s == 0:
-        gray = int(round(l * 255))
-        return RGB(r=gray, g=gray, b=gray)
-
-    def hue_to_rgb(p: float, q: float, t: float) -> float:
-        if t < 0:
-            t += 1
-        if t > 1:
-            t -= 1
-        if t < 1 / 6:
-            return p + (q - p) * 6 * t
-        if t < 1 / 2:
-            return q
-        if t < 2 / 3:
-            return p + (q - p) * (2 / 3 - t) * 6
-        return p
-
-    q = l * (1 + s) if l < 0.5 else l + s - l * s
-    p = 2 * l - q
-
-    return RGB(
-        r=int(round(hue_to_rgb(p, q, h + 1 / 3) * 255)),
-        g=int(round(hue_to_rgb(p, q, h) * 255)),
-        b=int(round(hue_to_rgb(p, q, h - 1 / 3) * 255)),
-    )
-
-
-def rgb_to_hsv(rgb: Union[Tuple[int, int, int], RGB]) -> HSV:
-    """Convert RGB to HSV.
-
+    Parse a color string into an RGB object.
+    
+    Supports formats:
+    - Hex: #RGB, #RRGGBB, #RRGGBBAA
+    - rgb(r, g, b)
+    - rgba(r, g, b, a)
+    
     Args:
-        rgb: RGB tuple (values 0-255).
-
+        color_str: Color string to parse
+        
     Returns:
-        HSV tuple.
+        RGB color object
+        
+    Raises:
+        ValueError: If color format is invalid
     """
-    r, g, b = [x / 255.0 for x in rgb]
-    max_c = max(r, g, b)
-    min_c = min(r, g, b)
-    v = max_c
-
-    if max_c == 0:
-        return HSV(h=0, s=0, v=v * 100)
-
-    s = (max_c - min_c) / max_c
-    d = max_c - min_c
-
-    if max_c == r:
-        h = ((g - b) / d + (6 if g < b else 0)) / 6.0
-    elif max_c == g:
-        h = ((b - r) / d + 2) / 6.0
-    else:
-        h = ((r - g) / d + 4) / 6.0
-
-    return HSV(h=h * 360, s=s * 100, v=v * 100)
+    color_str = color_str.strip().lower()
+    
+    # Hex format
+    if color_str.startswith('#'):
+        return _parse_hex(color_str)
+    
+    # rgb/rgba format
+    if color_str.startswith('rgb'):
+        return _parse_rgb(color_str)
+    
+    raise ValueError(f"Invalid color format: {color_str}")
 
 
-def hsv_to_rgb(hsv: Union[Tuple[float, float, float], HSV]) -> RGB:
-    """Convert HSV to RGB.
+def _parse_hex(hex_str: str) -> RGB:
+    """Parse hex color string."""
+    hex_str = hex_str.lstrip('#')
+    
+    if len(hex_str) == 3:
+        r = int(hex_str[0] * 2, 16)
+        g = int(hex_str[1] * 2, 16)
+        b = int(hex_str[2] * 2, 16)
+        return RGB(r=r, g=g, b=b)
+    
+    if len(hex_str) == 6:
+        r = int(hex_str[0:2], 16)
+        g = int(hex_str[2:4], 16)
+        b = int(hex_str[4:6], 16)
+        return RGB(r=r, g=g, b=b)
+    
+    if len(hex_str) == 8:
+        r = int(hex_str[0:2], 16)
+        g = int(hex_str[2:4], 16)
+        b = int(hex_str[4:6], 16)
+        a = int(hex_str[6:8], 16) / 255
+        return RGB(r=r, g=g, b=b, a=a)
+    
+    raise ValueError(f"Invalid hex color: {hex_str}")
 
+
+def _parse_rgb(rgb_str: str) -> RGB:
+    """Parse rgb/rgba color string."""
+    import re
+    
+    match = re.match(r'rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\s*\)', rgb_str)
+    if not match:
+        raise ValueError(f"Invalid rgb/rgba color: {rgb_str}")
+    
+    r, g, b = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    a = float(match.group(4)) if match.group(4) else 1.0
+    
+    return RGB(r=r, g=g, b=b, a=a)
+
+
+def blend_colors(color1: RGB, color2: RGB, factor: float = 0.5) -> RGB:
+    """
+    Blend two colors together.
+    
     Args:
-        hsv: HSV tuple (h: 0-360, s: 0-100, v: 0-100).
-
+        color1: First color
+        color2: Second color
+        factor: Blend factor (0.0 = color1, 1.0 = color2)
+        
     Returns:
-        RGB tuple (values 0-255).
+        Blended RGB color
     """
-    h, s, v = [x / 100.0 if i > 0 else x / 360.0 for i, x in enumerate(hsv)]
-    s *= v
-
-    if s == 0:
-        gray = int(round(v * 255))
-        return RGB(r=gray, g=gray, b=gray)
-
-    h_i = int(h * 6)
-    f = h * 6 - h_i
-    p = v * (1 - s)
-    q = v * (1 - f * s)
-    t = v * (1 - (1 - f) * s)
-
-    if h_i == 0:
-        r, g, b = v, t, p
-    elif h_i == 1:
-        r, g, b = q, v, p
-    elif h_i == 2:
-        r, g, b = p, v, t
-    elif h_i == 3:
-        r, g, b = p, q, v
-    elif h_i == 4:
-        r, g, b = t, p, v
-    else:
-        r, g, b = v, p, q
-
-    return RGB(
-        r=int(round(r * 255)),
-        g=int(round(g * 255)),
-        b=int(round(b * 255)),
-    )
+    factor = max(0.0, min(1.0, factor))
+    
+    r = int(color1.r + (color2.r - color1.r) * factor)
+    g = int(color1.g + (color2.g - color1.g) * factor)
+    b = int(color1.b + (color2.b - color1.b) * factor)
+    a = color1.a + (color2.a - color1.a) * factor
+    
+    return RGB(r=r, g=g, b=b, a=a)
 
 
-def lighten(rgb: Union[Tuple[int, int, int], RGB], amount: float = 0.2) -> RGB:
-    """Lighten a color.
+def get_contrast_ratio(color1: RGB, color2: RGB) -> float:
+    """
+    Calculate WCAG contrast ratio between two colors.
+    
+    Returns:
+        Contrast ratio (1.0 - 21.0)
+    """
+    def luminance(rgb: RGB) -> float:
+        def adjust(c: int) -> float:
+            c = c / 255
+            return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+        return 0.2126 * adjust(rgb.r) + 0.7152 * adjust(rgb.g) + 0.0722 * adjust(rgb.b)
+    
+    l1 = luminance(color1)
+    l2 = luminance(color2)
+    
+    lighter = max(l1, l2)
+    darker = min(l1, l2)
+    
+    return (lighter + 0.05) / (darker + 0.05)
 
+
+def is_readable(color1: RGB, color2: RGB, level: str = "AA") -> bool:
+    """
+    Check if color combination meets WCAG accessibility standards.
+    
     Args:
-        rgb: RGB color.
-        amount: Amount to lighten (0-1).
-
+        color1: First color
+        color2: Second color
+        level: WCAG level ("AA" or "AAA")
+        
     Returns:
-        Lightened RGB color.
+        True if contrast meets the standard
     """
-    hsl = rgb_to_hsl(rgb)
-    new_l = min(100, hsl.l + amount * 100)
-    return hsl_to_rgb(HSL(hsl.h, hsl.s, new_l))
-
-
-def darken(rgb: Union[Tuple[int, int, int], RGB], amount: float = 0.2) -> RGB:
-    """Darken a color.
-
-    Args:
-        rgb: RGB color.
-        amount: Amount to darken (0-1).
-
-    Returns:
-        Darkened RGB color.
-    """
-    hsl = rgb_to_hsl(rgb)
-    new_l = max(0, hsl.l - amount * 100)
-    return hsl_to_rgb(HSL(hsl.h, hsl.s, new_l))
-
-
-def saturate(rgb: Union[Tuple[int, int, int], RGB], amount: float = 0.2) -> RGB:
-    """Saturate a color.
-
-    Args:
-        rgb: RGB color.
-        amount: Amount to saturate (0-1).
-
-    Returns:
-        Saturated RGB color.
-    """
-    hsl = rgb_to_hsl(rgb)
-    new_s = min(100, hsl.s + amount * 100)
-    return hsl_to_rgb(HSL(hsl.h, new_s, hsl.l))
-
-
-def desaturate(rgb: Union[Tuple[int, int, int], RGB], amount: float = 0.2) -> RGB:
-    """Desaturate a color.
-
-    Args:
-        rgb: RGB color.
-        amount: Amount to desaturate (0-1).
-
-    Returns:
-        Desaturated RGB color.
-    """
-    hsl = rgb_to_hsl(rgb)
-    new_s = max(0, hsl.s - amount * 100)
-    return hsl_to_rgb(HSL(hsl.h, new_s, hsl.l))
-
-
-def blend(
-    color1: Union[Tuple[int, int, int], RGB],
-    color2: Union[Tuple[int, int, int], RGB],
-    factor: float = 0.5,
-) -> RGB:
-    """Blend two colors.
-
-    Args:
-        color1: First RGB color.
-        color2: Second RGB color.
-        factor: Blend factor (0 = color1, 1 = color2).
-
-    Returns:
-        Blended RGB color.
-    """
-    r1, g1, b1 = color1
-    r2, g2, b2 = color2
-    return RGB(
-        r=int(r1 + (r2 - r1) * factor),
-        g=int(g1 + (g2 - g1) * factor),
-        b=int(b1 + (b2 - b1) * factor),
-    )
-
-
-def get_contrast_color(rgb: Union[Tuple[int, int, int], RGB]) -> RGB:
-    """Get a contrasting text color (black or white) for a background.
-
-    Args:
-        rgb: Background RGB color.
-
-    Returns:
-        RGB(0, 0, 0) or RGB(255, 255, 255).
-    """
-    r, g, b = rgb
-    # Calculate relative luminance
-    luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
-    return RGB(0, 0, 0) if luminance > 0.5 else RGB(255, 255, 255)
-
-
-def ansi_fg(rgb: Union[Tuple[int, int, int], RGB]) -> str:
-    """Get ANSI foreground color code.
-
-    Args:
-        rgb: RGB color.
-
-    Returns:
-        ANSI escape sequence for foreground color.
-    """
-    r, g, b = rgb
-    return f"\033[38;2;{r};{g};{b}m"
-
-
-def ansi_bg(rgb: Union[Tuple[int, int, int], RGB]) -> str:
-    """Get ANSI background color code.
-
-    Args:
-        rgb: RGB color.
-
-    Returns:
-        ANSI escape sequence for background color.
-    """
-    r, g, b = rgb
-    return f"\033[48;2;{r};{g};{b}m"
-
-
-ANSI_RESET = "\033[0m"
-ANSI_BOLD = "\033[1m"
-ANSI_DIM = "\033[2m"
-ANSI_ITALIC = "\033[3m"
-ANSI_UNDERLINE = "\033[4m"
-
-
-def colorize(
-    text: str,
-    fg: Optional[Union[Tuple[int, int, int], RGB]] = None,
-    bg: Optional[Union[Tuple[int, int, int], RGB]] = None,
-    bold: bool = False,
-    dim: bool = False,
-    italic: bool = False,
-    underline: bool = False,
-) -> str:
-    """Colorize text with ANSI codes.
-
-    Args:
-        text: Text to colorize.
-        fg: Foreground RGB color.
-        bg: Background RGB color.
-        bold: Apply bold.
-        dim: Apply dim.
-        italic: Apply italic.
-        underline: Apply underline.
-
-    Returns:
-        ANSI-colored text string.
-    """
-    codes: list[str] = []
-
-    if fg:
-        codes.append(ansi_fg(fg))
-    if bg:
-        codes.append(ansi_bg(bg))
-    if bold:
-        codes.append(ANSI_BOLD)
-    if dim:
-        codes.append(ANSI_DIM)
-    if italic:
-        codes.append(ANSI_ITALIC)
-    if underline:
-        codes.append(ANSI_UNDERLINE)
-
-    if not codes:
-        return text
-
-    return "".join(codes) + text + ANSI_RESET
-
-
-def is_valid_hex(hex_color: str) -> bool:
-    """Check if a string is a valid hex color.
-
-    Args:
-        hex_color: String to check.
-
-    Returns:
-        True if valid hex color.
-    """
-    pattern = r"^#?([A-Fa-f0-9]{3}|[A-Fa-f0-9]{6})$"
-    return bool(re.match(pattern, hex_color))
+    ratio = get_contrast_ratio(color1, color2)
+    
+    thresholds = {
+        "AA": 4.5,   # Normal text
+        "AAA": 7.0,  # Enhanced
+        "AA_LARGE": 3.0  # Large text
+    }
+    
+    threshold = thresholds.get(level, 4.5)
+    return ratio >= threshold
