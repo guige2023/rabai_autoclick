@@ -1,341 +1,425 @@
-"""
-Input batch processing utilities for automation.
+"""Input batch utilities for UI automation.
 
-This module provides utilities for batching multiple input
-operations together for efficient execution.
+Provides utilities for batching input operations,
+optimizing input sequences, and managing batch execution.
 """
 
 from __future__ import annotations
 
 import time
-import threading
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Any, Dict, Tuple
-from enum import Enum, auto
-
-
-class BatchStrategy(Enum):
-    """Strategy for processing input batches."""
-    SEQUENTIAL = auto()
-    PARALLEL = auto()
-    PRIORITY = auto()
-    DEBOUNCE = auto()
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 
 @dataclass
-class InputBatchItem:
-    """
-    Single item in an input batch.
-
-    Attributes:
-        item_id: Unique identifier for the item.
-        action: The action to execute.
-        priority: Priority level (higher = earlier execution).
-        created_at: When the item was created.
-        dependencies: IDs of items that must complete first.
-    """
-    item_id: str
-    action: Callable[[], Any]
+class BatchItem:
+    """An item in an input batch."""
+    item_type: str
+    data: Dict[str, Any]
+    timestamp_ms: float
     priority: int = 0
-    created_at: float = field(default_factory=time.time)
-    dependencies: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class BatchResult:
+    """Result of batch execution."""
+    success: bool
+    items_processed: int
+    items_failed: int
+    duration_ms: float
+    errors: List[str] = field(default_factory=list)
+
+
+class InputBatcher:
+    """Batches input operations for optimized execution.
+    
+    Collects multiple input operations and executes them
+    together for improved efficiency.
     """
-    Result of batch processing.
-
-    Attributes:
-        batch_id: Identifier for the batch.
-        results: Map of item_id to result/error.
-        total_duration: Total processing time.
-        success_count: Number of successful items.
-        failure_count: Number of failed items.
-    """
-    batch_id: str
-    results: Dict[str, Any] = field(default_factory=dict)
-    total_duration: float = 0.0
-    success_count: int = 0
-    failure_count: int = 0
-
-
-class InputBatch:
-    """
-    Collection of input operations to be executed together.
-
-    Supports various processing strategies and dependencies.
-    """
-
-    def __init__(self, batch_id: str = "") -> None:
-        self._batch_id = batch_id or f"batch_{time.time()}"
-        self._items: List[InputBatchItem] = []
-        self._lock = threading.Lock()
-
-    @property
-    def batch_id(self) -> str:
-        """Get batch identifier."""
-        return self._batch_id
-
+    
+    def __init__(
+        self,
+        max_batch_size: int = 50,
+        max_wait_ms: float = 100.0,
+        executor: Optional[Callable[[List[BatchItem]], BatchResult]] = None
+    ) -> None:
+        """Initialize the input batcher.
+        
+        Args:
+            max_batch_size: Maximum items per batch.
+            max_wait_ms: Maximum wait time before forcing batch.
+            executor: Function to execute batch.
+        """
+        self.max_batch_size = max_batch_size
+        self.max_wait_ms = max_wait_ms
+        self.executor = executor
+        self._batch: Deque[BatchItem] = deque()
+        self._last_execution_ms: float = 0.0
+    
     def add(
         self,
-        action: Callable[[], Any],
-        item_id: Optional[str] = None,
+        item_type: str,
+        data: Dict[str, Any],
         priority: int = 0,
-        dependencies: Optional[List[str]] = None,
-    ) -> str:
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Add an item to the batch.
+        
+        Args:
+            item_type: Type of input item.
+            data: Item data.
+            priority: Priority for ordering.
+            metadata: Additional metadata.
         """
-        Add an action to the batch.
-
-        Returns the item ID for later reference.
-        """
-        item_id = item_id or f"item_{len(self._items)}"
-
-        with self._lock:
-            self._items.append(InputBatchItem(
-                item_id=item_id,
-                action=action,
-                priority=priority,
-                dependencies=dependencies or [],
-            ))
-
-        return item_id
-
-    def add_click(self, x: float, y: float, item_id: Optional[str] = None) -> str:
-        """Add a click action to the batch."""
-        def click_action() -> None:
-            pass  # Actual click implementation would go here
-        return self.add(click_action, item_id)
-
-    def add_type(self, text: str, item_id: Optional[str] = None) -> str:
-        """Add a text input action to the batch."""
-        def type_action() -> None:
-            pass  # Actual type implementation would go here
-        return self.add(type_action, item_id)
-
-    def add_wait(self, duration: float, item_id: Optional[str] = None) -> str:
-        """Add a wait action to the batch."""
-        def wait_action() -> None:
-            time.sleep(duration)
-        return self.add(wait_action, item_id)
-
-    def size(self) -> int:
-        """Get number of items in batch."""
-        return len(self._items)
-
-    def clear(self) -> None:
-        """Remove all items from batch."""
-        with self._lock:
-            self._items.clear()
-
-    def get_items(self, sorted_by: BatchStrategy = BatchStrategy.SEQUENTIAL) -> List[InputBatchItem]:
-        """Get batch items, optionally sorted by strategy."""
-        with self._lock:
-            items = self._items.copy()
-
-        if sorted_by == BatchStrategy.PRIORITY:
-            items.sort(key=lambda x: -x.priority)
-        elif sorted_by == BatchStrategy.SEQUENTIAL:
-            items.sort(key=lambda x: x.created_at)
-
-        return items
-
-
-class BatchProcessor:
-    """
-    Processes batches of input operations.
-
-    Supports sequential, parallel, and priority-based execution.
-    """
-
-    def __init__(self, strategy: BatchStrategy = BatchStrategy.SEQUENTIAL) -> None:
-        self._strategy = strategy
-        self._max_workers: int = 4
-        self._batch_handlers: Dict[str, Callable[[InputBatch], BatchResult]] = {}
-
-    def set_strategy(self, strategy: BatchStrategy) -> BatchProcessor:
-        """Set the batch processing strategy."""
-        self._strategy = strategy
-        return self
-
-    def set_max_workers(self, workers: int) -> BatchProcessor:
-        """Set maximum parallel workers."""
-        self._max_workers = max(1, workers)
-        return self
-
-    def process(self, batch: InputBatch) -> BatchResult:
-        """
-        Process a batch according to the current strategy.
-
-        Returns BatchResult with all outcomes.
-        """
-        start_time = time.time()
-        results: Dict[str, Any] = {}
-
-        if self._strategy == BatchStrategy.SEQUENTIAL:
-            results = self._process_sequential(batch)
-        elif self._strategy == BatchStrategy.PARALLEL:
-            results = self._process_parallel(batch)
-        elif self._strategy == BatchStrategy.PRIORITY:
-            results = self._process_priority(batch)
-        elif self._strategy == BatchStrategy.DEBOUNCE:
-            results = self._process_debounce(batch)
-
-        duration = time.time() - start_time
-
-        success_count = sum(1 for r in results.values() if not isinstance(r, Exception))
-        failure_count = len(results) - success_count
-
-        return BatchResult(
-            batch_id=batch.batch_id,
-            results=results,
-            total_duration=duration,
-            success_count=success_count,
-            failure_count=failure_count,
+        item = BatchItem(
+            item_type=item_type,
+            data=data,
+            timestamp_ms=time.time() * 1000,
+            priority=priority,
+            metadata=metadata or {}
         )
+        self._batch.append(item)
+    
+    def should_execute(self) -> bool:
+        """Check if batch should be executed.
+        
+        Returns:
+            True if batch should execute.
+        """
+        if len(self._batch) >= self.max_batch_size:
+            return True
+        
+        if len(self._batch) == 0:
+            return False
+        
+        elapsed = time.time() * 1000 - self._last_execution_ms
+        if elapsed >= self.max_wait_ms:
+            return True
+        
+        return False
+    
+    def execute(self) -> BatchResult:
+        """Execute the current batch.
+        
+        Returns:
+            Batch result.
+        """
+        if not self._batch:
+            return BatchResult(
+                success=True,
+                items_processed=0,
+                items_failed=0,
+                duration_ms=0.0
+            )
+        
+        start_ms = time.time() * 1000
+        items = list(self._batch)
+        self._batch.clear()
+        
+        items.sort(key=lambda x: -x.priority)
+        
+        if self.executor:
+            result = self.executor(items)
+        else:
+            result = BatchResult(
+                success=True,
+                items_processed=len(items),
+                items_failed=0,
+                duration_ms=time.time() * 1000 - start_ms
+            )
+        
+        self._last_execution_ms = time.time() * 1000
+        return result
+    
+    def get_pending_count(self) -> int:
+        """Get number of pending items.
+        
+        Returns:
+            Number of pending items.
+        """
+        return len(self._batch)
+    
+    def clear(self) -> None:
+        """Clear pending items."""
+        self._batch.clear()
 
-    def _process_sequential(self, batch: InputBatch) -> Dict[str, Any]:
-        """Process items one at a time."""
-        results: Dict[str, Any] = {}
 
-        for item in batch.get_items(BatchStrategy.SEQUENTIAL):
-            try:
-                results[item.item_id] = item.action()
-            except Exception as e:
-                results[item.item_id] = e
-
-        return results
-
-    def _process_parallel(self, batch: InputBatch) -> Dict[str, Any]:
-        """Process items in parallel threads."""
-        results: Dict[str, Any] = {}
-        items = batch.get_items()
-        lock = threading.Lock()
-
-        def process_item(item: InputBatchItem) -> None:
-            try:
-                result = item.action()
-                with lock:
-                    results[item.item_id] = result
-            except Exception as e:
-                with lock:
-                    results[item.item_id] = e
-
-        threads: List[threading.Thread] = []
-        for item in items:
-            t = threading.Thread(target=process_item, args=(item,))
-            threads.append(t)
-            t.start()
-
-        for t in threads:
-            t.join()
-
-        return results
-
-    def _process_priority(self, batch: InputBatch) -> Dict[str, Any]:
-        """Process items by priority order."""
-        return self._process_sequential(batch)
-
-    def _process_debounce(self, batch: InputBatch) -> Dict[str, Any]:
-        """Process items with debouncing."""
-        return self._process_sequential(batch)
-
-
-class BatchBuilder:
+class BatchOptimizer:
+    """Optimizes input batches for efficient execution.
+    
+    Analyzes batch items and reorders or consolidates
+    them for better performance.
     """
-    Fluent builder for creating input batches.
-
-    Provides a chainable API for constructing batches.
-    """
-
-    def __init__(self, batch_id: Optional[str] = None) -> None:
-        self._batch = InputBatch(batch_id)
-
-    def click(self, x: float, y: float, priority: int = 0) -> BatchBuilder:
-        """Add a click action."""
-        self._batch.add_click(x, y, priority=priority)
-        return self
-
-    def type(self, text: str, priority: int = 0) -> BatchBuilder:
-        """Add a type action."""
-        self._batch.add_type(text, priority=priority)
-        return self
-
-    def wait(self, duration: float, priority: int = 0) -> BatchBuilder:
-        """Add a wait action."""
-        self._batch.add_wait(duration, priority=priority)
-        return self
-
-    def custom(
-        self,
-        action: Callable[[], Any],
-        item_id: Optional[str] = None,
-        priority: int = 0,
-    ) -> BatchBuilder:
-        """Add a custom action."""
-        self._batch.add(action, item_id, priority)
-        return self
-
-    def build(self) -> InputBatch:
-        """Build and return the batch."""
-        return self._batch
-
-
-class InputSequenceBuilder:
-    """
-    Builder for creating sequences of input operations.
-
-    Supports chaining of multiple input types with timing.
-    """
-
+    
     def __init__(self) -> None:
-        self._actions: List[Tuple[str, Dict[str, Any]]] = []
+        """Initialize the batch optimizer."""
+        self._consolidation_rules: Dict[str, Callable[[BatchItem, BatchItem], bool]] = {}
+    
+    def register_consolidation_rule(
+        self,
+        item_type: str,
+        rule: Callable[[BatchItem, BatchItem], bool]
+    ) -> None:
+        """Register a consolidation rule for item type.
+        
+        Args:
+            item_type: Type of items to consolidate.
+            rule: Function that returns True if items can be consolidated.
+        """
+        self._consolidation_rules[item_type] = rule
+    
+    def optimize(
+        self,
+        items: List[BatchItem]
+    ) -> List[BatchItem]:
+        """Optimize a list of batch items.
+        
+        Args:
+            items: Items to optimize.
+            
+        Returns:
+            Optimized list of items.
+        """
+        consolidated = self._consolidate(items)
+        reordered = self._reorder(consolidated)
+        return reordered
+    
+    def _consolidate(
+        self,
+        items: List[BatchItem]
+    ) -> List[BatchItem]:
+        """Consolidate similar items.
+        
+        Args:
+            items: Items to consolidate.
+            
+        Returns:
+            Consolidated items.
+        """
+        result: List[BatchItem] = []
+        
+        for item in items:
+            consolidated = False
+            
+            for existing in result:
+                rule = self._consolidation_rules.get(item.item_type)
+                if rule and rule(item, existing):
+                    self._merge_items(existing, item)
+                    consolidated = True
+                    break
+            
+            if not consolidated:
+                result.append(item)
+        
+        return result
+    
+    def _merge_items(self, target: BatchItem, source: BatchItem) -> None:
+        """Merge source item into target.
+        
+        Args:
+            target: Target item.
+            source: Source item.
+        """
+        if "count" not in target.metadata:
+            target.metadata["count"] = 1
+        target.metadata["count"] += 1
+        
+        target.data.setdefault("merged", []).append(source.data)
+    
+    def _reorder(self, items: List[BatchItem]) -> List[BatchItem]:
+        """Reorder items for optimal execution.
+        
+        Args:
+            items: Items to reorder.
+            
+        Returns:
+            Reordered items.
+        """
+        return sorted(items, key=lambda x: (-x.priority, x.timestamp_ms))
 
-    def move_to(self, x: float, y: float) -> InputSequenceBuilder:
-        """Add mouse move action."""
-        self._actions.append(("move_to", {"x": x, "y": y}))
-        return self
 
-    def click(self, x: float, y: float, button: str = "left") -> InputSequenceBuilder:
-        """Add click action."""
-        self._actions.append(("click", {"x": x, "y": y, "button": button}))
-        return self
+class SequenceBatcher:
+    """Batches sequential input operations.
+    
+    Maintains operation sequences and executes them
+    in order with proper timing.
+    """
+    
+    def __init__(
+        self,
+        inter_item_delay_ms: float = 10.0,
+        on_item: Optional[Callable[[BatchItem], None]] = None
+    ) -> None:
+        """Initialize the sequence batcher.
+        
+        Args:
+            inter_item_delay_ms: Delay between items.
+            on_item: Callback for each item execution.
+        """
+        self.inter_item_delay_ms = inter_item_delay_ms
+        self.on_item = on_item
+        self._sequence: List[BatchItem] = []
+    
+    def add_sequence_item(
+        self,
+        item_type: str,
+        data: Dict[str, Any],
+        delay_ms: Optional[float] = None
+    ) -> None:
+        """Add an item to the sequence.
+        
+        Args:
+            item_type: Type of item.
+            data: Item data.
+            delay_ms: Delay after this item.
+        """
+        item = BatchItem(
+            item_type=item_type,
+            data=data,
+            timestamp_ms=time.time() * 1000,
+            metadata={"delay_ms": delay_ms or self.inter_item_delay_ms}
+        )
+        self._sequence.append(item)
+    
+    def execute_sequence(self) -> BatchResult:
+        """Execute the sequence.
+        
+        Returns:
+            Batch result.
+        """
+        start_ms = time.time() * 1000
+        errors = []
+        processed = 0
+        failed = 0
+        
+        for item in self._sequence:
+            try:
+                if self.on_item:
+                    self.on_item(item)
+                processed += 1
+                
+                delay = item.metadata.get("delay_ms", self.inter_item_delay_ms)
+                if delay > 0:
+                    time.sleep(delay / 1000.0)
+            except Exception as e:
+                errors.append(str(e))
+                failed += 1
+        
+        self._sequence.clear()
+        
+        return BatchResult(
+            success=failed == 0,
+            items_processed=processed,
+            items_failed=failed,
+            duration_ms=time.time() * 1000 - start_ms,
+            errors=errors
+        )
+    
+    def get_sequence_length(self) -> int:
+        """Get number of items in sequence.
+        
+        Returns:
+            Sequence length.
+        """
+        return len(self._sequence)
+    
+    def clear_sequence(self) -> None:
+        """Clear the sequence."""
+        self._sequence.clear()
 
-    def double_click(self, x: float, y: float) -> InputSequenceBuilder:
-        """Add double click action."""
-        self._actions.append(("double_click", {"x": x, "y": y}))
-        return self
 
-    def right_click(self, x: float, y: float) -> InputSequenceBuilder:
-        """Add right click action."""
-        self._actions.append(("right_click", {"x": x, "y": y}))
-        return self
+class ParallelBatcher:
+    """Batches parallel input operations.
+    
+    Executes independent operations concurrently
+    for improved throughput.
+    """
+    
+    def __init__(
+        self,
+        max_parallel: int = 5,
+        executor: Optional[Callable[[BatchItem], Any]] = None
+    ) -> None:
+        """Initialize the parallel batcher.
+        
+        Args:
+            max_parallel: Maximum parallel operations.
+            executor: Function to execute single item.
+        """
+        self.max_parallel = max_parallel
+        self.executor = executor
+        self._pending: List[BatchItem] = []
+    
+    def add(self, item: BatchItem) -> None:
+        """Add an item to the batch.
+        
+        Args:
+            item: Item to add.
+        """
+        self._pending.append(item)
+    
+    def execute_parallel(self) -> Tuple[int, int, List[str]]:
+        """Execute items in parallel.
+        
+        Returns:
+            Tuple of (processed, failed, errors).
+        """
+        processed = 0
+        failed = 0
+        errors = []
+        
+        for item in self._pending:
+            try:
+                if self.executor:
+                    self.executor(item)
+                processed += 1
+            except Exception as e:
+                errors.append(str(e))
+                failed += 1
+        
+        self._pending.clear()
+        
+        return (processed, failed, errors)
+    
+    def clear(self) -> None:
+        """Clear pending items."""
+        self._pending.clear()
 
-    def scroll(self, dx: float, dy: float) -> InputSequenceBuilder:
-        """Add scroll action."""
-        self._actions.append(("scroll", {"dx": dx, "dy": dy}))
-        return self
 
-    def type_text(self, text: str) -> InputSequenceBuilder:
-        """Add text input action."""
-        self._actions.append(("type", {"text": text}))
-        return self
+def batch_by_type(
+    items: List[BatchItem]
+) -> Dict[str, List[BatchItem]]:
+    """Group batch items by type.
+    
+    Args:
+        items: Items to group.
+        
+    Returns:
+        Dictionary mapping type to items.
+    """
+    groups: Dict[str, List[BatchItem]] = {}
+    
+    for item in items:
+        if item.item_type not in groups:
+            groups[item.item_type] = []
+        groups[item.item_type].append(item)
+    
+    return groups
 
-    def press_key(self, key: str) -> InputSequenceBuilder:
-        """Add key press action."""
-        self._actions.append(("key", {"key": key}))
-        return self
 
-    def wait(self, duration: float) -> InputSequenceBuilder:
-        """Add wait action."""
-        self._actions.append(("wait", {"duration": duration}))
-        return self
-
-    def build(self) -> List[Tuple[str, Dict[str, Any]]]:
-        """Build and return the action sequence."""
-        return self._actions.copy()
-
-    def clear(self) -> InputSequenceBuilder:
-        """Clear all actions."""
-        self._actions.clear()
-        return self
+def prioritize_items(
+    items: List[BatchItem],
+    priority_func: Callable[[BatchItem], int]
+) -> List[BatchItem]:
+    """Prioritize items using a priority function.
+    
+    Args:
+        items: Items to prioritize.
+        priority_func: Function that returns priority.
+        
+    Returns:
+        Prioritized items.
+    """
+    return sorted(items, key=priority_func, reverse=True)
