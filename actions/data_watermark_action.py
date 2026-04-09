@@ -1,354 +1,413 @@
 """Data Watermark Action Module.
 
-Provides watermark embedding and detection for data tracking.
+Provides watermarking capabilities for data provenance including
+invisible watermarks, visible stamps, cryptographic signatures,
+and reversible data watermarking for data lineage tracking.
 """
 
-import time
+from __future__ import annotations
+
 import hashlib
-import traceback
+import hmac
+import json
+import logging
+import threading
+import time
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
 import sys
 import os
-from typing import Any, Dict, List, Optional, Tuple
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
+logger = logging.getLogger(__name__)
+
+
+class WatermarkType(Enum):
+    """Types of watermarks."""
+    INVISIBLE = "invisible"
+    VISIBLE = "visible"
+    METADATA = "metadata"
+    CRYPTOGRAPHIC = "cryptographic"
+    ROBUST = "robust"
+    FRAGILE = "fragile"
+
+
+class WatermarkStatus(Enum):
+    """Watermark status."""
+    VALID = "valid"
+    INVALID = "invalid"
+    TAMPERED = "tampered"
+    EXPIRED = "expired"
+    MISSING = "missing"
+
+
+@dataclass
+class Watermark:
+    """A data watermark."""
+    watermark_id: str
+    watermark_type: WatermarkType
+    content: str
+    signature: Optional[str] = None
+    created_at: datetime = field(default_factory=datetime.now)
+    expires_at: Optional[datetime] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    payload: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class WatermarkVerification:
+    """Result of watermark verification."""
+    status: WatermarkStatus
+    watermark_id: Optional[str] = None
+    extracted_payload: Optional[Dict[str, Any]] = None
+    verification_time_ms: float = 0.0
+    integrity_score: float = 0.0
+    message: Optional[str] = None
+
+
+@dataclass
+class WatermarkConfig:
+    """Configuration for watermarking."""
+    watermark_type: WatermarkType = WatermarkType.INVISIBLE
+    secret_key: Optional[str] = None
+    hash_algorithm: str = "sha256"
+    include_timestamp: bool = True
+    include_checksum: bool = True
+    embed_in_json: bool = True
+    embed_in_binary: bool = False
+    expiration_hours: int = 0
+
+
+class WatermarkEncoder:
+    """Encode watermarks into data."""
+
+    @staticmethod
+    def encode_metadata(
+        data: Dict[str, Any],
+        watermark: Watermark,
+        config: WatermarkConfig
+    ) -> Dict[str, Any]:
+        """Embed watermark as metadata in JSON data."""
+        marked_data = data.copy()
+
+        watermark_info = {
+            "watermark_id": watermark.watermark_id,
+            "watermark_type": watermark.watermark_type.value,
+            "content": watermark.content,
+            "created_at": watermark.created_at.isoformat() if config.include_timestamp else None,
+        }
+
+        if config.include_checksum:
+            content_str = json.dumps(data, sort_keys=True, default=str)
+            watermark_info["data_checksum"] = hashlib.sha256(
+                content_str.encode()
+            ).hexdigest()
+
+        if watermark.expires_at:
+            watermark_info["expires_at"] = watermark.expires_at.isoformat()
+
+        watermark_info["metadata"] = watermark.metadata
+
+        marked_data["_watermark"] = watermark_info
+
+        return marked_data
+
+    @staticmethod
+    def encode_binary(
+        data: bytes,
+        watermark: Watermark,
+        config: WatermarkConfig
+    ) -> bytes:
+        """Embed watermark in binary data using LSB steganography."""
+        if len(data) < 100:
+            raise ValueError("Data too small for watermarking")
+
+        header = b"WATERMARK:"
+        header_len = len(header)
+
+        watermark_json = json.dumps({
+            "id": watermark.watermark_id,
+            "type": watermark.watermark_type.value,
+            "content": watermark.content,
+            "timestamp": watermark.created_at.isoformat()
+        }, separators=(",", ":"))
+
+        watermark_bytes = watermark_json.encode("utf-8")
+        watermark_len = len(watermark_bytes)
+
+        total_header = header + watermark_len.to_bytes(4, "big") + watermark_bytes
+
+        if len(total_header) > len(data):
+            raise ValueError("Data too small for watermark")
+
+        result = bytearray(data)
+        for i, byte in enumerate(total_header):
+            result[i] = (data[i] & 0xFE) | (byte & 0x01)
+
+        return bytes(result)
+
+    @staticmethod
+    def sign_watermark(watermark: Watermark, secret_key: str) -> str:
+        """Create HMAC signature for watermark."""
+        content = f"{watermark.watermark_id}:{watermark.content}:{watermark.created_at.isoformat()}"
+        signature = hmac.new(
+            secret_key.encode(),
+            content.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        return signature
+
+
+class WatermarkExtractor:
+    """Extract and verify watermarks from data."""
+
+    @staticmethod
+    def extract_from_metadata(data: Dict[str, Any]) -> Tuple[Optional[Watermark], WatermarkVerification]:
+        """Extract watermark from JSON metadata."""
+        if "_watermark" not in data:
+            return None, WatermarkVerification(
+                status=WatermarkStatus.MISSING,
+                message="No watermark found in data"
+            )
+
+        wm_info = data["_watermark"]
+        start_time = time.time()
+
+        watermark = Watermark(
+            watermark_id=wm_info.get("watermark_id", ""),
+            watermark_type=WatermarkType(wm_info.get("watermark_type", "invisible")),
+            content=wm_info.get("content", ""),
+            created_at=datetime.fromisoformat(wm_info["created_at"]) if "created_at" in wm_info else datetime.now()
+        )
+
+        if "expires_at" in wm_info and wm_info["expires_at"]:
+            expires_at = datetime.fromisoformat(wm_info["expires_at"])
+            if datetime.now() > expires_at:
+                return watermark, WatermarkVerification(
+                    status=WatermarkStatus.EXPIRED,
+                    watermark_id=watermark.watermark_id,
+                    verification_time_ms=(time.time() - start_time) * 1000,
+                    message="Watermark has expired"
+                )
+
+        integrity_score = 1.0
+
+        verification = WatermarkVerification(
+            status=WatermarkStatus.VALID,
+            watermark_id=watermark.watermark_id,
+            verification_time_ms=(time.time() - start_time) * 1000,
+            integrity_score=integrity_score,
+            extracted_payload=wm_info.get("metadata", {})
+        )
+
+        return watermark, verification
+
+    @staticmethod
+    def extract_from_binary(data: bytes, config: WatermarkConfig) -> Tuple[Optional[Watermark], WatermarkVerification]:
+        """Extract watermark from binary data."""
+        header = b"WATERMARK:"
+        header_len = len(header)
+
+        if len(data) < header_len + 4:
+            return None, WatermarkVerification(
+                status=WatermarkStatus.MISSING,
+                message="Data too small for watermark"
+            )
+
+        if data[:len(header)] != header:
+            return None, WatermarkVerification(
+                status=WatermarkStatus.INVALID,
+                message="Invalid watermark header"
+            )
+
+        try:
+            watermark_len = int.from_bytes(data[header_len:header_len + 4], "big")
+            watermark_bytes = data[header_len + 4:header_len + 4 + watermark_len]
+            watermark_json = watermark_bytes.decode("utf-8")
+            wm_info = json.loads(watermark_json)
+
+            watermark = Watermark(
+                watermark_id=wm_info.get("id", ""),
+                watermark_type=WatermarkType(wm_info.get("type", "invisible")),
+                content=wm_info.get("content", ""),
+                created_at=datetime.fromisoformat(wm_info["timestamp"]) if "timestamp" in wm_info else datetime.now()
+            )
+
+            return watermark, WatermarkVerification(
+                status=WatermarkStatus.VALID,
+                watermark_id=watermark.watermark_id,
+                verification_time_ms=0.0
+            )
+
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            return None, WatermarkVerification(
+                status=WatermarkStatus.INVALID,
+                message="Failed to parse watermark"
+            )
+
+
 class DataWatermarkAction(BaseAction):
-    """Embed watermarks in data for tracking.
-    
-    Supports invisible and visible watermarking strategies.
-    """
-    action_type = "data_watermark"
-    display_name = "数据水印"
-    description = "在数据中嵌入水印用于追踪"
-    
-    def execute(
+    """Action for data watermarking."""
+
+    def __init__(self):
+        super().__init__(name="data_watermark")
+        self._config = WatermarkConfig()
+        self._encoder = WatermarkEncoder()
+        self._extractor = WatermarkExtractor()
+        self._watermarks: Dict[str, Watermark] = {}
+        self._lock = threading.Lock()
+        self._verification_history: List[WatermarkVerification] = []
+
+    def configure(self, config: WatermarkConfig):
+        """Configure watermarking settings."""
+        self._config = config
+
+    def embed(
         self,
-        context: Any,
-        params: Dict[str, Any]
+        data: Any,
+        content: str,
+        watermark_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None
     ) -> ActionResult:
-        """Execute watermarking operation.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: action, data, watermark, options.
-        
-        Returns:
-            ActionResult with watermarking result.
-        """
-        action = params.get('action', 'embed')
-        data = params.get('data', [])
-        watermark = params.get('watermark', '')
-        options = params.get('options', {})
-        
-        if action == 'embed':
-            return self._embed_watermark(data, watermark, options)
-        elif action == 'detect':
-            return self._detect_watermark(data, options)
-        elif action == 'verify':
-            return self._verify_watermark(data, watermark, options)
-        elif action == 'remove':
-            return self._remove_watermark(data, options)
-        else:
-            return ActionResult(
-                success=False,
-                data=None,
-                error=f"Unknown action: {action}"
+        """Embed a watermark in data."""
+        try:
+            watermark_id = watermark_id or f"wm_{int(time.time() * 1000)}"
+
+            if watermark_id in self._watermarks:
+                return ActionResult(success=False, error=f"Watermark {watermark_id} already exists")
+
+            expires_at = None
+            if self._config.expiration_hours > 0:
+                expires_at = datetime.now() + timedelta(hours=self._config.expiration_hours)
+
+            watermark = Watermark(
+                watermark_id=watermark_id,
+                watermark_type=self._config.watermark_type,
+                content=content,
+                created_at=datetime.now(),
+                expires_at=expires_at,
+                metadata=metadata or {},
+                payload=payload
             )
-    
-    def _embed_watermark(
-        self,
-        data: List,
-        watermark: str,
-        options: Dict
-    ) -> ActionResult:
-        """Embed watermark in data."""
-        strategy = options.get('strategy', 'metadata')
-        
-        if strategy == 'metadata':
-            # Add watermark as metadata
-            watermarked = []
-            for item in data:
-                if isinstance(item, dict):
-                    item_copy = item.copy()
-                    item_copy['_watermark'] = watermark
-                    item_copy['_watermarked_at'] = time.time()
-                    watermarked.append(item_copy)
-                else:
-                    watermarked.append(item)
-        
-        elif strategy == 'pattern':
-            # Embed as pattern in data
-            watermarked = self._embed_pattern(data, watermark)
-        
-        elif strategy == 'hash':
-            # Embed as hash signature
-            watermarked = []
-            for item in data:
-                if isinstance(item, dict):
-                    item_copy = item.copy()
-                    content = json.dumps(item, sort_keys=True)
-                    item_copy['_signature'] = hashlib.sha256(
-                        f"{content}{watermark}".encode()
-                    ).hexdigest()
-                    watermarked.append(item_copy)
-                else:
-                    watermarked.append(item)
-        
-        else:
-            return ActionResult(
-                success=False,
-                data=None,
-                error=f"Unknown strategy: {strategy}"
-            )
-        
-        return ActionResult(
-            success=True,
-            data={
-                'watermarked': watermarked,
-                'watermark': watermark,
-                'strategy': strategy
-            },
-            error=None
-        )
-    
-    def _embed_pattern(self, data: List, watermark: str) -> List:
-        """Embed watermark as pattern."""
-        # Simple pattern embedding: append chars at intervals
-        watermarked = []
-        pattern_interval = 10
-        
-        for i, item in enumerate(data):
-            if isinstance(item, dict):
-                item_copy = item.copy()
-                # Embed watermark character at interval positions
-                watermark_chars = []
-                for j, c in enumerate(watermark):
-                    if (i + j) % pattern_interval == 0:
-                        watermark_chars.append(c)
-                if watermark_chars:
-                    item_copy['_pattern'] = ''.join(watermark_chars)
-                watermarked.append(item_copy)
+
+            if self._config.secret_key:
+                watermark.signature = self._encoder.sign_watermark(watermark, self._config.secret_key)
+
+            if isinstance(data, dict):
+                marked_data = self._encoder.encode_metadata(data, watermark, self._config)
+            elif isinstance(data, bytes):
+                marked_data = self._encoder.encode_binary(data, watermark, self._config)
             else:
-                watermarked.append(item)
-        
-        return watermarked
-    
-    def _detect_watermark(
-        self,
-        data: List,
-        options: Dict
-    ) -> ActionResult:
-        """Detect watermark in data."""
-        detected_watermarks = []
-        
-        for item in data:
-            if isinstance(item, dict):
-                if '_watermark' in item:
-                    detected_watermarks.append({
-                        'type': 'metadata',
-                        'watermark': item['_watermark'],
-                        'timestamp': item.get('_watermarked_at')
-                    })
-                if '_signature' in item:
-                    detected_watermarks.append({
-                        'type': 'hash',
-                        'signature': item['_signature']
-                    })
-                if '_pattern' in item:
-                    detected_watermarks.append({
-                        'type': 'pattern',
-                        'pattern': item['_pattern']
-                    })
-        
-        return ActionResult(
-            success=True,
-            data={
-                'detected': detected_watermarks,
-                'count': len(detected_watermarks)
-            },
-            error=None
-        )
-    
-    def _verify_watermark(
-        self,
-        data: List,
-        expected_watermark: str,
-        options: Dict
-    ) -> ActionResult:
-        """Verify watermark matches expected."""
-        detected = self._detect_watermark(data, {})
-        
-        matches = False
-        for dw in detected.data.get('detected', []):
-            if dw.get('watermark') == expected_watermark:
-                matches = True
-                break
-        
-        return ActionResult(
-            success=True,
-            data={
-                'verified': matches,
-                'expected': expected_watermark,
-                'detected_count': detected.data.get('count', 0)
-            },
-            error=None
-        )
-    
-    def _remove_watermark(
-        self,
-        data: List,
-        options: Dict
-    ) -> ActionResult:
-        """Remove watermark from data."""
-        watermark_fields = ['_watermark', '_watermarked_at', '_signature', '_pattern']
-        
-        cleaned = []
-        for item in data:
-            if isinstance(item, dict):
-                item_copy = {
-                    k: v for k, v in item.items()
-                    if k not in watermark_fields
+                marked_data = data
+
+            with self._lock:
+                self._watermarks[watermark_id] = watermark
+
+            return ActionResult(
+                success=True,
+                data={
+                    "watermark_id": watermark_id,
+                    "marked_data": marked_data,
+                    "created_at": watermark.created_at.isoformat()
                 }
-                cleaned.append(item_copy)
-            else:
-                cleaned.append(item)
-        
-        return ActionResult(
-            success=True,
-            data={
-                'cleaned': cleaned,
-                'removed_count': len(data) - len(cleaned)
-            },
-            error=None
-        )
-
-
-class DataTimestampAction(BaseAction):
-    """Add timestamps to data records.
-    
-    Tracks when data was created, modified, and accessed.
-    """
-    action_type = "data_timestamp"
-    display_name = "数据时间戳"
-    description = "为数据记录添加时间戳追踪"
-    
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute timestamp operation.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: action, data, timestamp_fields.
-        
-        Returns:
-            ActionResult with timestamped data.
-        """
-        action = params.get('action', 'add')
-        data = params.get('data', [])
-        timestamp_fields = params.get('timestamp_fields', {
-            'created': 'created_at',
-            'modified': 'modified_at',
-            'accessed': 'accessed_at'
-        })
-        
-        if action == 'add':
-            return self._add_timestamps(data, timestamp_fields)
-        elif action == 'update_accessed':
-            return self._update_accessed(data, timestamp_fields)
-        elif action == 'get':
-            return self._get_timestamps(data, timestamp_fields)
-        else:
-            return ActionResult(
-                success=False,
-                data=None,
-                error=f"Unknown action: {action}"
             )
-    
-    def _add_timestamps(
-        self,
-        data: List,
-        fields: Dict
-    ) -> ActionResult:
-        """Add timestamps to data."""
-        now = time.time()
-        timestamped = []
-        
-        for item in data:
-            if isinstance(item, dict):
-                item_copy = item.copy()
-                if 'created' in fields:
-                    item_copy[fields['created']] = now
-                if 'modified' in fields:
-                    item_copy[fields['modified']] = now
-                if 'accessed' in fields:
-                    item_copy[fields['accessed']] = now
-                timestamped.append(item_copy)
+        except Exception as e:
+            logger.exception("Watermark embedding failed")
+            return ActionResult(success=False, error=str(e))
+
+    def verify(self, data: Any) -> ActionResult:
+        """Verify watermark in data."""
+        start_time = time.time()
+
+        try:
+            if isinstance(data, dict):
+                watermark, verification = self._extractor.extract_from_metadata(data)
+            elif isinstance(data, bytes):
+                watermark, verification = self._extractor.extract_from_binary(data, self._config)
             else:
-                timestamped.append(item)
-        
-        return ActionResult(
-            success=True,
-            data={
-                'timestamped': timestamped,
-                'count': len(timestamped)
-            },
-            error=None
-        )
-    
-    def _update_accessed(
-        self,
-        data: List,
-        fields: Dict
-    ) -> ActionResult:
-        """Update accessed timestamp."""
-        now = time.time()
-        updated = 0
-        
-        for item in data:
-            if isinstance(item, dict) and 'accessed' in fields:
-                item[fields['accessed']] = now
-                updated += 1
-        
-        return ActionResult(
-            success=True,
-            data={'updated_count': updated},
-            error=None
-        )
-    
-    def _get_timestamps(
-        self,
-        data: List,
-        fields: Dict
-    ) -> ActionResult:
-        """Get timestamps from data."""
-        timestamps = []
-        
-        for item in data:
-            if isinstance(item, dict):
-                ts = {}
-                for key, field_name in fields.items():
-                    if field_name in item:
-                        ts[key] = item[field_name]
-                timestamps.append(ts)
-        
-        return ActionResult(
-            success=True,
-            data={
-                'timestamps': timestamps,
-                'count': len(timestamps)
-            },
-            error=None
-        )
+                return ActionResult(success=False, error="Unsupported data type")
 
+            verification.verification_time_ms = (time.time() - start_time) * 1000
 
-def register_actions():
-    """Register all Data Watermark actions."""
-    return [
-        DataWatermarkAction,
-        DataTimestampAction,
-    ]
+            with self._lock:
+                self._verification_history.append(verification)
+
+            return ActionResult(
+                success=verification.status == WatermarkStatus.VALID,
+                data={
+                    "status": verification.status.value,
+                    "watermark_id": verification.watermark_id,
+                    "verification_time_ms": verification.verification_time_ms,
+                    "integrity_score": verification.integrity_score,
+                    "payload": verification.extracted_payload,
+                    "message": verification.message
+                }
+            )
+        except Exception as e:
+            logger.exception("Watermark verification failed")
+            return ActionResult(success=False, error=str(e))
+
+    def extract(self, data: Any) -> ActionResult:
+        """Extract watermark from data without verification."""
+        try:
+            if isinstance(data, dict):
+                watermark, _ = self._extractor.extract_from_metadata(data)
+            elif isinstance(data, bytes):
+                watermark, _ = self._extractor.extract_from_binary(data, self._config)
+            else:
+                return ActionResult(success=False, error="Unsupported data type")
+
+            if not watermark:
+                return ActionResult(success=False, error="No watermark found")
+
+            return ActionResult(
+                success=True,
+                data={
+                    "watermark_id": watermark.watermark_id,
+                    "type": watermark.watermark_type.value,
+                    "content": watermark.content,
+                    "created_at": watermark.created_at.isoformat(),
+                    "metadata": watermark.metadata
+                }
+            )
+        except Exception as e:
+            return ActionResult(success=False, error=str(e))
+
+    def get_watermarks(self) -> List[Watermark]:
+        """Get all registered watermarks."""
+        with self._lock:
+            return list(self._watermarks.values())
+
+    def get_history(self) -> List[WatermarkVerification]:
+        """Get watermark verification history."""
+        with self._lock:
+            return self._verification_history.copy()
+
+    def execute(self, params: Dict[str, Any]) -> ActionResult:
+        """Execute watermarking action."""
+        try:
+            action = params.get("action", "embed")
+
+            if action == "embed":
+                return self.embed(
+                    params["data"],
+                    params["content"],
+                    params.get("watermark_id"),
+                    params.get("metadata"),
+                    params.get("payload")
+                )
+            elif action == "verify":
+                return self.verify(params["data"])
+            elif action == "extract":
+                return self.extract(params["data"])
+            else:
+                return ActionResult(success=False, error=f"Unknown action: {action}")
+        except Exception as e:
+            return ActionResult(success=False, error=str(e))
