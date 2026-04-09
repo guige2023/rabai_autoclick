@@ -1,346 +1,370 @@
-"""Automation Pipeline Action Module.
-
-Provides pipeline orchestration: step execution, dependency management,
-parallel execution, error handling, and pipeline state tracking.
-
-Example:
-    result = execute(context, {"action": "create_pipeline", "steps": [...]})
 """
-from typing import Any, Optional
+Automation Pipeline Orchestration Module.
+
+Provides configurable pipeline execution with stages, branching,
+error handling, and retry capabilities for complex automation workflows.
+"""
+
+from typing import (
+    Dict, List, Optional, Any, Callable, Set, TypeVar,
+    Generic, Union, Protocol
+)
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, auto
 from datetime import datetime
+import logging
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+R = TypeVar("R")
 
 
-class StepStatus(Enum):
-    """Pipeline step execution status."""
-    PENDING = "pending"
-    RUNNING = "running"
-    SUCCESS = "success"
-    FAILED = "failed"
-    SKIPPED = "skipped"
-    RETRYING = "retrying"
+class PipelineStatus(Enum):
+    """Pipeline execution status."""
+    PENDING = auto()
+    RUNNING = auto()
+    COMPLETED = auto()
+    FAILED = auto()
+    CANCELLED = auto()
+    PAUSED = auto()
 
 
-class StepType(Enum):
-    """Pipeline step types."""
-    ACTION = "action"
-    CONDITION = "condition"
-    PARALLEL = "parallel"
-    LOOP = "loop"
-    WAIT = "wait"
-    NOTIFY = "notify"
-
-
-@dataclass
-class PipelineStep:
-    """A single step in a pipeline."""
-    
-    id: str
-    name: str
-    step_type: StepType = StepType.ACTION
-    action: Optional[str] = None
-    params: dict[str, Any] = field(default_factory=dict)
-    depends_on: list[str] = field(default_factory=list)
-    retry_count: int = 0
-    retry_delay: float = 1.0
-    timeout: float = 60.0
-    condition: Optional[str] = None
-    
-    def __post_init__(self) -> None:
-        """Convert string step_type to enum."""
-        if isinstance(self.step_type, str):
-            self.step_type = StepType(self.step_type)
+class StageStatus(Enum):
+    """Individual stage execution status."""
+    SKIPPED = auto()
+    PENDING = auto()
+    RUNNING = auto()
+    COMPLETED = auto()
+    FAILED = auto()
+    RETRYING = auto()
 
 
 @dataclass
-class StepResult:
-    """Result of a step execution."""
-    
-    step_id: str
-    status: StepStatus
-    start_time: datetime
-    end_time: Optional[datetime] = None
+class StageResult:
+    """Result of a pipeline stage execution."""
+    stage_name: str
+    status: StageStatus
     output: Any = None
     error: Optional[str] = None
-    retry_attempt: int = 0
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    retry_count: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
     
     @property
-    def duration_ms(self) -> float:
-        """Get execution duration in milliseconds."""
-        if self.end_time is None:
-            return 0.0
-        return (self.end_time - self.start_time).total_seconds() * 1000
+    def duration_ms(self) -> Optional[float]:
+        """Calculate execution duration in milliseconds."""
+        if self.start_time and self.end_time:
+            return (self.end_time - self.start_time).total_seconds() * 1000
+        return None
 
 
-class Pipeline:
-    """Pipeline executor with dependency management."""
+@dataclass
+class PipelineContext:
+    """Shared context passed through pipeline stages."""
+    data: Dict[str, Any] = field(default_factory=dict)
+    results: Dict[str, StageResult] = field(default_factory=dict)
+    errors: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
     
-    def __init__(self, name: str) -> None:
-        """Initialize pipeline.
-        
-        Args:
-            name: Pipeline name
-        """
+    def get_previous_result(self, stage_name: str) -> Optional[StageResult]:
+        """Get result from a previous stage."""
+        return self.results.get(stage_name)
+    
+    def get_output(self, stage_name: str) -> Any:
+        """Get output from a previous stage."""
+        result = self.results.get(stage_name)
+        return result.output if result else None
+
+
+StageFunction = Callable[[PipelineContext], Any]
+ConditionFunction = Callable[[PipelineContext], bool]
+
+
+class PipelineStage:
+    """Represents a single stage in the automation pipeline."""
+    
+    def __init__(
+        self,
+        name: str,
+        func: StageFunction,
+        retry_count: int = 0,
+        retry_delay: float = 1.0,
+        continue_on_error: bool = False,
+        condition: Optional[ConditionFunction] = None,
+        timeout: Optional[float] = None
+    ) -> None:
         self.name = name
-        self.steps: list[PipelineStep] = []
-        self._results: dict[str, StepResult] = {}
+        self.func = func
+        self.retry_count = retry_count
+        self.retry_delay = retry_delay
+        self.continue_on_error = continue_on_error
+        self.condition = condition
+        self.timeout = timeout
+
+
+class AutomationPipeline:
+    """
+    Configurable automation pipeline orchestrator.
     
-    def add_step(self, step: PipelineStep) -> None:
-        """Add step to pipeline.
+    Supports sequential and parallel execution, branching,
+    error handling, and retry logic.
+    """
+    
+    def __init__(
+        self,
+        name: str,
+        description: Optional[str] = None
+    ) -> None:
+        self.name = name
+        self.description = description
+        self.stages: List[PipelineStage] = []
+        self.branches: Dict[str, List[str]] = {}
+        self._status = PipelineStatus.PENDING
+    
+    def add_stage(
+        self,
+        name: str,
+        func: StageFunction,
+        retry_count: int = 0,
+        retry_delay: float = 1.0,
+        continue_on_error: bool = False,
+        condition: Optional[ConditionFunction] = None,
+        timeout: Optional[float] = None
+    ) -> "AutomationPipeline":
+        """
+        Add a stage to the pipeline.
         
         Args:
-            step: Step to add
-        """
-        self.steps.append(step)
-    
-    def get_execution_order(self) -> list[str]:
-        """Get steps in execution order (topological sort).
-        
-        Returns:
-            List of step IDs in execution order
-        """
-        visited: set[str] = set()
-        order: list[str] = []
-        
-        def visit(step_id: str) -> None:
-            if step_id in visited:
-                return
-            visited.add(step_id)
+            name: Stage name
+            func: Stage execution function
+            retry_count: Number of retries on failure
+            retry_delay: Delay between retries in seconds
+            continue_on_error: Whether to continue pipeline on stage failure
+            condition: Optional condition for stage execution
+            timeout: Optional stage timeout in seconds
             
-            for step in self.steps:
-                if step.id == step_id:
-                    for dep in step.depends_on:
-                        visit(dep)
-                    order.append(step_id)
-                    break
-        
-        for step in self.steps:
-            visit(step.id)
-        
-        return order
-    
-    def can_execute(self, step: PipelineStep) -> bool:
-        """Check if step can be executed (dependencies complete).
-        
-        Args:
-            step: Step to check
-            
         Returns:
-            True if all dependencies succeeded
+            Self for method chaining
         """
-        for dep_id in step.depends_on:
-            dep_result = self._results.get(dep_id)
-            if dep_result is None or dep_result.status != StepStatus.SUCCESS:
-                return False
-        return True
-    
-    def record_result(self, result: StepResult) -> None:
-        """Record step execution result.
-        
-        Args:
-            result: Step execution result
-        """
-        self._results[result.step_id] = result
-    
-    def get_status(self) -> dict[str, Any]:
-        """Get pipeline status."""
-        completed = sum(
-            1 for r in self._results.values()
-            if r.status in (StepStatus.SUCCESS, StepStatus.FAILED, StepStatus.SKIPPED)
+        stage = PipelineStage(
+            name=name,
+            func=func,
+            retry_count=retry_count,
+            retry_delay=retry_delay,
+            continue_on_error=continue_on_error,
+            condition=condition,
+            timeout=timeout
         )
+        self.stages.append(stage)
+        return self
+    
+    def add_branch(
+        self,
+        branch_name: str,
+        stages: List[str]
+    ) -> "AutomationPipeline":
+        """
+        Add a named branch with stage references.
         
+        Args:
+            branch_name: Name of the branch
+            stages: List of stage names in this branch
+            
+        Returns:
+            Self for method chaining
+        """
+        self.branches[branch_name] = stages
+        return self
+    
+    async def execute_async(
+        self,
+        initial_context: Optional[PipelineContext] = None
+    ) -> PipelineContext:
+        """
+        Execute pipeline asynchronously.
+        
+        Args:
+            initial_context: Optional initial context
+            
+        Returns:
+            Final pipeline context with all results
+        """
+        context = initial_context or PipelineContext()
+        self._status = PipelineStatus.RUNNING
+        
+        for stage in self.stages:
+            result = await self._execute_stage_async(stage, context)
+            context.results[stage.name] = result
+            
+            if result.status == StageStatus.FAILED and not stage.continue_on_error:
+                self._status = PipelineStatus.FAILED
+                context.errors.append(
+                    f"Stage '{stage.name}' failed: {result.error}"
+                )
+                break
+        
+        if self._status == PipelineStatus.RUNNING:
+            self._status = PipelineStatus.COMPLETED
+        
+        return context
+    
+    async def _execute_stage_async(
+        self,
+        stage: PipelineStage,
+        context: PipelineContext
+    ) -> StageResult:
+        """Execute a single stage with retries."""
+        if stage.condition and not stage.condition(context):
+            return StageResult(stage.name, StageStatus.SKIPPED)
+        
+        result = StageResult(stage.name, StageStatus.RUNNING)
+        result.start_time = datetime.now()
+        
+        for attempt in range(stage.retry_count + 1):
+            try:
+                if asyncio.iscoroutinefunction(stage.func):
+                    output = await asyncio.wait_for(
+                        stage.func(context),
+                        timeout=stage.timeout
+                    )
+                else:
+                    output = stage.func(context)
+                
+                result.status = StageStatus.COMPLETED
+                result.output = output
+                result.retry_count = attempt
+                break
+            
+            except Exception as e:
+                logger.warning(
+                    f"Stage '{stage.name}' attempt {attempt + 1} failed: {e}"
+                )
+                if attempt < stage.retry_count:
+                    result.status = StageStatus.RETRYING
+                    await asyncio.sleep(stage.retry_delay)
+                else:
+                    result.status = StageStatus.FAILED
+                    result.error = str(e)
+        
+        result.end_time = datetime.now()
+        return result
+    
+    def execute(
+        self,
+        initial_context: Optional[PipelineContext] = None
+    ) -> PipelineContext:
+        """
+        Execute pipeline synchronously.
+        
+        Args:
+            initial_context: Optional initial context
+            
+        Returns:
+            Final pipeline context
+        """
+        return asyncio.run(self.execute_async(initial_context))
+    
+    def execute_parallel(
+        self,
+        stage_groups: List[List[str]],
+        initial_context: Optional[PipelineContext] = None
+    ) -> PipelineContext:
+        """
+        Execute multiple stage groups in parallel.
+        
+        Args:
+            stage_groups: List of stage name groups to run in parallel
+            initial_context: Optional initial context
+            
+        Returns:
+            Combined pipeline context
+        """
+        context = initial_context or PipelineContext()
+        
+        def run_group(group: List[str]) -> Dict[str, StageResult]:
+            results = {}
+            for stage_name in group:
+                stage = next(s for s in self.stages if s.name == stage_name)
+                results[stage_name] = StageResult(
+                    stage_name, StageStatus.COMPLETED, output=stage.func(context)
+                )
+            return results
+        
+        with ThreadPoolExecutor() as executor:
+            futures = [executor.submit(run_group, g) for g in stage_groups]
+            for future in futures:
+                context.results.update(future.result())
+        
+        return context
+    
+    @property
+    def status(self) -> PipelineStatus:
+        """Get current pipeline status."""
+        return self._status
+    
+    def get_summary(self) -> Dict[str, Any]:
+        """Get pipeline execution summary."""
         return {
             "name": self.name,
-            "total_steps": len(self.steps),
-            "completed_steps": completed,
-            "pending_steps": len(self.steps) - completed,
-            "results": {
-                step_id: {
-                    "status": result.status.value,
-                    "duration_ms": result.duration_ms,
-                    "error": result.error,
-                }
-                for step_id, result in self._results.items()
-            },
+            "status": self._status.name,
+            "total_stages": len(self.stages),
+            "stages": [
+                {"name": s.name, "retry_count": s.retry_count}
+                for s in self.stages
+            ]
         }
 
 
-class ParallelExecutor:
-    """Executes multiple steps in parallel."""
+class PipelineBuilder:
+    """Builder for constructing complex pipelines."""
     
-    def __init__(self, max_workers: int = 4) -> None:
-        """Initialize parallel executor.
-        
-        Args:
-            max_workers: Maximum concurrent executions
-        """
-        self.max_workers = max_workers
-        self._running: set[str] = set()
-        self._completed: dict[str, StepResult] = {}
+    def __init__(self, name: str) -> None:
+        self.pipeline = AutomationPipeline(name)
     
-    def start_step(self, step_id: str) -> bool:
-        """Start a step.
-        
-        Args:
-            step_id: Step to start
-            
-        Returns:
-            True if started, False if at capacity
-        """
-        if len(self._running) >= self.max_workers:
-            return False
-        
-        self._running.add(step_id)
-        return True
-    
-    def complete_step(self, step_id: str, result: StepResult) -> None:
-        """Mark step as complete.
-        
-        Args:
-            step_id: Completed step
-            result: Execution result
-        """
-        self._running.discard(step_id)
-        self._completed[step_id] = result
-    
-    def is_complete(self) -> bool:
-        """Check if all steps complete."""
-        return len(self._running) == 0 and len(self._completed) > 0
-    
-    def get_status(self) -> dict[str, Any]:
-        """Get executor status."""
-        return {
-            "running": len(self._running),
-            "completed": len(self._completed),
-            "max_workers": self.max_workers,
-        }
-
-
-class ErrorHandler:
-    """Handles errors in pipeline execution."""
-    
-    def __init__(self, continue_on_error: bool = False) -> None:
-        """Initialize error handler.
-        
-        Args:
-            continue_on_error: Whether to continue pipeline on error
-        """
-        self.continue_on_error = continue_on_error
-        self._errors: list[dict[str, Any]] = []
-    
-    def handle_error(
+    def stage(
         self,
-        step_id: str,
-        error: Exception,
-        context: dict[str, Any],
-    ) -> StepStatus:
-        """Handle step execution error.
-        
-        Args:
-            step_id: Failed step
-            error: Exception that occurred
-            context: Execution context
-            
-        Returns:
-            StepStatus determining next action
-        """
-        self._errors.append({
-            "step_id": step_id,
-            "error": str(error),
-            "error_type": type(error).__name__,
-            "timestamp": datetime.now().isoformat(),
-            "context": context,
-        })
-        
-        if self.continue_on_error:
-            return StepStatus.SKIPPED
-        
-        return StepStatus.FAILED
+        name: str,
+        retry_count: int = 0,
+        continue_on_error: bool = False
+    ) -> "PipelineBuilder":
+        """Add a basic stage."""
+        def dummy_func(ctx: PipelineContext) -> Any:
+            return None
+        self.pipeline.add_stage(name, dummy_func, retry_count, continue_on_error=continue_on_error)
+        return self
     
-    def get_errors(self) -> list[dict[str, Any]]:
-        """Get all recorded errors."""
-        return self._errors.copy()
-    
-    def clear_errors(self) -> None:
-        """Clear error history."""
-        self._errors.clear()
+    def build(self) -> AutomationPipeline:
+        """Build the pipeline."""
+        return self.pipeline
 
 
-def execute(context: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
-    """Execute automation pipeline action.
+# Entry point for direct execution
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     
-    Args:
-        context: Execution context
-        params: Parameters including action type
-        
-    Returns:
-        Result dictionary with status and data
-    """
-    action = params.get("action", "status")
-    result: dict[str, Any] = {"status": "success"}
+    def stage1(ctx: PipelineContext) -> str:
+        ctx.data["stage1"] = "completed"
+        return "stage1_output"
     
-    if action == "create_pipeline":
-        pipeline = Pipeline(name=params.get("name", "pipeline"))
-        result["data"] = {"pipeline_name": pipeline.name}
+    def stage2(ctx: PipelineContext) -> str:
+        return f"stage2_output: {ctx.data.get('stage1', 'none')}"
     
-    elif action == "add_step":
-        step = PipelineStep(
-            id=params.get("id", ""),
-            name=params.get("name", ""),
-            step_type=params.get("step_type", StepType.ACTION),
-            action=params.get("action"),
-            params=params.get("params", {}),
-            depends_on=params.get("depends_on", []),
-        )
-        result["data"] = {
-            "step_id": step.id,
-            "step_type": step.step_type.value,
-        }
+    def conditional_stage(ctx: PipelineContext) -> str:
+        if ctx.data.get("skip_conditional"):
+            return "skipped"
+        return "executed"
     
-    elif action == "execution_order":
-        pipeline = Pipeline(name="temp")
-        step_ids = params.get("step_ids", [])
-        for sid in step_ids:
-            pipeline.add_step(PipelineStep(id=sid, name=sid))
-        order = pipeline.get_execution_order()
-        result["data"] = {"order": order}
+    pipeline = (
+        AutomationPipeline("ExamplePipeline")
+        .add_stage("init", lambda c: c.data.update({"initialized": True}))
+        .add_stage("process", stage1)
+        .add_stage("finalize", stage2)
+        .add_stage("conditional", conditional_stage, condition=lambda c: True)
+    )
     
-    elif action == "parallel_status":
-        executor = ParallelExecutor(max_workers=params.get("max_workers", 4))
-        result["data"] = executor.get_status()
-    
-    elif action == "handle_error":
-        handler = ErrorHandler(continue_on_error=params.get("continue_on_error", False))
-        status = handler.handle_error(
-            params.get("step_id", ""),
-            ValueError(params.get("error", "Unknown")),
-            context,
-        )
-        result["data"] = {"status": status.value}
-    
-    elif action == "get_errors":
-        handler = ErrorHandler()
-        result["data"] = {"errors": handler.get_errors()}
-    
-    elif action == "step_status":
-        step_result = StepResult(
-            step_id=params.get("step_id", ""),
-            status=StepStatus(params.get("status", "pending")),
-            start_time=datetime.now(),
-            end_time=datetime.now(),
-        )
-        result["data"] = {
-            "step_id": step_result.step_id,
-            "duration_ms": step_result.duration_ms,
-        }
-    
-    elif action == "pipeline_status":
-        pipeline = Pipeline(name=params.get("name", "pipeline"))
-        result["data"] = pipeline.get_status()
-    
-    else:
-        result["status"] = "error"
-        result["error"] = f"Unknown action: {action}"
-    
-    return result
+    result = pipeline.execute()
+    print(f"Pipeline status: {result.results['init'].status.name}")

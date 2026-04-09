@@ -1,35 +1,33 @@
-"""Data Profiler Action Module.
+"""
+Data Profiling and Quality Assessment Module.
 
-Profiles data sets with:
-- Statistical analysis
-- Schema inference
-- Data quality assessment
-- Pattern detection
-- Distribution analysis
-
-Author: rabai_autoclick team
+Provides comprehensive data analysis including statistical summaries,
+distribution analysis, quality scoring, and anomaly detection for
+dataset assessment and monitoring.
 """
 
-from __future__ import annotations
-
-import asyncio
-import logging
-import math
-import re
-from collections import Counter, defaultdict
+from typing import (
+    Dict, List, Optional, Any, Tuple, Set, Callable,
+    Union, Sequence, TypeVar
+)
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum, auto
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+import statistics
+import math
+from collections import Counter, defaultdict
+from datetime import datetime
+import logging
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar("T", int, float, str)
+
 
 class DataType(Enum):
-    """Inferred data types."""
-    STRING = auto()
+    """Detected data types."""
     INTEGER = auto()
     FLOAT = auto()
+    STRING = auto()
     BOOLEAN = auto()
     DATETIME = auto()
     NULL = auto()
@@ -38,230 +36,187 @@ class DataType(Enum):
 
 
 @dataclass
-class FieldProfile:
-    """Profile for a single field."""
+class ColumnProfile:
+    """Statistical profile for a single column."""
     name: str
     data_type: DataType
-    total_count: int = 0
-    null_count: int = 0
-    unique_count: int = 0
+    total_count: int
+    null_count: int
+    unique_count: int
+    null_ratio: float
+    unique_ratio: float
     
-    min_value: Optional[Any] = None
-    max_value: Optional[Any] = None
-    mean_value: Optional[float] = None
-    median_value: Optional[Any] = None
+    # Numeric stats
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    mean: Optional[float] = None
+    median: Optional[float] = None
+    std_dev: Optional[float] = None
+    q1: Optional[float] = None
+    q3: Optional[float] = None
+    iqr: Optional[float] = None
     
+    # String stats
     min_length: Optional[int] = None
     max_length: Optional[int] = None
     avg_length: Optional[float] = None
-    
-    patterns: List[Tuple[str, int]] = field(default_factory=list)
     top_values: List[Tuple[Any, int]] = field(default_factory=list)
     
-    numeric_stats: Optional[Dict[str, float]] = None
-    datetime_range: Optional[Tuple[str, str]] = None
+    # Distribution
+    histogram: Dict[str, int] = field(default_factory=dict)
+    is_skewed: bool = False
+    has_outliers: bool = False
+    outlier_count: int = 0
 
 
 @dataclass
-class DatasetProfile:
-    """Complete dataset profile."""
-    dataset_name: str
-    total_records: int = 0
-    total_fields: int = 0
-    field_profiles: Dict[str, FieldProfile] = field(default_factory=dict)
-    data_types: Dict[str, int] = field(default_factory=dict)
-    quality_score: float = 0.0
-    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    metadata: Dict[str, Any] = field(default_factory=dict)
+class DataQualityScore:
+    """Overall data quality score."""
+    completeness: float  # 0-1 based on null ratio
+    consistency: float  # 0-1 based on type consistency
+    validity: float  # 0-1 based on value ranges
+    overall: float  # Weighted average
+    issues: List[str] = field(default_factory=list)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "completeness": round(self.completeness, 3),
+            "consistency": round(self.consistency, 3),
+            "validity": round(self.validity, 3),
+            "overall": round(self.overall, 3),
+            "issues": self.issues
+        }
 
 
 class DataProfiler:
-    """Profiles datasets to understand structure and content.
+    """
+    Comprehensive data profiling and quality assessment.
     
-    Features:
-    - Automatic type inference
-    - Statistical analysis
-    - Pattern detection
-    - Data quality scoring
-    - Schema extraction
+    Analyzes datasets to provide statistical summaries,
+    distribution metrics, and quality scores.
     """
     
-    def __init__(self, dataset_name: str = "default"):
-        self.dataset_name = dataset_name
-        self._patterns_cache: Dict[str, List[str]] = {}
+    def __init__(self) -> None:
+        self.column_profiles: Dict[str, ColumnProfile] = {}
+        self.quality_score: Optional[DataQualityScore] = None
+        self._null_values: Set[Any] = {None, "", "NA", "N/A", "null", "NULL", "None", "nan", "NaN"}
     
-    async def profile(
+    def profile_dataframe(
         self,
-        records: List[Dict[str, Any]],
-        sample_size: Optional[int] = None,
-        infer_types: bool = True
-    ) -> DatasetProfile:
-        """Profile a dataset.
+        data: List[Dict[str, Any]],
+        sample_size: Optional[int] = None
+    ) -> Dict[str, ColumnProfile]:
+        """
+        Profile a list of records (DataFrame-like).
         
         Args:
-            records: List of records to profile
+            data: List of dictionaries representing rows
             sample_size: Optional sample size for large datasets
-            infer_types: Whether to infer data types
             
         Returns:
-            Dataset profile
+            Dictionary mapping column names to their profiles
         """
-        if not records:
-            return DatasetProfile(dataset_name=self.dataset_name)
+        if not data:
+            return {}
         
-        if sample_size and len(records) > sample_size:
+        if sample_size and len(data) > sample_size:
             import random
-            records = random.sample(records, sample_size)
+            data = random.sample(data, sample_size)
         
-        total_records = len(records)
+        # Get all column names
+        columns = set()
+        for row in data:
+            columns.update(row.keys())
         
-        all_fields = set()
-        for record in records:
-            all_fields.update(record.keys())
+        self.column_profiles = {}
         
-        field_profiles: Dict[str, FieldProfile] = {}
-        data_types: Dict[str, int] = defaultdict(int)
+        for col in columns:
+            values = [row.get(col) for row in data if col in row]
+            self.column_profiles[col] = self._profile_column(col, values)
         
-        for field_name in all_fields:
-            values = [record.get(field_name) for record in records]
-            profile = await self._profile_field(field_name, values, infer_types)
-            field_profiles[field_name] = profile
-            data_types[profile.data_type.name] += 1
+        self.quality_score = self._calculate_quality_score()
         
-        quality_score = self._calculate_quality_score(field_profiles, total_records)
-        
-        return DatasetProfile(
-            dataset_name=self.dataset_name,
-            total_records=total_records,
-            total_fields=len(all_fields),
-            field_profiles=field_profiles,
-            data_types=dict(data_types),
-            quality_score=quality_score
-        )
+        return self.column_profiles
     
-    async def _profile_field(
+    def _profile_column(
         self,
-        field_name: str,
-        values: List[Any],
-        infer_types: bool
-    ) -> FieldProfile:
-        """Profile a single field.
+        name: str,
+        values: List[Any]
+    ) -> ColumnProfile:
+        """Profile a single column."""
+        total = len(values)
+        non_null = [v for v in values if v not in self._null_values]
         
-        Args:
-            field_name: Name of the field
-            values: List of values
-            infer_types: Whether to infer type
-            
-        Returns:
-            Field profile
-        """
-        non_null_values = [v for v in values if v is not None]
-        null_count = len(values) - len(non_null_values)
+        detected_type = self._detect_type(non_null)
         
-        data_type = DataType.UNKNOWN
-        if infer_types and non_null_values:
-            data_type = self._infer_type(non_null_values)
-        
-        profile = FieldProfile(
-            name=field_name,
-            data_type=data_type,
-            total_count=len(values),
-            null_count=null_count,
-            unique_count=len(set(str(v) for v in non_null_values))
+        profile = ColumnProfile(
+            name=name,
+            data_type=detected_type,
+            total_count=total,
+            null_count=total - len(non_null),
+            unique_count=len(set(non_null)),
+            null_ratio=(total - len(non_null)) / total if total > 0 else 0,
+            unique_ratio=len(set(non_null)) / len(non_null) if non_null else 0
         )
         
-        if non_null_values:
-            if data_type in (DataType.INTEGER, DataType.FLOAT):
-                numeric_stats = self._calculate_numeric_stats(non_null_values)
-                profile.numeric_stats = numeric_stats
-                profile.min_value = numeric_stats.get("min")
-                profile.max_value = numeric_stats.get("max")
-                profile.mean_value = numeric_stats.get("mean")
-                profile.median_value = numeric_stats.get("median")
-            
-            if data_type == DataType.STRING:
-                lengths = [len(str(v)) for v in non_null_values]
-                profile.min_length = min(lengths)
-                profile.max_length = max(lengths)
-                profile.avg_length = sum(lengths) / len(lengths)
-            
-            profile.top_values = Counter(non_null_values).most_common(10)
-            
-            if data_type == DataType.STRING:
-                profile.patterns = self._detect_patterns(non_null_values)
-            
-            if data_type == DataType.DATETIME:
-                try:
-                    dates = [datetime.fromisoformat(str(v)) for v in non_null_values]
-                    dates.sort(key=lambda d: d.timestamp())
-                    profile.datetime_range = (
-                        dates[0].isoformat(),
-                        dates[-1].isoformat()
-                    )
-                except Exception:
-                    pass
+        if detected_type in [DataType.INTEGER, DataType.FLOAT]:
+            self._profile_numeric(profile, non_null)
+        elif detected_type == DataType.STRING:
+            self._profile_string(profile, non_null)
+        
+        self._detect_outliers(profile, non_null)
+        self._generate_histogram(profile, non_null)
         
         return profile
     
-    def _infer_type(self, values: List[Any]) -> DataType:
-        """Infer data type from values."""
+    def _detect_type(self, values: List[Any]) -> DataType:
+        """Detect the data type of values."""
         if not values:
             return DataType.NULL
         
-        type_counts = Counter()
+        types_present = set()
+        for v in values[:100]:  # Sample for efficiency
+            if isinstance(v, bool) or str(v).lower() in ("true", "false"):
+                types_present.add(DataType.BOOLEAN)
+            elif isinstance(v, int) or (isinstance(v, str) and self._is_integer(v)):
+                types_present.add(DataType.INTEGER)
+            elif isinstance(v, float) or (isinstance(v, str) and self._is_float(v)):
+                types_present.add(DataType.FLOAT)
+            elif isinstance(v, str):
+                types_present.add(DataType.STRING)
         
-        for value in values:
-            if value is None:
-                type_counts[DataType.NULL] += 1
-            elif isinstance(value, bool):
-                type_counts[DataType.BOOLEAN] += 1
-            elif isinstance(value, int):
-                type_counts[DataType.INTEGER] += 1
-            elif isinstance(value, float):
-                type_counts[DataType.FLOAT] += 1
-            elif isinstance(value, str):
-                if self._looks_like_datetime(value):
-                    type_counts[DataType.DATETIME] += 1
-                elif value.lower() in ("true", "false", "yes", "no"):
-                    type_counts[DataType.BOOLEAN] += 1
-                elif self._looks_like_number(value):
-                    type_counts[DataType.FLOAT if "." in value else DataType.INTEGER] += 1
-                else:
-                    type_counts[DataType.STRING] += 1
-            else:
-                type_counts[DataType.UNKNOWN] += 1
+        if len(types_present) > 1:
+            return DataType.MIXED
+        elif DataType.BOOLEAN in types_present:
+            return DataType.BOOLEAN
+        elif DataType.FLOAT in types_present:
+            return DataType.FLOAT
+        elif DataType.INTEGER in types_present:
+            return DataType.INTEGER
+        elif DataType.STRING in types_present:
+            return DataType.STRING
         
-        if len(type_counts) == 1:
-            return list(type_counts.keys())[0]
-        
-        most_common = type_counts.most_common(1)[0][0]
-        
-        if most_common == DataType.NULL and len(type_counts) > 1:
-            for dtype, count in type_counts.most_common():
-                if dtype != DataType.NULL:
-                    most_common = dtype
-                    break
-        
-        return most_common
+        return DataType.UNKNOWN
     
-    def _looks_like_datetime(self, value: str) -> bool:
-        """Check if string looks like a datetime."""
-        datetime_patterns = [
-            r"\d{4}-\d{2}-\d{2}",
-            r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}",
-            r"\d{2}/\d{2}/\d{4}",
-        ]
-        return any(re.match(p, str(value)) for p in datetime_patterns)
-    
-    def _looks_like_number(self, value: str) -> bool:
-        """Check if string looks like a number."""
+    def _is_integer(self, val: str) -> bool:
         try:
-            float(value)
+            int(val)
             return True
-        except ValueError:
+        except (ValueError, TypeError):
             return False
     
-    def _calculate_numeric_stats(self, values: List[Any]) -> Dict[str, float]:
+    def _is_float(self, val: str) -> bool:
+        try:
+            float(val)
+            return "." in str(val)
+        except (ValueError, TypeError):
+            return False
+    
+    def _profile_numeric(
+        self,
+        profile: ColumnProfile,
+        values: List[Any]
+    ) -> None:
         """Calculate numeric statistics."""
         numeric_values = []
         for v in values:
@@ -271,118 +226,199 @@ class DataProfiler:
                 continue
         
         if not numeric_values:
-            return {}
+            return
         
-        sorted_values = sorted(numeric_values)
-        n = len(sorted_values)
+        numeric_values.sort()
+        n = len(numeric_values)
         
-        mean = sum(sorted_values) / n
+        profile.min_value = numeric_values[0]
+        profile.max_value = numeric_values[-1]
+        profile.mean = statistics.mean(numeric_values)
+        profile.median = statistics.median(numeric_values)
         
-        variance = sum((x - mean) ** 2 for x in sorted_values) / n
-        std_dev = math.sqrt(variance)
+        if n > 1:
+            profile.std_dev = statistics.stdev(numeric_values)
         
-        median = sorted_values[n // 2] if n % 2 == 1 else (sorted_values[n // 2 - 1] + sorted_values[n // 2]) / 2
-        
+        # Quartiles
         q1_idx = n // 4
         q3_idx = 3 * n // 4
-        q1 = sorted_values[q1_idx]
-        q3 = sorted_values[q3_idx]
+        profile.q1 = numeric_values[q1_idx]
+        profile.q3 = numeric_values[q3_idx]
+        profile.iqr = profile.q3 - profile.q1 if profile.q1 and profile.q3 else None
         
-        return {
-            "min": min(sorted_values),
-            "max": max(sorted_values),
-            "mean": mean,
-            "median": median,
-            "std_dev": std_dev,
-            "variance": variance,
-            "q1": q1,
-            "q3": q3,
-            "iqr": q3 - q1
-        }
+        # Top values
+        counter = Counter(numeric_values)
+        profile.top_values = counter.most_common(5)
     
-    def _detect_patterns(self, values: List[str]) -> List[Tuple[str, int]]:
-        """Detect common patterns in string values."""
-        patterns = Counter()
-        
-        for value in values[:1000]:
-            pattern = self._string_to_pattern(str(value))
-            patterns[pattern] += 1
-        
-        return patterns.most_common(10)
-    
-    def _string_to_pattern(self, value: str) -> str:
-        """Convert string to pattern representation."""
-        pattern = []
-        for char in value:
-            if char.isdigit():
-                pattern.append("d")
-            elif char.isalpha():
-                pattern.append("a")
-            elif char.isspace():
-                pattern.append("s")
-            else:
-                pattern.append(char)
-        return "".join(pattern)
-    
-    def _calculate_quality_score(
+    def _profile_string(
         self,
-        field_profiles: Dict[str, FieldProfile],
-        total_records: int
-    ) -> float:
+        profile: ColumnProfile,
+        values: List[Any]
+    ) -> None:
+        """Calculate string statistics."""
+        str_values = [str(v) for v in values]
+        lengths = [len(s) for s in str_values]
+        
+        if lengths:
+            profile.min_length = min(lengths)
+            profile.max_length = max(lengths)
+            profile.avg_length = statistics.mean(lengths)
+        
+        # Top values
+        counter = Counter(str_values)
+        profile.top_values = counter.most_common(5)
+    
+    def _detect_outliers(
+        self,
+        profile: ColumnProfile,
+        values: List[Any]
+    ) -> None:
+        """Detect outliers using IQR method."""
+        if profile.iqr is None or profile.q1 is None or profile.q3 is None:
+            return
+        
+        lower_bound = profile.q1 - 1.5 * profile.iqr
+        upper_bound = profile.q3 + 1.5 * profile.iqr
+        
+        numeric_values = []
+        for v in values:
+            try:
+                numeric_values.append(float(v))
+            except (ValueError, TypeError):
+                continue
+        
+        outliers = [
+            v for v in numeric_values
+            if v < lower_bound or v > upper_bound
+        ]
+        
+        profile.has_outliers = len(outliers) > 0
+        profile.outlier_count = len(outliers)
+    
+    def _generate_histogram(
+        self,
+        profile: ColumnProfile,
+        values: List[Any]
+    ) -> None:
+        """Generate histogram bins."""
+        if profile.data_type not in [DataType.INTEGER, DataType.FLOAT]:
+            counter = Counter(str(v) for v in values[:50])
+            profile.histogram = dict(counter.most_common(10))
+            return
+        
+        numeric_values = []
+        for v in values:
+            try:
+                numeric_values.append(float(v))
+            except (ValueError, TypeError):
+                continue
+        
+        if not numeric_values:
+            return
+        
+        min_val = min(numeric_values)
+        max_val = max(numeric_values)
+        
+        if min_val == max_val:
+            profile.histogram = {"all_same": len(numeric_values)}
+            return
+        
+        num_bins = min(10, len(set(numeric_values)))
+        bin_width = (max_val - min_val) / num_bins
+        
+        bins = [min_val + i * bin_width for i in range(num_bins + 1)]
+        
+        for i in range(num_bins):
+            lower = bins[i]
+            upper = bins[i + 1]
+            count = sum(
+                1 for v in numeric_values
+                if lower <= v < upper or (i == num_bins - 1 and v == upper)
+            )
+            label = f"{lower:.1f}-{upper:.1f}"
+            profile.histogram[label] = count
+    
+    def _calculate_quality_score(self) -> DataQualityScore:
         """Calculate overall data quality score."""
-        if not field_profiles:
-            return 0.0
+        if not self.column_profiles:
+            return DataQualityScore(0, 0, 0, 0, ["No data profiled"])
         
-        scores = []
+        issues = []
         
-        for field_name, profile in field_profiles.items():
-            completeness = (total_records - profile.null_count) / total_records
-            
-            uniqueness = profile.unique_count / total_records if total_records > 0 else 0
-            
-            field_score = (completeness * 0.6) + (uniqueness * 0.4)
-            scores.append(field_score)
+        # Completeness
+        null_ratios = [p.null_ratio for p in self.column_profiles.values()]
+        completeness = 1 - statistics.mean(null_ratios) if null_ratios else 0
+        if completeness < 0.9:
+            issues.append("High null ratio in columns")
         
-        return sum(scores) / len(scores) if scores else 0.0
+        # Consistency
+        mixed_types = sum(
+            1 for p in self.column_profiles.values()
+            if p.data_type == DataType.MIXED
+        )
+        consistency = 1 - (mixed_types / len(self.column_profiles))
+        if mixed_types > 0:
+            issues.append(f"{mixed_types} columns have mixed types")
+        
+        # Validity
+        outlier_cols = sum(
+            1 for p in self.column_profiles.values()
+            if p.has_outliers
+        )
+        validity = 1 - (outlier_cols / len(self.column_profiles)) if self.column_profiles else 0
+        if outlier_cols > 0:
+            issues.append(f"{outlier_cols} columns have outliers")
+        
+        overall = 0.4 * completeness + 0.3 * consistency + 0.3 * validity
+        
+        return DataQualityScore(
+            completeness=completeness,
+            consistency=consistency,
+            validity=validity,
+            overall=overall,
+            issues=issues
+        )
     
-    def compare_profiles(
-        self,
-        profile1: DatasetProfile,
-        profile2: DatasetProfile
-    ) -> Dict[str, Any]:
-        """Compare two dataset profiles.
-        
-        Args:
-            profile1: First profile
-            profile2: Second profile
-            
-        Returns:
-            Comparison results
-        """
-        comparison = {
-            "record_count_diff": profile2.total_records - profile1.total_records,
-            "field_differences": {},
-            "quality_change": profile2.quality_score - profile1.quality_score,
-            "new_fields": [],
-            "removed_fields": []
-        }
-        
-        fields1 = set(profile1.field_profiles.keys())
-        fields2 = set(profile2.field_profiles.keys())
-        
-        comparison["new_fields"] = list(fields2 - fields1)
-        comparison["removed_fields"] = list(fields1 - fields2)
-        
-        common_fields = fields1 & fields2
-        
-        for field_name in common_fields:
-            p1 = profile1.field_profiles[field_name]
-            p2 = profile2.field_profiles[field_name]
-            
-            comparison["field_differences"][field_name] = {
-                "type_change": p1.data_type != p2.data_type,
-                "null_count_diff": p2.null_count - p1.null_count,
-                "unique_count_diff": p2.unique_count - p1.unique_count
+    def get_summary(self) -> Dict[str, Any]:
+        """Get profiling summary."""
+        return {
+            "total_columns": len(self.column_profiles),
+            "quality_score": self.quality_score.to_dict() if self.quality_score else None,
+            "column_types": {
+                name: profile.data_type.name
+                for name, profile in self.column_profiles.items()
             }
-        
-        return comparison
+        }
+
+
+# Entry point for direct execution
+if __name__ == "__main__":
+    import json
+    
+    sample_data = [
+        {"name": "Alice", "age": 30, "score": 85.5},
+        {"name": "Bob", "age": 25, "score": 92.3},
+        {"name": "Carol", "age": 35, "score": 78.0},
+        {"name": "Dave", "age": 28, "score": 88.9},
+        {"name": "Eve", "age": None, "score": 95.0},
+        {"name": "Frank", "age": 42, "score": 70.5},
+        {"name": "Grace", "age": 31, "score": 88.0},
+        {"name": "Henry", "age": 29, "score": 82.5},
+        {"name": "Iris", "age": 27, "score": 91.0},
+        {"name": "Jack", "age": 33, "score": 76.5},
+    ]
+    
+    profiler = DataProfiler()
+    profiles = profiler.profile_dataframe(sample_data)
+    
+    print("Column Profiles:")
+    for name, profile in profiles.items():
+        print(f"  {name}: type={profile.data_type.name}, "
+              f"null_ratio={profile.null_ratio:.1%}, "
+              f"unique_ratio={profile.unique_ratio:.1%}")
+    
+    quality = profiler.quality_score
+    print(f"\nQuality Score: {quality.overall:.2%}")
+    print(f"  Completeness: {quality.completeness:.2%}")
+    print(f"  Consistency: {quality.consistency:.2%}")
+    print(f"  Validity: {quality.validity:.2%}")

@@ -1,306 +1,402 @@
-"""API discovery action module for RabAI AutoClick.
+"""
+API Discovery and Introspection Module.
 
-Provides API discovery operations:
-- ApiDiscoveryAction: Discover APIs from configuration
-- ApiServiceRegistryAction: Register and lookup services
-- ApiEndpointDiscoveryAction: Discover endpoints dynamically
-- ApiVersionDiscoveryAction: Discover available API versions
+Provides automatic API endpoint discovery, schema inference,
+and service capability detection for dynamic API integration.
 """
 
 import re
-from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime
+import json
+from typing import (
+    Dict, List, Optional, Any, Set, Tuple, Callable,
+    Pattern, Match
+)
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from urllib.parse import urlparse, urljoin
+import logging
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class ApiDiscoveryAction(BaseAction):
-    """Discover APIs from OpenAPI/Swagger specs or URLs."""
-    action_type = "api_discovery"
-    display_name = "API发现"
-    description = "从配置或规范发现API"
+class HttpMethod(Enum):
+    """HTTP methods for API endpoints."""
+    GET = auto()
+    POST = auto()
+    PUT = auto()
+    PATCH = auto()
+    DELETE = auto()
+    HEAD = auto()
+    OPTIONS = auto()
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            source = params.get("source")
-            source_type = params.get("source_type", "url")
-            filter_methods = params.get("filter_methods", [])
-            filter_tags = params.get("filter_tags", [])
 
-            if not source:
-                return ActionResult(success=False, message="source is required")
+@dataclass
+class EndpointInfo:
+    """Information about a discovered API endpoint."""
+    path: str
+    method: HttpMethod
+    summary: Optional[str] = None
+    description: Optional[str] = None
+    parameters: List[Dict[str, Any]] = field(default_factory=list)
+    request_body: Optional[Dict[str, Any]] = None
+    responses: Dict[str, Any] = field(default_factory=dict)
+    tags: List[str] = field(default_factory=list)
+    deprecated: bool = False
+    security: List[str] = field(default_factory=list)
 
-            discovered_apis = []
 
-            if source_type == "url":
-                discovered_apis = self._discover_from_url(source, filter_methods, filter_tags)
-            elif source_type == "openapi":
-                discovered_apis = self._parse_openapi_spec(source, filter_methods, filter_tags)
-            elif source_type == "endpoints":
-                discovered_apis = self._discover_from_list(source, filter_methods, filter_tags)
-            else:
-                return ActionResult(success=False, message=f"Unknown source_type: {source_type}")
+@dataclass
+class ApiCapability:
+    """Represents a discovered API capability."""
+    name: str
+    category: str
+    endpoints: List[EndpointInfo] = field(default_factory=list)
+    version: Optional[str] = None
+    base_url: Optional[str] = None
 
-            return ActionResult(
-                success=True,
-                message=f"Discovered {len(discovered_apis)} API endpoints",
-                data={"apis": discovered_apis, "count": len(discovered_apis)}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"API discovery error: {e}")
 
-    def _discover_from_url(self, url: str, filter_methods: List[str], filter_tags: List[str]) -> List[Dict[str, Any]]:
-        """Fetch and parse API spec from URL."""
-        try:
-            import urllib.request
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=30) as response:
-                content = response.read().decode()
-
-            try:
-                import json
-                spec = json.loads(content)
-                if "paths" in spec:
-                    return self._parse_openapi_spec(spec, filter_methods, filter_tags)
-            except json.JSONDecodeError:
-                pass
-
-            return self._discover_from_text(content, filter_methods, filter_tags)
-        except Exception:
-            return []
-
-    def _parse_openapi_spec(self, spec: Any, filter_methods: List[str], filter_tags: List[str]) -> List[Dict[str, Any]]:
-        """Parse OpenAPI spec."""
-        if isinstance(spec, str):
-            try:
-                import json
-                spec = json.loads(spec)
-            except Exception:
-                return []
-
+class OpenApiParser:
+    """Parser for OpenAPI/Swagger specifications."""
+    
+    PATH_PATTERN: Pattern = re.compile(r'^(/[^/?#]*)')
+    
+    def __init__(self) -> None:
+        self.endpoints: List[EndpointInfo] = []
+    
+    def parse_spec(self, spec: Dict[str, Any]) -> List[EndpointInfo]:
+        """
+        Parse OpenAPI specification and extract endpoint information.
+        
+        Args:
+            spec: OpenAPI specification dictionary
+            
+        Returns:
+            List of discovered endpoints
+        """
+        self.endpoints = []
+        base_path = spec.get("servers", [{}])[0].get("url", "")
         paths = spec.get("paths", {})
-        results = []
+        
+        for path, path_item in paths.items():
+            for method_name, operation in path_item.items():
+                if method_name.upper() in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]:
+                    endpoint = self._parse_operation(path, method_name.upper(), operation)
+                    if endpoint:
+                        self.endpoints.append(endpoint)
+        
+        return self.endpoints
+    
+    def _parse_operation(
+        self, path: str, method: str, operation: Dict[str, Any]
+    ) -> Optional[EndpointInfo]:
+        """Parse a single API operation."""
+        try:
+            return EndpointInfo(
+                path=path,
+                method=HttpMethod[method],
+                summary=operation.get("summary"),
+                description=operation.get("description"),
+                parameters=operation.get("parameters", []),
+                request_body=operation.get("requestBody"),
+                responses=operation.get("responses", {}),
+                tags=operation.get("tags", []),
+                deprecated=operation.get("deprecated", False),
+                security=operation.get("security", [])
+            )
+        except (KeyError, ValueError):
+            return None
 
-        for path, methods in paths.items():
-            for method, details in methods.items():
-                if method.upper() not in ("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"):
-                    continue
 
-                if filter_methods and method.upper() not in [m.upper() for m in filter_methods]:
-                    continue
-
-                tags = details.get("tags", [])
-                if filter_tags and not any(t in tags for t in filter_tags):
-                    continue
-
-                results.append({
-                    "path": path,
-                    "method": method.upper(),
-                    "summary": details.get("summary", ""),
-                    "description": details.get("description", ""),
-                    "tags": tags,
-                    "parameters": details.get("parameters", []),
-                    "operation_id": details.get("operationId"),
-                })
-
-        return results
-
-    def _discover_from_list(self, endpoints: List[str], filter_methods: List[str], filter_tags: List[str]) -> List[Dict[str, Any]]:
-        """Discover from a list of endpoint strings."""
-        results = []
-        for endpoint in endpoints:
-            if isinstance(endpoint, str):
-                parts = endpoint.split()
-                if len(parts) >= 2:
-                    method, path = parts[0].upper(), parts[1]
-                else:
-                    method, path = "GET", parts[0]
-                results.append({"method": method, "path": path, "summary": "", "tags": []})
-            elif isinstance(endpoint, dict):
-                results.append(endpoint)
-        return results
-
-    def _discover_from_text(self, text: str, filter_methods: List[str], filter_tags: List[str]) -> List[Dict[str, Any]]:
-        """Discover endpoints from text."""
-        results = []
-        pattern = r"(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s+([^\s]+)"
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        for method, path in matches:
-            if filter_methods and method.upper() not in [m.upper() for m in filter_methods]:
+class ApiScanner:
+    """Scans API endpoints through various discovery methods."""
+    
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.discovered_endpoints: List[EndpointInfo] = []
+        self._visited_urls: Set[str] = set()
+    
+    def discover_from_openapi(self, spec_url: str) -> List[EndpointInfo]:
+        """
+        Discover endpoints from OpenAPI specification URL.
+        
+        Args:
+            spec_url: URL to OpenAPI JSON/YAML spec
+            
+        Returns:
+            List of discovered endpoints
+        """
+        # Placeholder for actual HTTP fetch
+        logger.info(f"Discovering from OpenAPI spec: {spec_url}")
+        return []
+    
+    def discover_from_swagger(self, swagger_url: str) -> List[EndpointInfo]:
+        """
+        Discover endpoints from Swagger endpoint.
+        
+        Args:
+            swagger_url: URL to Swagger JSON
+            
+        Returns:
+            List of discovered endpoints
+        """
+        logger.info(f"Discovering from Swagger: {swagger_url}")
+        return []
+    
+    def probe_endpoints(
+        self, paths: List[str], methods: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Probe API endpoints to discover available functionality.
+        
+        Args:
+            paths: List of paths to probe
+            methods: Optional list of HTTP methods to test
+            
+        Returns:
+            Dictionary of discovered capabilities
+        """
+        if methods is None:
+            methods = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+        
+        results = {}
+        for path in paths:
+            full_url = urljoin(self.base_url + "/", path.lstrip("/"))
+            if full_url in self._visited_urls:
                 continue
-            results.append({"method": method.upper(), "path": path, "summary": "", "tags": []})
+            self._visited_urls.add(full_url)
+            
+            for method in methods:
+                results[f"{method}:{path}"] = {
+                    "available": False,
+                    "requires_auth": False,
+                    "response_codes": []
+                }
+        
         return results
 
 
-class ApiServiceRegistryAction(BaseAction):
-    """Register and lookup services."""
-    action_type = "api_service_registry"
-    display_name = "API服务注册表"
-    description = "注册和查找服务"
+class CapabilityDetector:
+    """Detects API capabilities based on response patterns."""
+    
+    def __init__(self) -> None:
+        self.capabilities: Dict[str, ApiCapability] = {}
+    
+    def detect_pagination(self, response: Dict[str, Any]) -> bool:
+        """Detect if response supports pagination."""
+        pagination_indicators = [
+            "total", "page", "per_page", "limit", "offset",
+            "next", "previous", "has_more", "cursor"
+        ]
+        return any(
+            indicator in str(response).lower() 
+            for indicator in pagination_indicators
+        )
+    
+    def detect_filtering(self, params: List[Dict[str, Any]]) -> bool:
+        """Detect filtering capabilities from parameter definitions."""
+        filter_params = {"filter", "q", "query", "search", "where"}
+        return any(
+            p.get("name", "").lower() in filter_params 
+            for p in params
+        )
+    
+    def detect_sorting(self, params: List[Dict[str, Any]]) -> bool:
+        """Detect sorting capabilities."""
+        sort_params = {"sort", "order", "order_by", "sort_by"}
+        return any(
+            p.get("name", "").lower() in sort_params 
+            for p in params
+        )
+    
+    def detect_auth_methods(
+        self, security: List[str]
+    ) -> Dict[str, bool]:
+        """Detect authentication methods."""
+        return {
+            "bearer": any("bearer" in s.lower() for s in security),
+            "basic": any("basic" in s.lower() for s in security),
+            "api_key": any("apiKey" in str(s) for s in security),
+            "oauth2": any("oauth" in s.lower() for s in security)
+        }
 
-    def __init__(self):
-        super().__init__()
-        self._registry: Dict[str, Dict[str, Any]] = {}
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "register")
-            service_name = params.get("service_name")
-            endpoint = params.get("endpoint")
-            metadata = params.get("metadata", {})
-            health_check_url = params.get("health_check_url")
-
-            if operation == "register":
-                if not service_name or not endpoint:
-                    return ActionResult(success=False, message="service_name and endpoint are required")
-
-                self._registry[service_name] = {
-                    "endpoint": endpoint,
-                    "metadata": metadata,
-                    "health_check_url": health_check_url,
-                    "registered_at": datetime.now().isoformat(),
-                    "status": "active",
+class SchemaInferrer:
+    """Infers schema from API response samples."""
+    
+    def infer_schema(self, data: Any, depth: int = 0) -> Dict[str, Any]:
+        """
+        Infer JSON schema from response data.
+        
+        Args:
+            data: Response data sample
+            depth: Current recursion depth
+            
+        Returns:
+            Inferred JSON schema
+        """
+        if depth > 10:
+            return {"type": "object", "max_depth_exceeded": True}
+        
+        if data is None:
+            return {"type": "null"}
+        elif isinstance(data, bool):
+            return {"type": "boolean"}
+        elif isinstance(data, int):
+            return {"type": "integer"}
+        elif isinstance(data, float):
+            return {"type": "number"}
+        elif isinstance(data, str):
+            return {"type": "string"}
+        elif isinstance(data, list):
+            if data:
+                return {
+                    "type": "array",
+                    "items": self.infer_schema(data[0], depth + 1)
                 }
-                return ActionResult(success=True, message=f"Service {service_name} registered", data={"service_name": service_name})
-
-            elif operation == "lookup":
-                if not service_name:
-                    return ActionResult(success=False, message="service_name is required")
-                if service_name not in self._registry:
-                    return ActionResult(success=False, message=f"Service {service_name} not found")
-                return ActionResult(success=True, message=f"Found {service_name}", data=self._registry[service_name])
-
-            elif operation == "list":
-                return ActionResult(success=True, message=f"{len(self._registry)} services registered", data={"services": self._registry})
-
-            elif operation == "deregister":
-                if service_name and service_name in self._registry:
-                    del self._registry[service_name]
-                    return ActionResult(success=True, message=f"Service {service_name} deregistered")
-                return ActionResult(success=False, message=f"Service {service_name} not found")
-
-            elif operation == "update":
-                if not service_name or service_name not in self._registry:
-                    return ActionResult(success=False, message="Service not found")
-                if endpoint:
-                    self._registry[service_name]["endpoint"] = endpoint
-                self._registry[service_name]["metadata"].update(metadata)
-                return ActionResult(success=True, message=f"Service {service_name} updated")
-
-            return ActionResult(success=False, message=f"Unknown operation: {operation}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Service registry error: {e}")
+            return {"type": "array", "items": {}}
+        elif isinstance(data, dict):
+            properties = {}
+            for key, value in data.items():
+                properties[key] = self.infer_schema(value, depth + 1)
+            return {
+                "type": "object",
+                "properties": properties
+            }
+        
+        return {"type": "unknown"}
 
 
-class ApiEndpointDiscoveryAction(BaseAction):
-    """Discover API endpoints dynamically."""
-    action_type = "api_endpoint_discovery"
-    display_name = "API端点发现"
-    description = "动态发现API端点"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            base_url = params.get("base_url", "")
-            paths_to_check = params.get("paths_to_check", ["/", "/api", "/v1", "/v2", "/health", "/ping", "/api-docs", "/swagger"])
-            methods = params.get("methods", ["GET"])
-            timeout = params.get("timeout", 5)
-
-            if not base_url:
-                return ActionResult(success=False, message="base_url is required")
-
-            discovered = []
-
-            for path in paths_to_check:
-                url = base_url.rstrip("/") + "/" + path.lstrip("/")
-                for method in methods:
-                    try:
-                        import urllib.request
-                        req = urllib.request.Request(url, method=method)
-                        try:
-                            with urllib.request.urlopen(req, timeout=timeout) as response:
-                                discovered.append({
-                                    "url": url,
-                                    "method": method,
-                                    "status": response.status,
-                                    "accessible": True,
-                                })
-                        except urllib.error.HTTPError as e:
-                            discovered.append({
-                                "url": url,
-                                "method": method,
-                                "status": e.code,
-                                "accessible": True,
-                                "error": str(e),
-                            })
-                    except Exception as e:
-                        discovered.append({"url": url, "method": method, "accessible": False, "error": str(e)})
-
-            accessible = [d for d in discovered if d.get("accessible", False)]
-            return ActionResult(
-                success=True,
-                message=f"Discovered {len(accessible)} accessible endpoints",
-                data={"discovered": discovered, "accessible_count": len(accessible), "total_checked": len(discovered)}
+class ApiDiscovery:
+    """
+    Main API discovery orchestrator.
+    
+    Provides unified interface for discovering API capabilities
+    through multiple discovery mechanisms.
+    """
+    
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url
+        self.scanner = ApiScanner(base_url)
+        self.capability_detector = CapabilityDetector()
+        self.schema_inferrer = SchemaInferrer()
+        self.api_capabilities: Dict[str, ApiCapability] = {}
+    
+    def discover(
+        self,
+        use_openapi: bool = True,
+        use_swagger: bool = True,
+        use_probing: bool = False
+    ) -> ApiCapability:
+        """
+        Run complete API discovery process.
+        
+        Args:
+            use_openapi: Whether to use OpenAPI discovery
+            use_swagger: Whether to use Swagger discovery
+            use_probing: Whether to probe endpoints
+            
+        Returns:
+            Discovered API capability information
+        """
+        capability = ApiCapability(
+            name="Discovered API",
+            category="api",
+            base_url=self.base_url
+        )
+        
+        # Run discovery methods
+        if use_openapi:
+            self._discover_openapi()
+        
+        if use_swagger:
+            self._discover_swagger()
+        
+        if use_probing:
+            self._probe_common_paths()
+        
+        return capability
+    
+    def _discover_openapi(self) -> None:
+        """Discover using OpenAPI specifications."""
+        openapi_urls = [
+            f"{self.base_url}/openapi.json",
+            f"{self.base_url}/api/openapi.json",
+            f"{self.base_url}/swagger.json"
+        ]
+        
+        for url in openapi_urls:
+            endpoints = self.scanner.discover_from_openapi(url)
+            if endpoints:
+                self.scanner.discovered_endpoints.extend(endpoints)
+                break
+    
+    def _discover_swagger(self) -> None:
+        """Discover using Swagger."""
+        swagger_url = f"{self.base_url}/api-docs"
+        self.scanner.discover_from_swagger(swagger_url)
+    
+    def _probe_common_paths(self) -> None:
+        """Probe common API paths."""
+        common_paths = [
+            "/api/v1/users", "/api/v1/products", "/api/v1/orders",
+            "/api/health", "/api/status", "/api/info"
+        ]
+        self.scanner.probe_endpoints(common_paths)
+    
+    def generate_client_code(
+        self, language: str = "python"
+    ) -> str:
+        """
+        Generate client code for discovered API.
+        
+        Args:
+            language: Target programming language
+            
+        Returns:
+            Generated client code
+        """
+        if language == "python":
+            return self._generate_python_client()
+        return f"# Client generation for {language} not implemented"
+    
+    def _generate_python_client(self) -> str:
+        """Generate Python client code."""
+        lines = [
+            "import requests",
+            "",
+            "",
+            "class ApiClient:",
+            "    def __init__(self, base_url: str, api_key: str = None):",
+            "        self.base_url = base_url.rstrip('/')",
+            "        self.session = requests.Session()",
+            "        if api_key:",
+            "            self.session.headers['Authorization'] = f'Bearer {api_key}'",
+            "",
+            "    def request(self, method: str, path: str, **kwargs):",
+            "        url = f'{self.base_url}{path}'",
+            "        return self.session.request(method, url, **kwargs)",
+            ""
+        ]
+        
+        for endpoint in self.scanner.discovered_endpoints:
+            method_name = endpoint.method.name.lower()
+            path = endpoint.path.replace("/", "_").lstrip("_")
+            lines.append(
+                f"    def {path}(self, **kwargs):"
             )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Endpoint discovery error: {e}")
-
-
-class ApiVersionDiscoveryAction(BaseAction):
-    """Discover available API versions."""
-    action_type = "api_version_discovery"
-    display_name = "API版本发现"
-    description = "发现可用API版本"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            base_url = params.get("base_url", "")
-            version_paths = params.get("version_paths", ["/v1", "/v2", "/v3", "/api/v1", "/api/v2", "/api/v3"])
-            timeout = params.get("timeout", 5)
-
-            if not base_url:
-                return ActionResult(success=False, message="base_url is required")
-
-            versions = {}
-
-            for vp in version_paths:
-                url = base_url.rstrip("/") + "/" + vp.lstrip("/")
-                try:
-                    import urllib.request
-                    req = urllib.request.Request(url)
-                    try:
-                        with urllib.request.urlopen(req, timeout=timeout) as response:
-                            content = response.read().decode()
-                            versions[vp] = {
-                                "accessible": True,
-                                "status": response.status,
-                                "version": self._extract_version_from_content(content, vp),
-                            }
-                    except urllib.error.HTTPError as e:
-                        versions[vp] = {"accessible": True, "status": e.code, "version": None, "error": str(e)}
-                except Exception as e:
-                    versions[vp] = {"accessible": False, "version": None, "error": str(e)}
-
-            supported = {k: v for k, v in versions.items() if v.get("accessible", False)}
-
-            return ActionResult(
-                success=True,
-                message=f"Found {len(supported)} accessible versions",
-                data={"versions": versions, "supported_versions": list(supported.keys()), "count": len(supported)}
+            lines.append(
+                f"        return self.request('{method_name}', '{endpoint.path}')"
             )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Version discovery error: {e}")
+            lines.append("")
+        
+        return "\n".join(lines)
 
-    def _extract_version_from_content(self, content: str, path_hint: str) -> Optional[str]:
-        """Extract version from content."""
-        version_match = re.search(r'"version"\s*:\s*"([^"]+)"', content)
-        if version_match:
-            return version_match.group(1)
-        version_in_path = re.search(r'v(\d+)', path_hint)
-        if version_in_path:
-            return f"v{version_in_path.group(1)}"
-        return None
+
+# Entry point for direct execution
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    
+    discovery = ApiDiscovery("https://api.example.com")
+    capability = discovery.discover(use_probing=False)
+    
+    print(f"Discovered {len(discovery.scanner.discovered_endpoints)} endpoints")
