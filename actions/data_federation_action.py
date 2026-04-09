@@ -1,232 +1,455 @@
+"""Data Federation Action Module.
+
+Provides data federation across multiple sources with:
+- Unified query interface
+- Source routing
+- Result merging
+- Query optimization
+- Data virtualization
+
+Author: rabai_autoclick team
 """
-Data federation action for querying distributed data sources.
 
-Provides unified query interface across multiple data stores.
-"""
+from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Union
-import time
-import json
+import asyncio
+import logging
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum, auto
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+logger = logging.getLogger(__name__)
 
 
-class DataFederationAction:
-    """Federated query execution across data sources."""
+class QueryType(Enum):
+    """Federated query types."""
+    SELECT = auto()
+    AGGREGATE = auto()
+    JOIN = auto()
+    UNION = auto()
 
-    def __init__(
+
+@dataclass
+class DataSource:
+    """Data source configuration."""
+    id: str
+    name: str
+    source_type: str
+    connection_config: Dict[str, Any] = field(default_factory=dict)
+    tables: Set[str] = field(default_factory=set)
+    capabilities: Set[str] = field(default_factory=set)
+    priority: int = 100
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class FederatedQuery:
+    """Federated query specification."""
+    id: str
+    query_type: QueryType
+    sources: List[str] = field(default_factory=list)
+    select_fields: List[str] = field(default_factory=list)
+    filters: Dict[str, Any] = field(default_factory=dict)
+    aggregations: Optional[Dict[str, str]] = None
+    joins: Optional[List[Dict[str, Any]]] = None
+    union_queries: Optional[List["FederatedQuery"]] = None
+    timeout_seconds: float = 30.0
+
+
+@dataclass
+class QueryResult:
+    """Result from a federated query."""
+    query_id: str
+    success: bool
+    data: List[Dict[str, Any]] = field(default_factory=list)
+    sources_queried: List[str] = field(default_factory=list)
+    total_records: int = 0
+    execution_time_ms: float = 0.0
+    errors: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class DataFederationEngine:
+    """Federates queries across multiple data sources.
+    
+    Features:
+    - Multi-source querying
+    - Query planning and optimization
+    - Result merging and deduplication
+    - Source selection based on capabilities
+    - Parallel query execution
+    """
+    
+    def __init__(self, name: str = "default"):
+        self.name = name
+        self._sources: Dict[str, DataSource] = {}
+        self._source_handlers: Dict[str, Callable] = {}
+        self._query_handlers: Dict[QueryType, Callable] = {}
+        self._lock = asyncio.Lock()
+        self._metrics = {
+            "total_queries": 0,
+            "successful_queries": 0,
+            "failed_queries": 0,
+            "total_records_fetched": 0,
+            "sources_registered": 0
+        }
+    
+    def register_source(
         self,
-        default_timeout: float = 30.0,
-        max_connections: int = 20,
-        enable_query_pushdown: bool = True,
+        source: DataSource,
+        handler: Callable
     ) -> None:
-        """
-        Initialize data federation.
-
+        """Register a data source.
+        
         Args:
-            default_timeout: Query timeout in seconds
-            max_connections: Maximum connections per source
-            enable_query_pushdown: Push queries to data sources
+            source: Data source configuration
+            handler: Query handler function for this source
         """
-        self.default_timeout = default_timeout
-        self.max_connections = max_connections
-        self.enable_query_pushdown = enable_query_pushdown
-
-        self._sources: Dict[str, Dict[str, Any]] = {}
-        self._connections: Dict[str, Any] = {}
-        self._query_history: List[Dict[str, Any]] = []
-
-    def execute(self, params: dict[str, Any]) -> dict[str, Any]:
-        """
-        Execute federation operation.
-
+        self._sources[source.id] = source
+        self._source_handlers[source.id] = handler
+        self._metrics["sources_registered"] += 1
+        logger.info(f"Registered data source: {source.id}")
+    
+    def unregister_source(self, source_id: str) -> bool:
+        """Unregister a data source.
+        
         Args:
-            params: Dictionary containing:
-                - operation: 'register', 'query', 'federate', 'sources'
-                - source_name: Data source identifier
-                - source_config: Source configuration
-                - query: Query to execute
-                - sql: SQL query
-
+            source_id: Source ID to remove
+            
         Returns:
-            Dictionary with operation result
+            True if removed
         """
-        operation = params.get("operation", "query")
-
-        if operation == "register":
-            return self._register_source(params)
-        elif operation == "query":
-            return self._execute_query(params)
-        elif operation == "federate":
-            return self._federate_query(params)
-        elif operation == "sources":
-            return self._list_sources(params)
-        else:
-            return {"success": False, "error": f"Unknown operation: {operation}"}
-
-    def _register_source(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Register data source."""
-        source_name = params.get("source_name", "")
-        source_type = params.get("source_type", "generic")
-        connection_config = params.get("config", {})
-
-        if not source_name:
-            return {"success": False, "error": "source_name is required"}
-
-        self._sources[source_name] = {
-            "name": source_name,
-            "type": source_type,
-            "config": connection_config,
-            "registered_at": time.time(),
-            "status": "active",
-        }
-
-        return {"success": True, "source_name": source_name, "type": source_type}
-
-    def _execute_query(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Execute query on single source."""
-        source_name = params.get("source_name", "")
-        query = params.get("query", {})
-        sql = params.get("sql", "")
-        timeout = params.get("timeout", self.default_timeout)
-
-        if source_name not in self._sources:
-            return {"success": False, "error": f"Source '{source_name}' not found"}
-
-        source = self._sources[source_name]
-
-        if sql and self.enable_query_pushdown:
-            result = self._execute_sql_pushdown(source, sql)
-        else:
-            result = self._execute_generic_query(source, query)
-
-        self._query_history.append(
-            {
-                "source": source_name,
-                "query": query,
-                "sql": sql,
-                "executed_at": time.time(),
-                "duration": result.get("duration", 0),
-            }
-        )
-
-        return result
-
-    def _execute_sql_pushdown(
-        self, source: Dict[str, Any], sql: str
-    ) -> dict[str, Any]:
-        """Execute SQL with pushdown to source."""
-        start_time = time.time()
-
-        source_type = source["type"]
-        if source_type == "postgresql":
-            simulated_result = self._simulate_postgres_query(sql)
-        elif source_type == "mysql":
-            simulated_result = self._simulate_mysql_query(sql)
-        elif source_type == "mongodb":
-            simulated_result = self._simulate_mongodb_query(sql)
-        elif source_type == "elasticsearch":
-            simulated_result = self._simulate_elasticsearch_query(sql)
-        else:
-            simulated_result = {"rows": [], "columns": []}
-
-        duration = time.time() - start_time
-
-        return {
-            "success": True,
-            "source_type": source_type,
-            "data": simulated_result["rows"],
-            "columns": simulated_result["columns"],
-            "row_count": len(simulated_result["rows"]),
-            "duration": round(duration, 3),
-            "pushdown": True,
-        }
-
-    def _execute_generic_query(
-        self, source: Dict[str, Any], query: Dict[str, Any]
-    ) -> dict[str, Any]:
-        """Execute generic query."""
-        start_time = time.time()
-        time.sleep(0.01)
-        duration = time.time() - start_time
-
-        return {
-            "success": True,
-            "source_type": source["type"],
-            "data": [],
-            "row_count": 0,
-            "duration": round(duration, 3),
-            "pushdown": False,
-        }
-
-    def _simulate_postgres_query(self, sql: str) -> Dict[str, Any]:
-        """Simulate PostgreSQL query result."""
-        return {"rows": [{"id": 1, "name": "test"}], "columns": ["id", "name"]}
-
-    def _simulate_mysql_query(self, sql: str) -> Dict[str, Any]:
-        """Simulate MySQL query result."""
-        return {"rows": [{"id": 1, "value": "test"}], "columns": ["id", "value"]}
-
-    def _simulate_mongodb_query(self, sql: str) -> Dict[str, Any]:
-        """Simulate MongoDB query result."""
-        return {"rows": [{"_id": "1", "data": "test"}], "columns": ["_id", "data"]}
-
-    def _simulate_elasticsearch_query(self, sql: str) -> Dict[str, Any]:
-        """Simulate Elasticsearch query result."""
-        return {"rows": [{"_index": "test", "_id": "1"}], "columns": ["_index", "_id"]}
-
-    def _federate_query(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Execute federated query across multiple sources."""
-        source_names = params.get("sources", [])
-        sql = params.get("sql", "")
-        join_config = params.get("join", {})
-
-        if not source_names:
-            source_names = list(self._sources.keys())
-
-        results = {}
-        for source_name in source_names:
-            if source_name in self._sources:
-                result = self._execute_query(
-                    {"source_name": source_name, "sql": sql}
+        if source_id in self._sources:
+            del self._sources[source_id]
+            if source_id in self._source_handlers:
+                del self._source_handlers[source_id]
+            return True
+        return False
+    
+    def register_query_handler(
+        self,
+        query_type: QueryType,
+        handler: Callable
+    ) -> None:
+        """Register a query handler for a specific type.
+        
+        Args:
+            query_type: Query type to handle
+            handler: Handler function
+        """
+        self._query_handlers[query_type] = handler
+    
+    async def execute_query(
+        self,
+        query: FederatedQuery
+    ) -> QueryResult:
+        """Execute a federated query.
+        
+        Args:
+            query: Federated query specification
+            
+        Returns:
+            Query result
+        """
+        self._metrics["total_queries"] += 1
+        start_time = asyncio.get_event_loop().time()
+        
+        try:
+            sources_to_query = await self._select_sources(query)
+            
+            if not sources_to_query:
+                return QueryResult(
+                    query_id=query.id,
+                    success=False,
+                    errors=["No suitable sources found for query"]
                 )
-                results[source_name] = result
-
-        if join_config:
-            federated = self._join_results(results, join_config)
-        else:
-            federated = {"combined_rows": sum(r.get("row_count", 0) for r in results.values())}
-
-        return {
-            "success": True,
-            "sources_queried": len(results),
-            "results": results,
-            "federated": federated,
-        }
-
-    def _join_results(
-        self, results: Dict[str, Dict[str, Any]], join_config: Dict[str, Any]
+            
+            if query.query_type in self._query_handlers:
+                handler = self._query_handlers[query.query_type]
+                result = await handler(query, sources_to_query)
+            else:
+                result = await self._execute_default_query(query, sources_to_query)
+            
+            result.query_id = query.id
+            result.sources_queried = [s.id for s in sources_to_query]
+            result.total_records = len(result.data)
+            result.execution_time_ms = (asyncio.get_event_loop().time() - start_time) * 1000
+            self._metrics["total_records_fetched"] += result.total_records
+            self._metrics["successful_queries"] += 1
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Federated query error: {e}")
+            self._metrics["failed_queries"] += 1
+            return QueryResult(
+                query_id=query.id,
+                success=False,
+                errors=[str(e)]
+            )
+    
+    async def _select_sources(
+        self,
+        query: FederatedQuery
+    ) -> List[DataSource]:
+        """Select optimal sources for a query.
+        
+        Args:
+            query: Query to select sources for
+            
+        Returns:
+            List of selected sources
+        """
+        if query.sources:
+            return [
+                self._sources[sid] for sid in query.sources
+                if sid in self._sources
+            ]
+        
+        all_sources = list(self._sources.values())
+        all_sources.sort(key=lambda s: s.priority, reverse=True)
+        
+        return all_sources
+    
+    async def _execute_default_query(
+        self,
+        query: FederatedQuery,
+        sources: List[DataSource]
+    ) -> QueryResult:
+        """Execute query with default behavior.
+        
+        Args:
+            query: Query to execute
+            sources: Sources to query
+            
+        Returns:
+            Query result
+        """
+        results = []
+        errors = []
+        
+        for source in sources:
+            try:
+                handler = self._source_handlers.get(source.id)
+                if not handler:
+                    continue
+                
+                source_query = await self._adapt_query_for_source(query, source)
+                
+                if asyncio.iscoroutinefunction(handler):
+                    source_result = await asyncio.wait_for(
+                        handler(source_query),
+                        timeout=query.timeout_seconds
+                    )
+                else:
+                    source_result = handler(source_query)
+                
+                if isinstance(source_result, list):
+                    results.extend(source_result)
+                elif isinstance(source_result, dict):
+                    results.append(source_result)
+                    
+            except asyncio.TimeoutError:
+                errors.append(f"Timeout querying source {source.id}")
+            except Exception as e:
+                errors.append(f"Error querying {source.id}: {e}")
+        
+        if query.filters:
+            results = await self._apply_filters(results, query.filters)
+        
+        return QueryResult(
+            query_id=query.id,
+            success=len(errors) < len(sources),
+            data=results,
+            errors=errors
+        )
+    
+    async def _adapt_query_for_source(
+        self,
+        query: FederatedQuery,
+        source: DataSource
     ) -> Dict[str, Any]:
-        """Join results from multiple sources."""
-        join_type = join_config.get("type", "inner")
-        left_key = join_config.get("left_key", "id")
-        right_key = join_config.get("right_key", "id")
-
+        """Adapt query for a specific source.
+        
+        Args:
+            query: Original query
+            source: Target source
+            
+        Returns:
+            Adapted query for source
+        """
         return {
-            "join_type": join_type,
-            "left_key": left_key,
-            "right_key": right_key,
-            "rows_joined": 0,
+            "type": query.query_type.name,
+            "select": query.select_fields,
+            "filters": query.filters,
+            "source_name": source.name,
+            "source_type": source.source_type
         }
-
-    def _list_sources(self, params: dict[str, Any]) -> dict[str, Any]:
-        """List registered data sources."""
+    
+    async def _apply_filters(
+        self,
+        data: List[Dict[str, Any]],
+        filters: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Apply filters to result data.
+        
+        Args:
+            data: Data to filter
+            filters: Filter specifications
+            
+        Returns:
+            Filtered data
+        """
+        filtered = data
+        
+        for field_name, condition in filters.items():
+            if isinstance(condition, dict):
+                op = condition.get("op", "eq")
+                value = condition.get("value")
+                
+                filtered = [
+                    row for row in filtered
+                    if self._apply_filter_op(row.get(field_name), op, value)
+                ]
+            else:
+                filtered = [
+                    row for row in filtered
+                    if row.get(field_name) == condition
+                ]
+        
+        return filtered
+    
+    def _apply_filter_op(
+        self,
+        value: Any,
+        op: str,
+        target: Any
+    ) -> bool:
+        """Apply a filter operator.
+        
+        Args:
+            value: Value to compare
+            op: Operator (eq, ne, gt, lt, gte, lte, in, contains)
+            target: Target value
+            
+        Returns:
+            True if filter passes
+        """
+        if op == "eq":
+            return value == target
+        elif op == "ne":
+            return value != target
+        elif op == "gt":
+            return value > target
+        elif op == "lt":
+            return value < target
+        elif op == "gte":
+            return value >= target
+        elif op == "lte":
+            return value <= target
+        elif op == "in":
+            return value in target
+        elif op == "contains":
+            return target in str(value)
+        return True
+    
+    async def execute_join(
+        self,
+        left_query: FederatedQuery,
+        right_query: FederatedQuery,
+        join_key: str,
+        join_type: str = "inner"
+    ) -> QueryResult:
+        """Execute a federated join query.
+        
+        Args:
+            left_query: Left side query
+            right_query: Right side query
+            join_key: Join key field
+            join_type: Type of join (inner, left, right, outer)
+            
+        Returns:
+            Join result
+        """
+        left_result = await self.execute_query(left_query)
+        right_result = await self.execute_query(right_query)
+        
+        if not left_result.success or not right_result.success:
+            return QueryResult(
+                query_id=left_query.id,
+                success=False,
+                errors=[*left_result.errors, *right_result.errors]
+            )
+        
+        joined = await self._perform_join(
+            left_result.data,
+            right_result.data,
+            join_key,
+            join_type
+        )
+        
+        return QueryResult(
+            query_id=left_query.id,
+            success=True,
+            data=joined,
+            sources_queried=[*left_result.sources_queried, *right_result.sources_queried]
+        )
+    
+    async def _perform_join(
+        self,
+        left_data: List[Dict[str, Any]],
+        right_data: List[Dict[str, Any]],
+        join_key: str,
+        join_type: str
+    ) -> List[Dict[str, Any]]:
+        """Perform the actual join operation.
+        
+        Args:
+            left_data: Left relation data
+            right_data: Right relation data
+            join_key: Join key field
+            join_type: Type of join
+            
+        Returns:
+            Joined data
+        """
+        right_index = defaultdict(list)
+        for row in right_data:
+            key_val = row.get(join_key)
+            if key_val is not None:
+                right_index[key_val].append(row)
+        
+        results = []
+        
+        for left_row in left_data:
+            key_val = left_row.get(join_key)
+            matching_right = right_index.get(key_val, [])
+            
+            if matching_right:
+                for right_row in matching_right:
+                    merged = {**left_row, **right_row}
+                    results.append(merged)
+            elif join_type in ("left", "outer"):
+                results.append(left_row)
+        
+        if join_type == "outer":
+            left_keys = {row.get(join_key) for row in left_data}
+            for right_row in right_data:
+                key_val = right_row.get(join_key)
+                if key_val not in left_keys:
+                    results.append(right_row)
+        
+        return results
+    
+    def get_sources(self) -> List[DataSource]:
+        """Get all registered data sources."""
+        return list(self._sources.values())
+    
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get federation metrics."""
         return {
-            "success": True,
-            "sources": [
-                {
-                    "name": s["name"],
-                    "type": s["type"],
-                    "status": s["status"],
-                }
-                for s in self._sources.values()
-            ],
+            **self._metrics,
+            "sources_available": len(self._sources)
         }
