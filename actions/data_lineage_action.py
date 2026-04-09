@@ -1,353 +1,398 @@
-"""Data lineage action module for RabAI AutoClick.
+"""
+Data Lineage Tracking Module.
 
-Provides data lineage tracking:
-- LineageTracker: Track data flow between datasets
-- LineageGraph: Build and query lineage graphs
-- ColumnLineage: Track column-level lineage
-- ImpactAnalyzer: Analyze downstream impact
-- LineageRecorder: Record lineage events
+Tracks the origin, transformation, and movement of data
+throughout its lifecycle. Supports DAG-based lineage graphs,
+provenance queries, and impact analysis.
 """
 
 from __future__ import annotations
 
-import json
-import sys
-import os
+import time
 import uuid
-from typing import Any, Callable, Dict, List, Optional, Set, Union
 from dataclasses import dataclass, field
-from datetime import datetime
-from collections import defaultdict, deque
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+from enum import Enum
+from typing import Any, Optional
 
 
-class LineageTrackerAction(BaseAction):
-    """Track data flow between datasets."""
-    action_type = "lineage_tracker"
-    display_name = "数据血缘追踪"
-    description = "追踪数据集之间的数据流向"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "track")
-            lineage_path = params.get("lineage_path", "/tmp/data_lineage")
-            dataset = params.get("dataset", "")
-            source_dataset = params.get("source_dataset", "")
-            operation_type = params.get("operation_type", "transform")
-            metadata = params.get("metadata", {})
-
-            os.makedirs(lineage_path, exist_ok=True)
-            graph_file = os.path.join(lineage_path, "lineage_graph.json")
-
-            graph = {}
-            if os.path.exists(graph_file):
-                with open(graph_file) as f:
-                    graph = json.load(f)
-
-            if operation == "track":
-                if not dataset:
-                    return ActionResult(success=False, message="dataset required")
-
-                event_id = str(uuid.uuid4())[:12]
-                event = {
-                    "event_id": event_id,
-                    "dataset": dataset,
-                    "source_dataset": source_dataset,
-                    "operation": operation_type,
-                    "metadata": metadata,
-                    "timestamp": datetime.now().isoformat(),
-                }
-
-                if dataset not in graph:
-                    graph[dataset] = {"upstream": [], "downstream": [], "events": []}
-
-                if source_dataset:
-                    if source_dataset not in graph:
-                        graph[source_dataset] = {"upstream": [], "downstream": [], "events": []}
-                    if dataset not in graph[source_dataset]["downstream"]:
-                        graph[source_dataset]["downstream"].append(dataset)
-                    if source_dataset not in graph[dataset]["upstream"]:
-                        graph[dataset]["upstream"].append(source_dataset)
-
-                graph[dataset]["events"].append(event)
-
-                with open(graph_file, "w") as f:
-                    json.dump(graph, f, indent=2)
-
-                return ActionResult(success=True, message=f"Tracked: {source_dataset} -> {dataset}", data={"event_id": event_id})
-
-            elif operation == "get":
-                if not dataset:
-                    return ActionResult(success=False, message="dataset required")
-
-                if dataset not in graph:
-                    return ActionResult(success=False, message=f"Dataset not found: {dataset}")
-
-                return ActionResult(success=True, message=f"Lineage: {dataset}", data=graph[dataset])
-
-            elif operation == "get_upstream":
-                if not dataset:
-                    return ActionResult(success=False, message="dataset required")
-
-                visited = set()
-                queue = deque([dataset])
-                while queue:
-                    current = queue.popleft()
-                    if current in graph:
-                        for upstream in graph[current].get("upstream", []):
-                            if upstream not in visited:
-                                visited.add(upstream)
-                                queue.append(upstream)
-
-                return ActionResult(success=True, message=f"{len(visited)} upstream datasets", data={"upstream": list(visited)})
-
-            elif operation == "get_downstream":
-                if not dataset:
-                    return ActionResult(success=False, message="dataset required")
-
-                visited = set()
-                queue = deque([dataset])
-                while queue:
-                    current = queue.popleft()
-                    if current in graph:
-                        for downstream in graph[current].get("downstream", []):
-                            if downstream not in visited:
-                                visited.add(downstream)
-                                queue.append(downstream)
-
-                return ActionResult(success=True, message=f"{len(visited)} downstream datasets", data={"downstream": list(visited)})
-
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
+class LineageType(Enum):
+    """Types of data lineage."""
+    TABLE = "table"
+    COLUMN = "column"
+    FILE = "file"
+    STREAM = "stream"
+    API = "api"
+    MODEL = "model"
 
 
-class ColumnLineageAction(BaseAction):
-    """Track column-level lineage."""
-    action_type = "column_lineage"
-    display_name = "列血缘追踪"
-    description = "追踪列级别的数据血缘"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "track")
-            lineage_path = params.get("lineage_path", "/tmp/column_lineage")
-            source_table = params.get("source_table", "")
-            target_table = params.get("target_table", "")
-            column_mapping = params.get("column_mapping", {})
-
-            os.makedirs(lineage_path, exist_ok=True)
-            col_graph_file = os.path.join(lineage_path, "column_graph.json")
-
-            col_graph = {}
-            if os.path.exists(col_graph_file):
-                with open(col_graph_file) as f:
-                    col_graph = json.load(f)
-
-            if operation == "track":
-                if not source_table or not target_table:
-                    return ActionResult(success=False, message="source_table and target_table required")
-
-                if target_table not in col_graph:
-                    col_graph[target_table] = {"columns": {}, "upstream": {}}
-
-                for target_col, source_info in column_mapping.items():
-                    if isinstance(source_info, str):
-                        source_col = source_info
-                        source_table_ref = source_table
-                    elif isinstance(source_info, dict):
-                        source_col = source_info.get("column", "")
-                        source_table_ref = source_info.get("table", source_table)
-                    else:
-                        continue
-
-                    col_graph[target_table]["columns"][target_col] = {
-                        "source_column": source_col,
-                        "source_table": source_table_ref,
-                        "transformed": isinstance(source_info, dict) and source_info.get("transformed", False),
-                        "timestamp": datetime.now().isoformat(),
-                    }
-
-                    if source_table_ref not in col_graph[target_table]["upstream"]:
-                        col_graph[target_table]["upstream"][source_table_ref] = []
-                    if target_col not in col_graph[target_table]["upstream"][source_table_ref]:
-                        col_graph[target_table]["upstream"][source_table_ref].append(target_col)
-
-                with open(col_graph_file, "w") as f:
-                    json.dump(col_graph, f, indent=2)
-
-                return ActionResult(success=True, message=f"Column lineage: {source_table} -> {target_table}")
-
-            elif operation == "get":
-                if not target_table:
-                    return ActionResult(success=False, message="target_table required")
-
-                if target_table not in col_graph:
-                    return ActionResult(success=False, message=f"Table not found: {target_table}")
-
-                return ActionResult(success=True, message=f"Column lineage: {target_table}", data=col_graph[target_table])
-
-            elif operation == "trace":
-                if not target_table:
-                    return ActionResult(success=False, message="target_table required")
-
-                column = params.get("column", "")
-                trace_path = []
-
-                current_table = target_table
-                current_col = column
-
-                while current_table in col_graph and current_col in col_graph[current_table].get("columns", {}):
-                    col_info = col_graph[current_table]["columns"][current_col]
-                    trace_path.append({
-                        "table": current_table,
-                        "column": current_col,
-                        "source_column": col_info.get("source_column"),
-                        "source_table": col_info.get("source_table"),
-                    })
-                    current_table = col_info.get("source_table", "")
-                    current_col = col_info.get("source_column", "")
-
-                return ActionResult(success=True, message=f"Traced {len(trace_path)} hops", data={"trace": trace_path})
-
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
+class OperationType(Enum):
+    """Types of data operations."""
+    CREATE = "create"
+    READ = "read"
+    UPDATE = "update"
+    DELETE = "delete"
+    TRANSFORM = "transform"
+    AGGREGATE = "aggregate"
+    FILTER = "filter"
+    JOIN = "join"
+    UNION = "union"
+    COPY = "copy"
+    EXPORT = "export"
+    IMPORT = "import"
 
 
-class ImpactAnalyzerAction(BaseAction):
-    """Analyze downstream impact of data changes."""
-    action_type = "impact_analyzer"
-    display_name = "影响分析"
-    description = "分析数据变更的下游影响"
+@dataclass
+class LineageNode:
+    """Represents a node in the lineage graph."""
+    node_id: str
+    name: str
+    lineage_type: LineageType
+    version: str = "1.0"
+    schema: Optional[dict[str, Any]] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            lineage_path = params.get("lineage_path", "/tmp/data_lineage")
-            target_dataset = params.get("target_dataset", "")
-            impact_depth = params.get("impact_depth", 10)
 
-            if not target_dataset:
-                return ActionResult(success=False, message="target_dataset required")
+@dataclass
+class LineageEdge:
+    """Represents an edge (relationship) in the lineage graph."""
+    edge_id: str
+    source_id: str
+    target_id: str
+    operation: OperationType
+    transformation: Optional[str] = None
+    columns: Optional[list[str]] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: float = field(default_factory=time.time)
 
-            graph_file = os.path.join(lineage_path, "lineage_graph.json")
-            if not os.path.exists(graph_file):
-                return ActionResult(success=False, message="No lineage data found")
 
-            with open(graph_file) as f:
-                graph = json.load(f)
+@dataclass
+class DataProvenance:
+    """Provenance record for a data asset."""
+    asset_id: str
+    asset_name: str
+    asset_type: LineageType
+    version: str
+    created_by: str
+    created_at: float
+    sources: list[str]
+    operations: list[str]
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-            impacted = []
-            critical_paths = []
-            queue = deque([(target_dataset, [target_dataset])])
 
-            while queue:
-                current, path = queue.popleft()
-                if len(path) > impact_depth:
-                    continue
+class DataLineageTracker:
+    """
+    Data lineage and provenance tracker.
 
-                if current in graph:
-                    for downstream in graph[current].get("downstream", []):
-                        if downstream not in path:
-                            new_path = path + [downstream]
-                            impacted.append({
-                                "dataset": downstream,
-                                "path": " -> ".join(new_path),
-                                "depth": len(new_path) - 1,
-                            })
-                            if len(new_path) >= 3:
-                                critical_paths.append(new_path)
-                            queue.append((downstream, new_path))
+    Builds and queries data lineage graphs showing how data
+    flows and transforms through systems.
 
-            impact_summary = {
-                "total_impacted": len(impacted),
-                "impacted_datasets": [i["dataset"] for i in impacted],
-                "critical_paths": critical_paths[:5],
-                "max_depth": max((i["depth"] for i in impacted), default=0),
+    Example:
+        tracker = DataLineageTracker()
+        tracker.register_node("orders", LineageType.TABLE, schema={...})
+        tracker.register_node("order_reports", LineageType.TABLE)
+        tracker.link("orders", "order_reports", OperationType.READ)
+        lineage = tracker.get_lineage("order_reports", direction="upstream")
+    """
+
+    def __init__(self) -> None:
+        self._nodes: dict[str, LineageNode] = {}
+        self._edges: dict[str, LineageEdge] = {}
+        self._outgoing: dict[str, list[str]] = {}
+        self._incoming: dict[str, list[str]] = {}
+        self._provenance: dict[str, DataProvenance] = {}
+
+    def register_node(
+        self,
+        name: str,
+        lineage_type: LineageType,
+        version: str = "1.0",
+        schema: Optional[dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None
+    ) -> LineageNode:
+        """
+        Register a data asset node.
+
+        Args:
+            name: Node name
+            lineage_type: Type of data asset
+            version: Asset version
+            schema: Optional schema definition
+            metadata: Additional metadata
+
+        Returns:
+            Created LineageNode
+        """
+        node_id = str(uuid.uuid4())
+        node = LineageNode(
+            node_id=node_id,
+            name=name,
+            lineage_type=lineage_type,
+            version=version,
+            schema=schema,
+            metadata=metadata or {}
+        )
+        self._nodes[name] = node
+        self._outgoing[name] = []
+        self._incoming[name] = []
+        return node
+
+    def get_node(self, name: str) -> Optional[LineageNode]:
+        """Get a node by name."""
+        return self._nodes.get(name)
+
+    def link(
+        self,
+        source: str,
+        target: str,
+        operation: OperationType,
+        transformation: Optional[str] = None,
+        columns: Optional[list[str]] = None,
+        metadata: Optional[dict[str, Any]] = None
+    ) -> LineageEdge:
+        """
+        Create a lineage edge between two nodes.
+
+        Args:
+            source: Source node name
+            target: Target node name
+            operation: Operation type
+            transformation: SQL or expression describing transformation
+            columns: Columns involved in the lineage
+            metadata: Additional metadata
+
+        Returns:
+            Created LineageEdge
+        """
+        if source not in self._nodes:
+            self.register_node(source, LineageType.TABLE)
+        if target not in self._nodes:
+            self.register_node(target, LineageType.TABLE)
+
+        edge_id = str(uuid.uuid4())
+        edge = LineageEdge(
+            edge_id=edge_id,
+            source_id=source,
+            target_id=target,
+            operation=operation,
+            transformation=transformation,
+            columns=columns,
+            metadata=metadata or {}
+        )
+
+        self._edges[f"{source}:{target}"] = edge
+        self._outgoing[source].append(target)
+        self._incoming[target].append(source)
+
+        return edge
+
+    def get_lineage(
+        self,
+        node_name: str,
+        direction: str = "both",
+        depth: int = -1
+    ) -> dict[str, Any]:
+        """
+        Get lineage for a node.
+
+        Args:
+            node_name: Starting node
+            direction: "upstream", "downstream", or "both"
+            depth: Maximum depth (-1 for unlimited)
+
+        Returns:
+            Dictionary with upstream/downstream lineage
+        """
+        result: dict[str, Any] = {
+            "node": self._nodes.get(node_name),
+            "upstream": [],
+            "downstream": []
+        }
+
+        if direction in ("upstream", "both"):
+            result["upstream"] = self._get_upstream(node_name, depth)
+
+        if direction in ("downstream", "both"):
+            result["downstream"] = self._get_downstream(node_name, depth)
+
+        return result
+
+    def _get_upstream(
+        self,
+        node: str,
+        max_depth: int,
+        current_depth: int = 0,
+        visited: Optional[set[str]] = None
+    ) -> list[dict[str, Any]]:
+        """Get upstream lineage recursively."""
+        if visited is None:
+            visited = set()
+
+        if node in visited or (max_depth >= 0 and current_depth >= max_depth):
+            return []
+
+        visited.add(node)
+        results = []
+
+        for parent in self._incoming.get(node, []):
+            edge = self._edges.get(f"{parent}:{node}")
+            node_data = {
+                "name": parent,
+                "node": self._nodes.get(parent),
+                "edge": edge,
+                "depth": current_depth + 1
             }
+            results.append(node_data)
+            results.extend(self._get_upstream(parent, max_depth, current_depth + 1, visited))
 
-            risk_level = "LOW"
-            if impact_summary["total_impacted"] > 10 or impact_summary["max_depth"] > 5:
-                risk_level = "HIGH"
-            elif impact_summary["total_impacted"] > 5:
-                risk_level = "MEDIUM"
+        return results
 
-            impact_summary["risk_level"] = risk_level
+    def _get_downstream(
+        self,
+        node: str,
+        max_depth: int,
+        current_depth: int = 0,
+        visited: Optional[set[str]] = None
+    ) -> list[dict[str, Any]]:
+        """Get downstream lineage recursively."""
+        if visited is None:
+            visited = set()
 
-            return ActionResult(
-                success=True,
-                message=f"Impact analysis: {risk_level} risk",
-                data=impact_summary
-            )
+        if node in visited or (max_depth >= 0 and current_depth >= max_depth):
+            return []
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
+        visited.add(node)
+        results = []
 
+        for child in self._outgoing.get(node, []):
+            edge = self._edges.get(f"{node}:{child}")
+            node_data = {
+                "name": child,
+                "node": self._nodes.get(child),
+                "edge": edge,
+                "depth": current_depth + 1
+            }
+            results.append(node_data)
+            results.extend(self._get_downstream(child, max_depth, current_depth + 1, visited))
 
-class LineageGraphAction(BaseAction):
-    """Build and query lineage graphs."""
-    action_type = "lineage_graph"
-    display_name = "血缘图查询"
-    description = "构建和查询血缘图"
+        return results
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "export")
-            lineage_path = params.get("lineage_path", "/tmp/data_lineage")
-            dataset = params.get("dataset", "")
-            direction = params.get("direction", "both")
-            max_depth = params.get("max_depth", 5)
+    def impact_analysis(
+        self,
+        node_name: str,
+        column: Optional[str] = None
+    ) -> dict[str, Any]:
+        """
+        Perform impact analysis on a node.
 
-            graph_file = os.path.join(lineage_path, "lineage_graph.json")
-            if not os.path.exists(graph_file):
-                return ActionResult(success=False, message="No lineage graph found")
+        Shows all downstream consumers and dependencies.
 
-            with open(graph_file) as f:
-                graph = json.load(f)
+        Args:
+            node_name: Node to analyze
+            column: Optional column to focus on
 
-            if operation == "export":
-                return ActionResult(success=True, message=f"Graph: {len(graph)} nodes", data={"nodes": list(graph.keys()), "edges": {k: {"upstream": v["upstream"], "downstream": v["downstream"]} for k, v in graph.items()}})
+        Returns:
+            Impact analysis results
+        """
+        downstream = self._get_downstream(node_name, depth=-1)
 
-            elif operation == "subgraph":
-                if not dataset:
-                    return ActionResult(success=False, message="dataset required")
+        impacted_nodes = []
+        impacted_apis = []
 
-                if dataset not in graph:
-                    return ActionResult(success=False, message=f"Dataset not found: {dataset}")
+        for item in downstream:
+            node = item["node"]
+            if node:
+                if node.lineage_type == LineageType.API:
+                    impacted_apis.append(node.name)
+                else:
+                    impacted_nodes.append(node.name)
 
-                visited = set([dataset])
-                to_visit = [dataset]
-                depth = 0
+        return {
+            "source": node_name,
+            "column": column,
+            "total_impacted": len(impacted_nodes) + len(impacted_apis),
+            "impacted_tables": impacted_nodes,
+            "impacted_apis": impacted_apis,
+            "lineage": downstream
+        }
 
-                while to_visit and depth < max_depth:
-                    next_level = []
-                    for node in to_visit:
-                        if node in graph:
-                            if direction in ("both", "upstream"):
-                                for u in graph[node].get("upstream", []):
-                                    if u not in visited:
-                                        visited.add(u)
-                                        next_level.append(u)
-                            if direction in ("both", "downstream"):
-                                for d in graph[node].get("downstream", []):
-                                    if d not in visited:
-                                        visited.add(d)
-                                        next_level.append(d)
-                    to_visit = next_level
-                    depth += 1
+    def record_provenance(
+        self,
+        asset_name: str,
+        created_by: str,
+        sources: list[str],
+        operations: list[str],
+        metadata: Optional[dict[str, Any]] = None
+    ) -> DataProvenance:
+        """Record provenance for a data asset."""
+        node = self._nodes.get(asset_name)
+        if not node:
+            self.register_node(asset_name, LineageType.TABLE)
 
-                subgraph = {k: v for k, v in graph.items() if k in visited}
-                return ActionResult(success=True, message=f"Subgraph: {len(visited)} nodes", data={"nodes": list(visited), "subgraph": subgraph})
+        provenance = DataProvenance(
+            asset_id=str(uuid.uuid4()),
+            asset_name=asset_name,
+            asset_type=node.lineage_type if node else LineageType.TABLE,
+            version=node.version if node else "1.0",
+            created_by=created_by,
+            created_at=time.time(),
+            sources=sources,
+            operations=operations,
+            metadata=metadata or {}
+        )
 
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+        self._provenance[asset_name] = provenance
+        return provenance
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
+    def get_provenance(self, asset_name: str) -> Optional[DataProvenance]:
+        """Get provenance record for an asset."""
+        return self._provenance.get(asset_name)
+
+    def get_full_graph(self) -> dict[str, Any]:
+        """Get the full lineage graph."""
+        return {
+            "nodes": list(self._nodes.values()),
+            "edges": list(self._edges.values()),
+            "statistics": {
+                "total_nodes": len(self._nodes),
+                "total_edges": len(self._edges),
+                "by_type": self._count_by_type()
+            }
+        }
+
+    def _count_by_type(self) -> dict[str, int]:
+        """Count nodes by lineage type."""
+        counts: dict[str, int] = {}
+        for node in self._nodes.values():
+            type_name = node.lineage_type.value
+            counts[type_name] = counts.get(type_name, 0) + 1
+        return counts
+
+    def find_path(
+        self,
+        source: str,
+        target: str
+    ) -> Optional[list[str]]:
+        """Find a lineage path between two nodes."""
+        if source not in self._nodes or target not in self._nodes:
+            return None
+
+        visited: set[str] = set()
+        queue: list[tuple[str, list[str]]] = [(source, [source])]
+
+        while queue:
+            current, path = queue.pop(0)
+
+            if current == target:
+                return path
+
+            if current in visited:
+                continue
+            visited.add(current)
+
+            for child in self._outgoing.get(current, []):
+                if child not in visited:
+                    queue.append((child, path + [child]))
+
+        return None
