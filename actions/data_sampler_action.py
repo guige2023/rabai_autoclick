@@ -1,213 +1,195 @@
 """Data Sampler Action Module.
 
-Provides statistical sampling: random, stratified,
-systematic, and reservoir sampling for large datasets.
+Sample data using various statistical and algorithmic techniques.
 """
+
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, TypeVar
+import statistics
 from collections import defaultdict
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Callable, Generic, TypeVar
 
 T = TypeVar("T")
 
 
-class SamplingStrategy(Enum):
-    """Sampling strategy."""
+class SamplingMethod(Enum):
+    """Sampling methods."""
     RANDOM = "random"
     STRATIFIED = "stratified"
     SYSTEMATIC = "systematic"
-    RESERVOIR = "reservoir"
     CLUSTER = "cluster"
-
-
-from enum import Enum
+    RESERVOIR = "reservoir"
+    WEIGHTED = "weighted"
 
 
 @dataclass
-class SamplingConfig:
-    """Sampling configuration."""
-    strategy: SamplingStrategy
+class SampleResult(Generic[T]):
+    """Result of sampling operation."""
+    samples: list[T]
+    method: SamplingMethod
+    original_size: int
     sample_size: int
-    random_seed: Optional[int] = None
-    stratify_field: Optional[str] = None
-    stratify_ratios: Optional[Dict[str, float]] = None
-    replace: bool = False
+    metadata: dict[str, Any]
 
 
-class DataSamplerAction:
-    """Data sampler with multiple strategies.
+class DataSampler:
+    """Data sampler with multiple sampling strategies."""
 
-    Example:
-        sampler = DataSamplerAction()
-
-        sample = sampler.sample(
-            data=list(range(1000)),
-            config=SamplingConfig(
-                strategy=SamplingStrategy.RANDOM,
-                sample_size=100
-            )
+    def sample_random(
+        self,
+        data: list[T],
+        sample_size: int,
+        replacement: bool = False
+    ) -> SampleResult[T]:
+        """Random sampling with optional replacement."""
+        if replacement:
+            indices = [random.randint(0, len(data) - 1) for _ in range(sample_size)]
+            samples = [data[i] for i in indices]
+        else:
+            sample_size = min(sample_size, len(data))
+            samples = random.sample(data, sample_size)
+        return SampleResult(
+            samples=samples,
+            method=SamplingMethod.RANDOM,
+            original_size=len(data),
+            sample_size=len(samples),
+            metadata={"replacement": replacement}
         )
-    """
+
+    def sample_stratified(
+        self,
+        data: list[dict],
+        strata_field: str,
+        sample_per_stratum: int
+    ) -> SampleResult[dict]:
+        """Stratified sampling - equal samples from each stratum."""
+        strata: dict[str, list] = defaultdict(list)
+        for item in data:
+            strata_key = str(item.get(strata_field, "unknown"))
+            strata[strata_key].append(item)
+        samples = []
+        for stratum_key, stratum_data in strata.items():
+            stratum_sample = random.sample(
+                stratum_data,
+                min(sample_per_stratum, len(stratum_data))
+            )
+            samples.extend(stratum_sample)
+        return SampleResult(
+            samples=samples,
+            method=SamplingMethod.STRATIFIED,
+            original_size=len(data),
+            sample_size=len(samples),
+            metadata={"strata_field": strata_field, "num_strata": len(strata)}
+        )
+
+    def sample_systematic(
+        self,
+        data: list[T],
+        sample_size: int
+    ) -> SampleResult[T]:
+        """Systematic sampling - every kth element."""
+        if not data:
+            return SampleResult([], SamplingMethod.SYSTEMATIC, 0, 0, {})
+        k = max(1, len(data) // sample_size)
+        samples = [data[i] for i in range(0, len(data), k)][:sample_size]
+        return SampleResult(
+            samples=samples,
+            method=SamplingMethod.SYSTEMATIC,
+            original_size=len(data),
+            sample_size=len(samples),
+            metadata={"k_interval": k}
+        )
+
+    def sample_cluster(
+        self,
+        data: list[dict],
+        cluster_field: str,
+        num_clusters: int
+    ) -> SampleResult[dict]:
+        """Cluster sampling - select entire clusters."""
+        clusters: dict[str, list] = defaultdict(list)
+        for item in data:
+            cluster_key = str(item.get(cluster_field, "unknown"))
+            clusters[cluster_key].append(item)
+        all_clusters = list(clusters.keys())
+        if len(all_clusters) <= num_clusters:
+            selected_clusters = all_clusters
+        else:
+            selected_clusters = random.sample(all_clusters, num_clusters)
+        samples = []
+        for ck in selected_clusters:
+            samples.extend(clusters[ck])
+        return SampleResult(
+            samples=samples,
+            method=SamplingMethod.CLUSTER,
+            original_size=len(data),
+            sample_size=len(samples),
+            metadata={"cluster_field": cluster_field, "num_clusters_selected": len(selected_clusters)}
+        )
+
+
+class ReservoirSampler(Generic[T]):
+    """Reservoir sampling for streaming/unbounded data."""
+
+    def __init__(self, k: int) -> None:
+        self.k = k
+        self._reservoir: list[T] = []
+        self._count = 0
+
+    def add(self, item: T) -> None:
+        """Add an item using reservoir sampling."""
+        if len(self._reservoir) < self.k:
+            self._reservoir.append(item)
+        else:
+            j = random.randint(0, self._count)
+            if j < self.k:
+                self._reservoir[j] = item
+        self._count += 1
+
+    def get_samples(self) -> list[T]:
+        """Get current samples."""
+        return list(self._reservoir)
+
+    def get_count(self) -> int:
+        """Get total items seen."""
+        return self._count
+
+
+class WeightedSampler(Generic[T]):
+    """Weighted random sampling."""
 
     def __init__(self) -> None:
-        self._rng = random.Random()
+        self._items: list[T] = []
+        self._weights: list[float] = []
+        self._total_weight = 0.0
 
-    def sample(
-        self,
-        data: List[T],
-        config: SamplingConfig,
-    ) -> List[T]:
-        """Sample data using specified strategy.
+    def add(self, item: T, weight: float) -> None:
+        """Add item with weight."""
+        self._items.append(item)
+        self._weights.append(weight)
+        self._total_weight += weight
 
-        Args:
-            data: Data to sample from
-            config: Sampling configuration
-
-        Returns:
-            Sampled data
-        """
-        if config.random_seed is not None:
-            self._rng.seed(config.random_seed)
-
-        if config.strategy == SamplingStrategy.RANDOM:
-            return self._random_sample(data, config)
-        elif config.strategy == SamplingStrategy.STRATIFIED:
-            return self._stratified_sample(data, config)
-        elif config.strategy == SamplingStrategy.SYSTEMATIC:
-            return self._systematic_sample(data, config)
-        elif config.strategy == SamplingStrategy.RESERVOIR:
-            return self._reservoir_sample(data, config)
-        elif config.strategy == SamplingStrategy.CLUSTER:
-            return self._cluster_sample(data, config)
-
-        return data[:config.sample_size]
-
-    def _random_sample(
-        self,
-        data: List[T],
-        config: SamplingConfig,
-    ) -> List[T]:
-        """Random sampling with optional replacement."""
-        if config.replace:
-            return [self._rng.choice(data) for _ in range(config.sample_size)]
-
-        indices = self._rng.sample(range(len(data)), min(config.sample_size, len(data)))
-        return [data[i] for i in indices]
-
-    def _stratified_sample(
-        self,
-        data: List[Dict],
-        config: SamplingConfig,
-    ) -> List[Dict]:
-        """Stratified sampling by field."""
-        if not config.stratify_field:
-            return self._random_sample(data, config)
-
-        strata: Dict[str, List[Dict]] = defaultdict(list)
-        for record in data:
-            key = str(record.get(config.stratify_field, "unknown"))
-            strata[key].append(record)
-
-        samples: List[Dict] = []
-        total_size = len(data)
-        ratios = config.stratify_ratios or {}
-
-        for key, stratum in strata.items():
-            ratio = ratios.get(key, len(stratum) / total_size)
-            stratum_size = max(1, int(config.sample_size * ratio))
-            stratum_sample = self._rng.sample(stratum, min(stratum_size, len(stratum)))
-            samples.extend(stratum_sample)
-
-        return samples
-
-    def _systematic_sample(
-        self,
-        data: List[T],
-        config: SamplingConfig,
-    ) -> List[T]:
-        """Systematic sampling (every k-th element)."""
-        if len(data) <= config.sample_size:
-            return data
-
-        step = len(data) // config.sample_size
-        start = self._rng.randint(0, step - 1)
-
-        return data[start::step][:config.sample_size]
-
-    def _reservoir_sample(
-        self,
-        data: List[T],
-        config: SamplingConfig,
-    ) -> List[T]:
-        """Reservoir sampling for large streams."""
-        k = min(config.sample_size, len(data))
-        reservoir = data[:k]
-
-        for i in range(k, len(data)):
-            j = self._rng.randint(0, i)
-            if j < k:
-                reservoir[j] = data[i]
-
-        return reservoir
-
-    def _cluster_sample(
-        self,
-        data: List[Dict],
-        config: SamplingConfig,
-    ) -> List[Dict]:
-        """Cluster sampling (randomly select clusters)."""
-        if not config.stratify_field:
-            return self._random_sample(data, config)
-
-        clusters: Dict[str, List[Dict]] = defaultdict(list)
-        for record in data:
-            key = str(record.get(config.stratify_field, "unknown"))
-            clusters[key].append(record)
-
-        cluster_keys = list(clusters.keys())
-        num_clusters = max(1, min(config.sample_size, len(cluster_keys)))
-        selected_keys = self._rng.sample(cluster_keys, num_clusters)
-
-        return [record for key in selected_keys for record in clusters[key]]
-
-    def split(
-        self,
-        data: List[T],
-        ratios: List[float],
-        random_seed: Optional[int] = None,
-    ) -> List[List[T]]:
-        """Split data into multiple samples by ratios.
-
-        Args:
-            data: Data to split
-            ratios: List of ratios (must sum to 1.0)
-            random_seed: Optional random seed
-
-        Returns:
-            List of split datasets
-        """
-        if abs(sum(ratios) - 1.0) > 0.001:
-            raise ValueError("Ratios must sum to 1.0")
-
-        if random_seed is not None:
-            self._rng.seed(random_seed)
-
-        shuffled = data.copy()
-        self._rng.shuffle(shuffled)
-
-        boundaries = []
+    def sample(self) -> T:
+        """Sample single item based on weights."""
+        if not self._items:
+            raise ValueError("No items to sample")
+        r = random.uniform(0, self._total_weight)
         cumulative = 0
-        for ratio in ratios[:-1]:
-            cumulative += ratio
-            boundaries.append(int(len(data) * cumulative))
+        for item, weight in zip(self._items, self._weights):
+            cumulative += weight
+            if r <= cumulative:
+                return item
+        return self._items[-1]
 
-        splits = []
-        prev = 0
-        for boundary in boundaries:
-            splits.append(shuffled[prev:boundary])
-            prev = boundary
-        splits.append(shuffled[prev:])
+    def sample_n(self, n: int) -> list[T]:
+        """Sample n items with replacement."""
+        return [self.sample() for _ in range(n)]
 
-        return splits
+    def clear(self) -> None:
+        """Clear all items."""
+        self._items.clear()
+        self._weights.clear()
+        self._total_weight = 0.0
