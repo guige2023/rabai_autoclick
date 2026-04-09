@@ -1,310 +1,317 @@
 """
 Automation Guardrails Action Module.
 
-Safety guardrails and circuit breakers for automation
-workflows with threshold monitoring and auto-recovery.
+Provides safety guardrails for automation workflows including
+checks, limits, permissions, and audit logging.
+
+Author: RabAi Team
 """
+
+from __future__ import annotations
 
 import asyncio
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
 from enum import Enum
-import logging
-
-logger = logging.getLogger(__name__)
+from typing import Any, Callable, Dict, List, Optional, Set
 
 
-class CircuitState(Enum):
-    """Circuit breaker states."""
-    CLOSED = "closed"
-    OPEN = "open"
-    HALF_OPEN = "half_open"
-
-
-@dataclass
-class CircuitBreakerConfig:
-    """Circuit breaker configuration."""
-    failure_threshold: int = 5
-    success_threshold: int = 2
-    timeout: float = 60.0
-    half_open_max_calls: int = 3
+class ViolationType(Enum):
+    """Types of guardrail violations."""
+    RATE_LIMIT = "rate_limit"
+    RESOURCE_LIMIT = "resource_limit"
+    PERMISSION_DENIED = "permission_denied"
+    SAFETY_CHECK_FAILED = "safety_check_failed"
+    TIMEOUT = "timeout"
+    CIRCUIT_OPEN = "circuit_open"
 
 
 @dataclass
-class GuardrailMetric:
-    """Guardrail metric tracking."""
+class Violation:
+    """A guardrail violation event."""
+    type: ViolationType
+    message: str
+    timestamp: float = field(default_factory=time.time)
+    context: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ResourceLimit:
+    """Resource usage limit."""
     name: str
-    current_value: float
-    threshold: float
-    operator: str
-    triggered: bool = False
+    max_usage: int
+    window_seconds: float
+    current_usage: int = 0
+    window_start: float = field(default_factory=time.time)
 
 
 @dataclass
-class CircuitBreakerStats:
-    """Circuit breaker statistics."""
-    state: CircuitState
-    failure_count: int
-    success_count: int
-    last_failure_time: Optional[float]
-    total_calls: int
+class Permission:
+    """Permission definition."""
+    name: str
+    resource: str
+    actions: Set[str] = field(default_factory=set)
 
 
-class AutomationGuardrailsAction:
-    """
-    Safety guardrails for automation workflows.
+@dataclass
+class GuardrailConfig:
+    """Configuration for guardrails."""
+    max_execution_time: float = 300.0
+    max_retries: int = 3
+    enable_audit_log: bool = True
+    strict_mode: bool = False
 
-    Example:
-        guardrails = AutomationGuardrailsAction()
-        guardrails.add_metric("error_rate", current_val, threshold=0.1, operator="gt")
-        guardrails.execute_with_guardrails(some_function, *args)
-    """
 
-    def __init__(self, config: Optional[CircuitBreakerConfig] = None):
-        """
-        Initialize guardrails action.
+class GuardrailViolation(Exception):
+    """Exception raised when a guardrail is violated."""
+    pass
 
-        Args:
-            config: Circuit breaker configuration.
-        """
-        self.config = config or CircuitBreakerConfig()
-        self._circuit_state = CircuitState.CLOSED
-        self._failure_count = 0
-        self._success_count = 0
-        self._last_failure_time: Optional[float] = None
-        self._total_calls = 0
-        self._half_open_calls = 0
-        self._metrics: dict[str, GuardrailMetric] = {}
-        self._guard_handlers: dict[str, Callable] = {}
 
-    def add_metric(
+class AuditLogger:
+    """Audit logger for tracking actions."""
+
+    def __init__(self, max_entries: int = 10000) -> None:
+        self.entries: List[Dict[str, Any]] = []
+        self.max_entries = max_entries
+
+    def log(
+        self,
+        action: str,
+        actor: str,
+        resource: str,
+        result: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Log an audit entry."""
+        entry = {
+            "timestamp": time.time(),
+            "action": action,
+            "actor": actor,
+            "resource": resource,
+            "result": result,
+            "metadata": metadata or {},
+        }
+        self.entries.append(entry)
+        if len(self.entries) > self.max_entries:
+            self.entries = self.entries[-self.max_entries:]
+
+    def get_entries(
+        self,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None,
+        actor: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Query audit log entries."""
+        results = self.entries
+        if start_time is not None:
+            results = [e for e in results if e["timestamp"] >= start_time]
+        if end_time is not None:
+            results = [e for e in results if e["timestamp"] <= end_time]
+        if actor is not None:
+            results = [e for e in results if e["actor"] == actor]
+        return results
+
+
+class SafetyChecker:
+    """Safety check system for automation."""
+
+    def __init__(self) -> None:
+        self.checks: Dict[str, Callable[[], bool]] = {}
+
+    def register_check(self, name: str, check_func: Callable[[], bool]) -> None:
+        """Register a safety check."""
+        self.checks[name] = check_func
+
+    def run_checks(self) -> List[str]:
+        """Run all safety checks. Returns list of failed check names."""
+        failed = []
+        for name, check in self.checks.items():
+            try:
+                if not check():
+                    failed.append(name)
+            except Exception:
+                failed.append(name)
+        return failed
+
+    def assert_safe(self) -> None:
+        """Assert all safety checks pass. Raises if any fail."""
+        failed = self.run_checks()
+        if failed:
+            raise GuardrailViolation(
+                f"Safety checks failed: {', '.join(failed)}"
+            )
+
+
+class AutomationGuardrails:
+    """Main guardrails system for automation workflows."""
+
+    def __init__(self, config: Optional[GuardrailConfig] = None) -> None:
+        self.config = config or GuardrailConfig()
+        self.resource_limits: Dict[str, ResourceLimit] = {}
+        self.permissions: Dict[str, Permission] = {}
+        self.violations: List[Violation] = []
+        self.audit_logger = AuditLogger()
+        self.safety_checker = SafetyChecker()
+        self.active_workflows: Set[str] = set()
+        self._execution_start: Optional[float] = None
+
+    def add_resource_limit(
         self,
         name: str,
-        current_value: float,
-        threshold: float,
-        operator: str = "gt"
-    ) -> GuardrailMetric:
-        """
-        Add metric for monitoring.
-
-        Args:
-            name: Metric name.
-            current_value: Current metric value.
-            threshold: Threshold value.
-            operator: Comparison operator (gt, lt, gte, lte, eq).
-
-        Returns:
-            Created GuardrailMetric.
-        """
-        triggered = self._check_threshold(current_value, threshold, operator)
-
-        metric = GuardrailMetric(
+        max_usage: int,
+        window_seconds: float,
+    ) -> None:
+        """Add a resource limit."""
+        self.resource_limits[name] = ResourceLimit(
             name=name,
-            current_value=current_value,
-            threshold=threshold,
-            operator=operator,
-            triggered=triggered
+            max_usage=max_usage,
+            window_seconds=window_seconds,
         )
 
-        self._metrics[name] = metric
-
-        if triggered:
-            self._trigger_guard(name)
-
-        return metric
-
-    def register_guard_handler(
-        self,
-        metric_name: str,
-        handler: Callable[["GuardrailMetric"], None]
-    ) -> None:
-        """
-        Register handler for when guardrail triggers.
-
-        Args:
-            metric_name: Metric name to watch.
-            handler: Function to call when triggered.
-        """
-        self._guard_handlers[metric_name] = handler
-
-    def _check_threshold(
-        self,
-        value: float,
-        threshold: float,
-        operator: str
-    ) -> bool:
-        """Check if threshold is breached."""
-        if operator == "gt":
-            return value > threshold
-        elif operator == "lt":
-            return value < threshold
-        elif operator == "gte":
-            return value >= threshold
-        elif operator == "lte":
-            return value <= threshold
-        elif operator == "eq":
-            return value == threshold
-        return False
-
-    def _trigger_guard(self, metric_name: str) -> None:
-        """Trigger guardrail handler."""
-        logger.warning(f"Guardrail triggered: {metric_name}")
-
-        handler = self._guard_handlers.get(metric_name)
-        if handler:
-            metric = self._metrics[metric_name]
-            try:
-                handler(metric)
-            except Exception as e:
-                logger.error(f"Guard handler failed: {e}")
-
-    def check_circuit_breaker(self) -> bool:
-        """
-        Check circuit breaker state.
-
-        Returns:
-            True if requests should be allowed.
-        """
-        if self._circuit_state == CircuitState.CLOSED:
+    def check_resource(self, name: str) -> bool:
+        """Check if resource usage is within limits."""
+        if name not in self.resource_limits:
             return True
 
-        if self._circuit_state == CircuitState.OPEN:
-            if self._last_failure_time:
-                elapsed = time.time() - self._last_failure_time
-                if elapsed >= self.config.timeout:
-                    self._circuit_state = CircuitState.HALF_OPEN
-                    self._half_open_calls = 0
-                    logger.info("Circuit breaker entering half-open state")
-                    return True
+        limit = self.resource_limits[name]
+        now = time.time()
 
+        # Reset window if expired
+        if now - limit.window_start >= limit.window_seconds:
+            limit.current_usage = 0
+            limit.window_start = now
+
+        return limit.current_usage < limit.max_usage
+
+    def consume_resource(self, name: str, amount: int = 1) -> bool:
+        """Consume resource usage. Returns True if allowed."""
+        if not self.check_resource(name):
+            self._record_violation(
+                ViolationType.RESOURCE_LIMIT,
+                f"Resource limit exceeded: {name}",
+                {"resource": name, "amount": amount},
+            )
             return False
 
-        if self._circuit_state == CircuitState.HALF_OPEN:
-            if self._half_open_calls < self.config.half_open_max_calls:
-                self._half_open_calls += 1
-                return True
+        if name in self.resource_limits:
+            self.resource_limits[name].current_usage += amount
+        return True
+
+    def add_permission(
+        self,
+        name: str,
+        resource: str,
+        actions: List[str],
+    ) -> None:
+        """Add a permission."""
+        self.permissions[name] = Permission(
+            name=name,
+            resource=resource,
+            actions=set(actions),
+        )
+
+    def check_permission(
+        self,
+        permission_name: str,
+        resource: str,
+        action: str,
+    ) -> bool:
+        """Check if action is permitted."""
+        if permission_name not in self.permissions:
+            if self.config.strict_mode:
+                self._record_violation(
+                    ViolationType.PERMISSION_DENIED,
+                    f"Unknown permission: {permission_name}",
+                    {"resource": resource, "action": action},
+                )
+            return not self.config.strict_mode
+
+        permission = self.permissions[permission_name]
+        if resource != permission.resource or action not in permission.actions:
+            self._record_violation(
+                ViolationType.PERMISSION_DENIED,
+                f"Permission denied: {permission_name}",
+                {"resource": resource, "action": action},
+            )
             return False
 
         return True
 
-    def record_success(self) -> None:
-        """Record successful call."""
-        self._total_calls += 1
-        self._failure_count = 0
-
-        if self._circuit_state == CircuitState.HALF_OPEN:
-            self._success_count += 1
-
-            if self._success_count >= self.config.success_threshold:
-                self._circuit_state = CircuitState.CLOSED
-                self._success_count = 0
-                logger.info("Circuit breaker closed")
-
-    def record_failure(self) -> None:
-        """Record failed call."""
-        self._total_calls += 1
-        self._failure_count += 1
-        self._last_failure_time = time.time()
-
-        if self._circuit_state == CircuitState.HALF_OPEN:
-            self._circuit_state = CircuitState.OPEN
-            logger.warning("Circuit breaker opened from half-open")
-
-        elif self._circuit_state == CircuitState.CLOSED:
-            if self._failure_count >= self.config.failure_threshold:
-                self._circuit_state = CircuitState.OPEN
-                logger.warning(f"Circuit breaker opened after {self._failure_count} failures")
+    def _record_violation(
+        self,
+        violation_type: ViolationType,
+        message: str,
+        context: Dict[str, Any],
+    ) -> None:
+        """Record a guardrail violation."""
+        violation = Violation(
+            type=violation_type,
+            message=message,
+            context=context,
+        )
+        self.violations.append(violation)
+        if self.config.enable_audit_log:
+            self.audit_logger.log(
+                action="guardrail_violation",
+                actor="system",
+                resource=str(violation_type.value),
+                result="blocked",
+                metadata={"message": message, "context": context},
+            )
 
     async def execute_with_guardrails(
         self,
+        workflow_id: str,
         func: Callable,
-        *args: Any,
-        **kwargs: Any
+        *args,
+        **kwargs,
     ) -> Any:
-        """
-        Execute function with guardrails protection.
-
-        Args:
-            func: Function to execute.
-            *args: Positional arguments.
-            **kwargs: Keyword arguments.
-
-        Returns:
-            Function result.
-
-        Raises:
-            Exception: If guardrails block execution or function fails.
-        """
-        if not self.check_circuit_breaker():
-            raise Exception("Circuit breaker is open - execution blocked")
-
-        for metric in self._metrics.values():
-            if metric.triggered:
-                raise Exception(f"Guardrail triggered: {metric.name} ({metric.operator} {metric.threshold})")
+        """Execute function with guardrail protection."""
+        self._execution_start = time.time()
+        self.active_workflows.add(workflow_id)
 
         try:
-            if asyncio.iscoroutinefunction(func):
-                result = await func(*args, **kwargs)
-            else:
-                result = await asyncio.to_thread(func, *args, **kwargs)
+            # Run safety checks
+            self.safety_checker.assert_safe()
 
-            self.record_success()
+            # Check timeout
+            elapsed = time.time() - self._execution_start
+            if elapsed > self.config.max_execution_time:
+                raise GuardrailViolation(f"Execution timeout: {elapsed:.1f}s")
+
+            # Execute
+            result = await func(*args, **kwargs)
+
             return result
 
-        except Exception as e:
-            self.record_failure()
+        except GuardrailViolation:
             raise
+        except Exception as e:
+            self._record_violation(
+                ViolationType.SAFETY_CHECK_FAILED,
+                f"Execution failed: {str(e)}",
+                {"workflow_id": workflow_id},
+            )
+            raise
+        finally:
+            self.active_workflows.discard(workflow_id)
+            self._execution_start = None
 
-    def get_circuit_state(self) -> CircuitState:
-        """Get current circuit breaker state."""
-        return self._circuit_state
-
-    def get_circuit_stats(self) -> CircuitBreakerStats:
-        """Get circuit breaker statistics."""
-        return CircuitBreakerStats(
-            state=self._circuit_state,
-            failure_count=self._failure_count,
-            success_count=self._success_count,
-            last_failure_time=self._last_failure_time,
-            total_calls=self._total_calls
-        )
-
-    def reset_circuit(self) -> None:
-        """Reset circuit breaker to closed state."""
-        self._circuit_state = CircuitState.CLOSED
-        self._failure_count = 0
-        self._success_count = 0
-        self._half_open_calls = 0
-        logger.info("Circuit breaker reset")
-
-    def update_metric(
-        self,
-        name: str,
-        value: float
-    ) -> None:
-        """
-        Update metric value.
-
-        Args:
-            name: Metric name.
-            value: New value.
-        """
-        if name not in self._metrics:
-            return
-
-        metric = self._metrics[name]
-        old_triggered = metric.triggered
-        metric.current_value = value
-        metric.triggered = self._check_threshold(value, metric.threshold, metric.operator)
-
-        if metric.triggered and not old_triggered:
-            self._trigger_guard(name)
-
-    def get_all_metrics(self) -> list[GuardrailMetric]:
-        """Get all monitored metrics."""
-        return list(self._metrics.values())
-
-    def get_triggered_metrics(self) -> list[GuardrailMetric]:
-        """Get metrics that have triggered."""
-        return [m for m in self._metrics.values() if m.triggered]
+    def get_stats(self) -> Dict[str, Any]:
+        """Get guardrail statistics."""
+        return {
+            "active_workflows": len(self.active_workflows),
+            "total_violations": len(self.violations),
+            "resource_limits": {
+                name: {
+                    "current_usage": limit.current_usage,
+                    "max_usage": limit.max_usage,
+                }
+                for name, limit in self.resource_limits.items()
+            },
+            "violations_by_type": {
+                vt.value: sum(1 for v in self.violations if v.type == vt)
+                for vt in ViolationType
+            },
+        }

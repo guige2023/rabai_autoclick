@@ -1,18 +1,19 @@
 """
 Data Filter Action Module.
 
-Provides predicate-based filtering with complex conditions,
-field selection, and projection capabilities.
+Provides declarative data filtering with conditions, expressions,
+and support for complex logical operators.
+
+Author: RabAi Team
 """
 
-import asyncio
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, Generic, TypeVar, Optional
+from __future__ import annotations
+
 import operator
 import re
-
-T = TypeVar("T")
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Union
 
 
 class FilterOperator(Enum):
@@ -35,308 +36,238 @@ class FilterOperator(Enum):
     BETWEEN = "between"
 
 
+@dataclass
 class FilterCondition:
-    """Single filter condition."""
+    """A single filter condition."""
+    field: str
+    operator: FilterOperator
+    value: Any = None
 
-    OPS = {
-        FilterOperator.EQ: operator.eq,
-        FilterOperator.NE: operator.ne,
-        FilterOperator.GT: operator.gt,
-        FilterOperator.GTE: operator.ge,
-        FilterOperator.LT: operator.lt,
-        FilterOperator.LTE: operator.le,
-        FilterOperator.CONTAINS: lambda a, b: b in a,
-        FilterOperator.NOT_CONTAINS: lambda a, b: b not in a,
-        FilterOperator.STARTS_WITH: lambda a, b: str(a).startswith(b),
-        FilterOperator.ENDS_WITH: lambda a, b: str(a).endswith(b),
-    }
-
-    def __init__(
-        self,
-        field: str,
-        op: FilterOperator,
-        value: Any = None
-    ):
-        self.field = field
-        self.op = op
-        self.value = value
-
-    def evaluate(self, record: dict) -> bool:
-        """Evaluate condition against record."""
+    def evaluate(self, record: Dict[str, Any]) -> bool:
+        """Evaluate condition against a record."""
         field_value = self._get_field_value(record, self.field)
 
-        if self.op == FilterOperator.IS_NULL:
-            return field_value is None
-        if self.op == FilterOperator.IS_NOT_NULL:
-            return field_value is not None
+        op_map = {
+            FilterOperator.EQ: operator.eq,
+            FilterOperator.NE: operator.ne,
+            FilterOperator.GT: operator.gt,
+            FilterOperator.GTE: operator.ge,
+            FilterOperator.LT: operator.lt,
+            FilterOperator.LTE: operator.le,
+            FilterOperator.CONTAINS: self._contains,
+            FilterOperator.NOT_CONTAINS: lambda a, b: not self._contains(a, b),
+            FilterOperator.STARTS_WITH: lambda a, b: str(a).startswith(str(b)),
+            FilterOperator.ENDS_WITH: lambda a, b: str(a).endswith(str(b)),
+            FilterOperator.REGEX: self._regex_match,
+            FilterOperator.IS_NULL: lambda a, b: a is None,
+            FilterOperator.IS_NOT_NULL: lambda a, b: a is not None,
+        }
 
-        if self.op == FilterOperator.IN:
+        if self.operator == FilterOperator.IN:
             return field_value in self.value
-        if self.op == FilterOperator.NOT_IN:
+        if self.operator == FilterOperator.NOT_IN:
             return field_value not in self.value
-
-        if self.op == FilterOperator.BETWEEN:
+        if self.operator == FilterOperator.BETWEEN:
             return self.value[0] <= field_value <= self.value[1]
 
-        if self.op == FilterOperator.REGEX:
-            try:
-                return bool(re.search(self.value, str(field_value)))
-            except re.error:
-                return False
+        if self.operator in op_map:
+            return op_map[self.operator](field_value, self.value)
 
-        op_func = self.OPS.get(self.op)
-        if op_func is None:
-            return False
+        return False
 
-        try:
-            return op_func(field_value, self.value)
-        except (TypeError, ValueError):
-            return False
-
-    def _get_field_value(self, record: dict, field_path: str) -> Any:
+    def _get_field_value(self, record: Dict, field_path: str) -> Any:
         """Get field value using dot notation."""
-        parts = field_path.split(".")
+        keys = field_path.split(".")
         value = record
-        for part in parts:
+        for key in keys:
             if isinstance(value, dict):
-                value = value.get(part)
+                value = value.get(key)
             else:
                 return None
         return value
 
+    def _contains(self, container: Any, item: Any) -> bool:
+        """Check if container contains item."""
+        if container is None:
+            return False
+        if isinstance(container, (list, tuple)):
+            return item in container
+        return str(item) in str(container)
 
-class FilterLogic(Enum):
-    """Logic combinators."""
+    def _regex_match(self, value: Any, pattern: str) -> bool:
+        """Check if value matches regex pattern."""
+        if value is None:
+            return False
+        try:
+            return bool(re.search(pattern, str(value)))
+        except re.error:
+            return False
+
+
+class LogicalOperator(Enum):
+    """Logical operators for combining conditions."""
     AND = "and"
     OR = "or"
     NOT = "not"
 
 
 @dataclass
-class CompositeFilter:
-    """Composite filter with logic."""
-    logic: FilterLogic
-    conditions: list = field(default_factory=list)
+class FilterGroup:
+    """A group of filter conditions with logical operators."""
+    conditions: List[Any] = field(default_factory=list)  # FilterCondition or FilterGroup
+    logical_op: LogicalOperator = LogicalOperator.AND
 
-    def evaluate(self, record: dict) -> bool:
-        """Evaluate composite filter."""
-        if self.logic == FilterLogic.AND:
-            return all(c.evaluate(record) for c in self.conditions)
-        elif self.logic == FilterLogic.OR:
-            return any(c.evaluate(record) for c in self.conditions)
-        elif self.logic == FilterLogic.NOT:
-            return not all(c.evaluate(record) for c in self.conditions)
-        return False
+    def evaluate(self, record: Dict[str, Any]) -> bool:
+        """Evaluate filter group against a record."""
+        if not self.conditions:
+            return True
 
+        results = [c.evaluate(record) for c in self.conditions]
 
-@dataclass
-class FilterConfig:
-    """Filter configuration."""
-    conditions: list[FilterCondition] = field(default_factory=list)
-    logic: FilterLogic = FilterLogic.AND
-    composite_filters: list[CompositeFilter] = field(default_factory=list)
-
-
-@dataclass
-class ProjectionConfig:
-    """Field projection configuration."""
-    include: Optional[list[str]] = None
-    exclude: Optional[list[str]] = None
-    rename: Optional[dict[str, str]] = None
-    compute: Optional[dict[str, Callable]] = None
-
-
-class DataFilter:
-    """Data filter with complex conditions."""
-
-    def __init__(self, config: Optional[FilterConfig] = None):
-        self.config = config or FilterConfig()
-        self._projection: Optional[ProjectionConfig] = None
-
-    def add_condition(
-        self,
-        field: str,
-        op: FilterOperator,
-        value: Any = None
-    ) -> "DataFilter":
-        """Add filter condition."""
-        self.config.conditions.append(
-            FilterCondition(field, op, value)
-        )
-        return self
-
-    def add_composite_filter(
-        self,
-        logic: FilterLogic,
-        conditions: list[FilterCondition]
-    ) -> "DataFilter":
-        """Add composite filter."""
-        self.config.composite_filters.append(
-            CompositeFilter(logic, conditions)
-        )
-        return self
-
-    def set_projection(self, projection: ProjectionConfig) -> "DataFilter":
-        """Set projection configuration."""
-        self._projection = projection
-        return self
-
-    def _matches_filters(self, record: dict) -> bool:
-        """Check if record matches all filters."""
-        for condition in self.config.conditions:
-            if not condition.evaluate(record):
-                return False
-
-        for composite in self.config.composite_filters:
-            if not composite.evaluate(record):
-                return False
+        if self.logical_op == LogicalOperator.AND:
+            return all(results)
+        elif self.logical_op == LogicalOperator.OR:
+            return any(results)
+        elif self.logical_op == LogicalOperator.NOT:
+            return not results[0] if results else True
 
         return True
 
-    def _apply_projection(self, record: dict) -> dict:
-        """Apply field projection."""
-        if self._projection is None:
-            return record
 
-        result = {}
+class DataFilter:
+    """Main data filter class."""
 
-        if self._projection.include:
-            for field_path in self._projection.include:
-                value = self._get_nested_value(record, field_path)
-                result[field_path] = value
-        elif self._projection.exclude:
-            result = record.copy()
-            for field_path in self._projection.exclude:
-                self._delete_nested_value(result, field_path)
-        else:
-            result = record.copy()
-
-        if self._projection.rename:
-            for old_name, new_name in self._projection.rename.items():
-                if old_name in result:
-                    result[new_name] = result.pop(old_name)
-
-        if self._projection.compute:
-            for field_name, func in self._projection.compute.items():
-                result[field_name] = func(record)
-
-        return result
-
-    def _get_nested_value(self, data: dict, path: str) -> Any:
-        """Get nested value."""
-        parts = path.split(".")
-        value = data
-        for part in parts:
-            if isinstance(value, dict):
-                value = value.get(part)
-            else:
-                return None
-        return value
-
-    def _delete_nested_value(self, data: dict, path: str) -> None:
-        """Delete nested value."""
-        parts = path.split(".")
-        current = data
-        for part in parts[:-1]:
-            if part not in current:
-                return
-            current = current[part]
-        if parts[-1] in current:
-            del current[parts[-1]]
-
-    def filter(self, data: list[dict]) -> list[dict]:
-        """Filter data."""
-        results = []
-        for record in data:
-            if self._matches_filters(record):
-                projected = self._apply_projection(record)
-                results.append(projected)
-        return results
-
-    async def filter_async(self, data: list[dict], parallel: bool = True) -> list[dict]:
-        """Filter data asynchronously."""
-        if parallel and len(data) > 1000:
-            chunk_size = 500
-            chunks = [
-                data[i:i + chunk_size]
-                for i in range(0, len(data), chunk_size)
-            ]
-
-            async def filter_chunk(chunk: list[dict]) -> list[dict]:
-                return self.filter(chunk)
-
-            tasks = [filter_chunk(chunk) for chunk in chunks]
-            chunk_results = await asyncio.gather(*tasks)
-
-            results = []
-            for chunk_result in chunk_results:
-                results.extend(chunk_result)
-            return results
-        else:
-            return self.filter(data)
-
-
-class DataFilterAction:
-    """
-    Data filtering with complex conditions.
-
-    Example:
-        filter = DataFilterAction()
-        filter.add_condition("age", FilterOperator.GTE, 18)
-        filter.add_condition("status", FilterOperator.EQ, "active")
-        filter.add_condition("name", FilterOperator.CONTAINS, "John")
-
-        results = filter.filter(users)
-    """
-
-    def __init__(self, config: Optional[FilterConfig] = None):
-        self._filter = DataFilter(config)
+    def __init__(self) -> None:
+        self.filters: List[FilterGroup] = []
 
     def add_condition(
         self,
         field: str,
-        op: FilterOperator,
-        value: Any = None
-    ) -> "DataFilterAction":
-        """Add condition."""
-        self._filter.add_condition(field, op, value)
+        operator: FilterOperator,
+        value: Any = None,
+    ) -> "DataFilter":
+        """Add a simple condition."""
+        condition = FilterCondition(field, operator, value)
+        group = FilterGroup(conditions=[condition])
+        self.filters.append(group)
         return self
 
-    def add_composite_filter(
+    def add_group(
         self,
-        logic: FilterLogic,
-        conditions: list[FilterCondition]
-    ) -> "DataFilterAction":
-        """Add composite filter."""
-        self._filter.add_composite_filter(logic, conditions)
+        conditions: List[FilterCondition],
+        logical_op: LogicalOperator = LogicalOperator.AND,
+    ) -> "DataFilter":
+        """Add a group of conditions."""
+        group = FilterGroup(conditions=conditions, logical_op=logical_op)
+        self.filters.append(group)
         return self
 
-    def set_projection(
+    def where(
         self,
-        include: Optional[list[str]] = None,
-        exclude: Optional[list[str]] = None,
-        rename: Optional[dict[str, str]] = None,
-        compute: Optional[dict[str, Callable]] = None
-    ) -> "DataFilterAction":
-        """Set field projection."""
-        self._filter.set_projection(
-            ProjectionConfig(
-                include=include,
-                exclude=exclude,
-                rename=rename,
-                compute=compute
-            )
-        )
+        field: str,
+        operator: Union[FilterOperator, str],
+        value: Any = None,
+    ) -> "DataFilter":
+        """Add condition using fluent API."""
+        if isinstance(operator, str):
+            operator = FilterOperator(operator)
+        return self.add_condition(field, operator, value)
+
+    def and_where(
+        self,
+        field: str,
+        operator: Union[FilterOperator, str],
+        value: Any = None,
+    ) -> "DataFilter":
+        """Add AND condition."""
+        return self.where(field, operator, value)
+
+    def or_where(
+        self,
+        field: str,
+        operator: Union[FilterOperator, str],
+        value: Any = None,
+    ) -> "DataFilter":
+        """Add OR condition."""
+        if isinstance(operator, str):
+            operator = FilterOperator(operator)
+        condition = FilterCondition(field, operator, value)
+        if self.filters:
+            last_group = self.filters[-1]
+            if len(last_group.conditions) == 1 and last_group.logical_op == LogicalOperator.AND:
+                # Merge into existing AND group with OR
+                new_group = FilterGroup(
+                    conditions=[last_group.conditions[0], condition],
+                    logical_op=LogicalOperator.OR,
+                )
+                self.filters[-1] = new_group
+                return self
+        group = FilterGroup(conditions=[condition], logical_op=LogicalOperator.OR)
+        self.filters.append(group)
         return self
 
-    def filter(self, data: list[dict]) -> list[dict]:
-        """Filter data."""
-        return self._filter.filter(data)
+    def evaluate(self, record: Dict[str, Any]) -> bool:
+        """Check if record passes all filters."""
+        if not self.filters:
+            return True
+        return all(group.evaluate(record) for group in self.filters)
+
+    def filter(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Filter a list of records."""
+        return [record for record in data if self.evaluate(record)]
 
     async def filter_async(
         self,
-        data: list[dict],
-        parallel: bool = True
-    ) -> list[dict]:
-        """Filter async."""
-        return await self._filter.filter_async(data, parallel)
+        data: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Async filter."""
+        return self.filter(data)
+
+    @classmethod
+    def from_dict(cls, config: Dict[str, Any]) -> "DataFilter":
+        """Create filter from dictionary config."""
+        filter_obj = cls()
+
+        conditions = config.get("conditions", [])
+        for cond in conditions:
+            field = cond.get("field")
+            op = FilterOperator(cond.get("operator", "eq"))
+            value = cond.get("value")
+            filter_obj.add_condition(field, op, value)
+
+        return filter_obj
+
+
+# Convenience functions
+def eq(field: str, value: Any) -> FilterCondition:
+    return FilterCondition(field, FilterOperator.EQ, value)
+
+def ne(field: str, value: Any) -> FilterCondition:
+    return FilterCondition(field, FilterOperator.NE, value)
+
+def gt(field: str, value: Any) -> FilterCondition:
+    return FilterCondition(field, FilterOperator.GT, value)
+
+def gte(field: str, value: Any) -> FilterCondition:
+    return FilterCondition(field, FilterOperator.GTE, value)
+
+def lt(field: str, value: Any) -> FilterCondition:
+    return FilterCondition(field, FilterOperator.LT, value)
+
+def lte(field: str, value: Any) -> FilterCondition:
+    return FilterCondition(field, FilterOperator.LTE, value)
+
+def contains(field: str, value: Any) -> FilterCondition:
+    return FilterCondition(field, FilterOperator.CONTAINS, value)
+
+def in_list(field: str, values: List[Any]) -> FilterCondition:
+    return FilterCondition(field, FilterOperator.IN, values)
+
+def is_null(field: str) -> FilterCondition:
+    return FilterCondition(field, FilterOperator.IS_NULL)
+
+def is_not_null(field: str) -> FilterCondition:
+    return FilterCondition(field, FilterOperator.IS_NOT_NULL)
+
+def between(field: str, low: Any, high: Any) -> FilterCondition:
+    return FilterCondition(field, FilterOperator.BETWEEN, [low, high])
