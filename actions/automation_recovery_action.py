@@ -1,330 +1,406 @@
-"""Automation recovery action for error recovery and retry.
+"""
+Automation Recovery Action Module
 
-Implements sophisticated recovery strategies including
-exponential backoff, circuit breaking, and state rollback.
+Provides recovery mechanisms for failed automation tasks.
+Supports automatic retry, checkpoint recovery, and state restoration.
+
+Author: rabai_autoclick team
+Version: 1.0.0
 """
 
-import asyncio
-import logging
-import time
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, Optional
+from __future__ import annotations
 
-logger = logging.getLogger(__name__)
+import asyncio
+import copy
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any, Callable, Optional, TypeVar
+import threading
+
+T = TypeVar('T')
 
 
 class RecoveryStrategy(Enum):
-    """Recovery strategies when failures occur."""
+    """Recovery strategy."""
     RETRY = "retry"
-    ROLLBACK = "rollback"
+    CHECKPOINT = "checkpoint"
+    STATE_RESTORE = "state_restore"
     FALLBACK = "fallback"
-    SKIP = "skip"
-    ABORT = "abort"
+    COMPENSATION = "compensation"
+    MANUAL = "manual"
+
+
+class RecoveryStatus(Enum):
+    """Recovery operation status."""
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    SUCCESS = "success"
+    FAILED = "failed"
+    PARTIAL = "partial"
 
 
 @dataclass
 class RecoveryConfig:
-    """Configuration for recovery behavior."""
-    max_retries: int = 3
-    initial_delay_ms: float = 100.0
-    max_delay_ms: float = 5000.0
+    """Configuration for recovery."""
+    strategy: RecoveryStrategy = RecoveryStrategy.RETRY
+    max_attempts: int = 3
+    retry_delay_seconds: float = 5.0
+    exponential_backoff: bool = True
     backoff_multiplier: float = 2.0
-    enable_rollback: bool = True
-    enable_circuit_breaker: bool = True
-    circuit_threshold: int = 5
+    checkpoint_interval: int = 10
+    state_retention_minutes: int = 60
 
 
 @dataclass
-class RecoveryState:
-    """Current state of recovery mechanism."""
-    retry_count: int = 0
-    circuit_state: str = "closed"
-    last_failure: Optional[float] = None
-    consecutive_failures: int = 0
+class Checkpoint:
+    """A recovery checkpoint."""
+    id: str
+    step: int
+    name: str
+    state: Any
+    timestamp: datetime
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RecoveryAction:
+    """A recovery action."""
+    id: str
+    strategy: RecoveryStrategy
+    target_step: int
+    action_fn: Callable
+    compensation_fn: Optional[Callable] = None
+    conditions: list[str] = field(default_factory=list)
 
 
 @dataclass
 class RecoveryResult:
     """Result of a recovery operation."""
-    success: bool
-    recovered: bool
-    strategy_used: RecoveryStrategy
-    attempts: int
-    total_time_ms: float
-    error: Optional[str] = None
+    status: RecoveryStatus
+    attempts: int = 0
+    restored_state: Any = None
+    recovered_steps: int = 0
+    total_steps: int = 0
+    errors: list[str] = field(default_factory=list)
+    duration_ms: float = 0.0
+    timestamp: datetime = field(default_factory=datetime.now)
 
 
 class AutomationRecoveryAction:
-    """Handle errors and recover from failures.
-
-    Args:
-        config: Recovery configuration options.
-        rollback_fn: Optional function to rollback state.
-
-    Example:
-        >>> recovery = AutomationRecoveryAction()
-        >>> result = await recovery.execute_with_recovery(
-        ...     fragile_operation,
-        ...     fallback_fn=backup_operation,
-        ... )
     """
-
-    def __init__(
-        self,
-        config: Optional[RecoveryConfig] = None,
-        rollback_fn: Optional[Callable[[], Any]] = None,
-    ) -> None:
+    Recovery manager for automation workflows.
+    
+    Example:
+        recovery = AutomationRecoveryAction()
+        
+        recovery.create_checkpoint(step=5, name="processed_items", state=current_state)
+        
+        result = await recovery.recover(
+            failed_at_step=7,
+            recovery_fn=resume_processing,
+            state=get_current_state()
+        )
+    """
+    
+    def __init__(self, config: Optional[RecoveryConfig] = None):
         self.config = config or RecoveryConfig()
-        self.rollback_fn = rollback_fn
-        self._state = RecoveryState()
-
-    async def execute_with_recovery(
+        self._checkpoints: dict[str, deque[Checkpoint]] = {}
+        self._recovery_actions: dict[str, list[RecoveryAction]] = {}
+        self._current_workflow_id: Optional[str] = None
+        self._workflow_states: dict[str, Any] = {}
+        self._lock = threading.Lock()
+        self._stats = {
+            "total_recoveries": 0,
+            "successful_recoveries": 0,
+            "failed_recoveries": 0,
+            "total_checkpoints": 0,
+            "total_retries": 0
+        }
+    
+    def start_workflow(self, workflow_id: str, initial_state: Any = None) -> None:
+        """Start tracking a new workflow."""
+        self._current_workflow_id = workflow_id
+        self._checkpoints[workflow_id] = deque(maxlen=100)
+        self._recovery_actions[workflow_id] = []
+        if initial_state is not None:
+            self._workflow_states[workflow_id] = copy.deepcopy(initial_state)
+    
+    def create_checkpoint(
         self,
-        operation: Callable[..., Any],
-        fallback_fn: Optional[Callable[..., Any]] = None,
-        *args: Any,
-        **kwargs: Any,
-    ) -> RecoveryResult:
-        """Execute an operation with recovery support.
-
-        Args:
-            operation: Operation to execute.
-            fallback_fn: Fallback if all retries fail.
-            *args: Positional arguments.
-            **kwargs: Keyword arguments.
-
-        Returns:
-            Recovery result with details.
+        step: int,
+        name: str,
+        state: Any,
+        metadata: Optional[dict[str, Any]] = None
+    ) -> str:
         """
-        import time
-        start_time = time.time()
-        attempts = 0
-        last_error: Optional[Exception] = None
-
-        while attempts < self.config.max_retries:
-            attempts += 1
-
-            if self._is_circuit_open():
-                logger.warning("Circuit breaker is open, using fallback")
-                return await self._use_fallback(
-                    operation, fallback_fn, args, kwargs,
-                    start_time, attempts, "Circuit breaker open"
-                )
-
+        Create a checkpoint for the current workflow.
+        
+        Args:
+            step: Current step number
+            name: Checkpoint name
+            state: State to save
+            metadata: Optional metadata
+            
+        Returns:
+            Checkpoint ID
+        """
+        if not self._current_workflow_id:
+            raise RuntimeError("No active workflow")
+        
+        checkpoint_id = f"cp_{self._current_workflow_id}_{step}_{int(datetime.now().timestamp())}"
+        
+        checkpoint = Checkpoint(
+            id=checkpoint_id,
+            step=step,
+            name=name,
+            state=copy.deepcopy(state),
+            timestamp=datetime.now(),
+            metadata=metadata or {}
+        )
+        
+        self._checkpoints[self._current_workflow_id].append(checkpoint)
+        self._workflow_states[self._current_workflow_id] = copy.deepcopy(state)
+        self._stats["total_checkpoints"] += 1
+        
+        return checkpoint_id
+    
+    def register_recovery_action(
+        self,
+        step: int,
+        strategy: RecoveryStrategy,
+        action_fn: Callable,
+        compensation_fn: Optional[Callable] = None
+    ) -> str:
+        """Register a recovery action for a step."""
+        if not self._current_workflow_id:
+            raise RuntimeError("No active workflow")
+        
+        action_id = f"action_{self._current_workflow_id}_{step}_{int(datetime.now().timestamp())}"
+        
+        action = RecoveryAction(
+            id=action_id,
+            strategy=strategy,
+            target_step=step,
+            action_fn=action_fn,
+            compensation_fn=compensation_fn
+        )
+        
+        self._recovery_actions[self._current_workflow_id].append(action)
+        return action_id
+    
+    async def recover(
+        self,
+        failed_at_step: int,
+        recovery_fn: Callable,
+        state: Any,
+        max_attempts: Optional[int] = None
+    ) -> RecoveryResult:
+        """
+        Attempt to recover from a failure.
+        
+        Args:
+            failed_at_step: Step that failed
+            recovery_fn: Function to retry
+            state: Current state
+            max_attempts: Maximum recovery attempts
+            
+        Returns:
+            RecoveryResult with recovery details
+        """
+        start_time = datetime.now()
+        max_attempts = max_attempts or self.config.max_attempts
+        self._stats["total_recoveries"] += 1
+        
+        strategy = self.config.strategy
+        
+        if strategy == RecoveryStrategy.RETRY:
+            return await self._retry_recovery(recovery_fn, state, max_attempts, start_time)
+        elif strategy == RecoveryStrategy.CHECKPOINT:
+            return await self._checkpoint_recovery(failed_at_step, recovery_fn, start_time)
+        elif strategy == RecoveryStrategy.STATE_RESTORE:
+            return await self._state_restore_recovery(failed_at_step, recovery_fn, start_time)
+        else:
+            return await self._retry_recovery(recovery_fn, state, max_attempts, start_time)
+    
+    async def _retry_recovery(
+        self,
+        recovery_fn: Callable,
+        state: Any,
+        max_attempts: int,
+        start_time: datetime
+    ) -> RecoveryResult:
+        """Recovery via retry with backoff."""
+        errors = []
+        last_error = None
+        
+        for attempt in range(1, max_attempts + 1):
             try:
-                if asyncio.iscoroutinefunction(operation):
-                    result = await operation(*args, **kwargs)
+                if asyncio.iscoroutinefunction(recovery_fn):
+                    result = await recovery_fn()
                 else:
-                    result = operation(*args, **kwargs)
-
-                self._on_success()
+                    result = recovery_fn()
+                
+                self._stats["successful_recoveries"] += 1
+                duration_ms = (datetime.now() - start_time).total_seconds() * 1000
+                
                 return RecoveryResult(
-                    success=True,
-                    recovered=attempts > 1,
-                    strategy_used=RecoveryStrategy.RETRY,
-                    attempts=attempts,
-                    total_time_ms=(time.time() - start_time) * 1000,
+                    status=RecoveryStatus.SUCCESS,
+                    attempts=attempt,
+                    restored_state=result,
+                    recovered_steps=1,
+                    total_steps=1,
+                    duration_ms=duration_ms
                 )
-
+            
             except Exception as e:
-                last_error = e
-                self._on_failure()
-                logger.warning(
-                    f"Operation attempt {attempts} failed: {e}"
-                )
-
-                if attempts < self.config.max_retries:
-                    delay = self._calculate_delay(attempts)
-                    await asyncio.sleep(delay / 1000.0)
-
-        if fallback_fn and self.config.enable_rollback:
-            return await self._attempt_rollback(
-                operation, fallback_fn, args, kwargs, start_time, attempts
-            )
-
+                last_error = str(e)
+                errors.append(f"Attempt {attempt}: {last_error}")
+                self._stats["total_retries"] += 1
+                
+                if attempt < max_attempts:
+                    delay = self.config.retry_delay_seconds
+                    if self.config.exponential_backoff:
+                        delay *= (self.config.backoff_multiplier ** (attempt - 1))
+                    await asyncio.sleep(delay)
+        
+        self._stats["failed_recoveries"] += 1
+        duration_ms = (datetime.now() - start_time).total_seconds() * 1000
+        
         return RecoveryResult(
-            success=False,
-            recovered=False,
-            strategy_used=RecoveryStrategy.ABORT,
-            attempts=attempts,
-            total_time_ms=(time.time() - start_time) * 1000,
-            error=str(last_error),
+            status=RecoveryStatus.FAILED,
+            attempts=max_attempts,
+            errors=errors,
+            duration_ms=duration_ms
         )
-
-    async def _attempt_rollback(
+    
+    async def _checkpoint_recovery(
         self,
-        operation: Callable[..., Any],
-        fallback_fn: Callable[..., Any],
-        args: tuple,
-        kwargs: dict,
-        start_time: float,
-        attempts: int,
+        failed_at_step: int,
+        recovery_fn: Callable,
+        start_time: datetime
     ) -> RecoveryResult:
-        """Attempt to rollback and use fallback.
-
-        Args:
-            operation: Original operation.
-            fallback_fn: Fallback function.
-            args: Operation arguments.
-            kwargs: Operation keyword arguments.
-            start_time: Start timestamp.
-            attempts: Number of attempts made.
-
-        Returns:
-            Recovery result.
-        """
-        if self.rollback_fn:
-            try:
-                logger.info("Attempting rollback before fallback")
-                if asyncio.iscoroutinefunction(self.rollback_fn):
-                    await self.rollback_fn()
-                else:
-                    self.rollback_fn()
-            except Exception as e:
-                logger.error(f"Rollback failed: {e}")
-
+        """Recovery from checkpoint."""
+        if not self._current_workflow_id:
+            return RecoveryResult(
+                status=RecoveryStatus.FAILED,
+                errors=["No active workflow"]
+            )
+        
+        checkpoints = self._checkpoints.get(self._current_workflow_id, [])
+        target_checkpoint = None
+        
+        for cp in reversed(checkpoints):
+            if cp.step < failed_at_step:
+                target_checkpoint = cp
+                break
+        
+        if not target_checkpoint:
+            return RecoveryResult(
+                status=RecoveryStatus.FAILED,
+                errors=["No valid checkpoint found"]
+            )
+        
         try:
-            if asyncio.iscoroutinefunction(fallback_fn):
-                result = await fallback_fn(*args, **kwargs)
-            else:
-                result = fallback_fn(*args, **kwargs)
-
+            result = await recovery_fn()
+            self._stats["successful_recoveries"] += 1
+            duration_ms = (datetime.now() - start_time).total_seconds() * 1000
+            
             return RecoveryResult(
-                success=True,
-                recovered=True,
-                strategy_used=RecoveryStrategy.FALLBACK,
-                attempts=attempts,
-                total_time_ms=(time.time() - start_time) * 1000,
+                status=RecoveryStatus.SUCCESS,
+                restored_state=target_checkpoint.state,
+                recovered_steps=failed_at_step - target_checkpoint.step,
+                total_steps=failed_at_step,
+                duration_ms=duration_ms
             )
+        
         except Exception as e:
+            self._stats["failed_recoveries"] += 1
+            duration_ms = (datetime.now() - start_time).total_seconds() * 1000
+            
             return RecoveryResult(
-                success=False,
-                recovered=False,
-                strategy_used=RecoveryStrategy.FALLBACK,
-                attempts=attempts,
-                total_time_ms=(time.time() - start_time) * 1000,
-                error=str(e),
+                status=RecoveryStatus.FAILED,
+                errors=[str(e)],
+                restored_state=target_checkpoint.state,
+                duration_ms=duration_ms
             )
-
-    async def _use_fallback(
+    
+    async def _state_restore_recovery(
         self,
-        operation: Callable[..., Any],
-        fallback_fn: Optional[Callable[..., Any]],
-        args: tuple,
-        kwargs: dict,
-        start_time: float,
-        attempts: int,
-        reason: str,
+        failed_at_step: int,
+        recovery_fn: Callable,
+        start_time: datetime
     ) -> RecoveryResult:
-        """Use fallback when circuit is open.
-
-        Args:
-            operation: Original operation.
-            fallback_fn: Fallback function.
-            args: Operation arguments.
-            kwargs: Operation keyword arguments.
-            start_time: Start timestamp.
-            attempts: Number of attempts.
-            reason: Reason for fallback.
-
-        Returns:
-            Recovery result.
-        """
-        if not fallback_fn:
+        """Recovery via state restoration."""
+        if not self._current_workflow_id:
             return RecoveryResult(
-                success=False,
-                recovered=False,
-                strategy_used=RecoveryStrategy.ABORT,
-                attempts=attempts,
-                total_time_ms=(time.time() - start_time) * 1000,
-                error=reason,
+                status=RecoveryStatus.FAILED,
+                errors=["No active workflow"]
             )
-
+        
+        saved_state = self._workflow_states.get(self._current_workflow_id)
+        
+        if saved_state is None:
+            return RecoveryResult(
+                status=RecoveryStatus.FAILED,
+                errors=["No saved state found"]
+            )
+        
         try:
-            if asyncio.iscoroutinefunction(fallback_fn):
-                await fallback_fn(*args, **kwargs)
-            else:
-                fallback_fn(*args, **kwargs)
-
+            result = await recovery_fn()
+            self._stats["successful_recoveries"] += 1
+            duration_ms = (datetime.now() - start_time).total_seconds() * 1000
+            
             return RecoveryResult(
-                success=True,
-                recovered=True,
-                strategy_used=RecoveryStrategy.FALLBACK,
-                attempts=attempts,
-                total_time_ms=(time.time() - start_time) * 1000,
+                status=RecoveryStatus.SUCCESS,
+                restored_state=saved_state,
+                recovered_steps=failed_at_step,
+                total_steps=failed_at_step,
+                duration_ms=duration_ms
             )
+        
         except Exception as e:
+            self._stats["failed_recoveries"] += 1
+            duration_ms = (datetime.now() - start_time).total_seconds() * 1000
+            
             return RecoveryResult(
-                success=False,
-                recovered=False,
-                strategy_used=RecoveryStrategy.FALLBACK,
-                attempts=attempts,
-                total_time_ms=(time.time() - start_time) * 1000,
-                error=str(e),
+                status=RecoveryStatus.FAILED,
+                errors=[str(e)],
+                restored_state=saved_state,
+                duration_ms=duration_ms
             )
-
-    def _calculate_delay(self, attempt: int) -> float:
-        """Calculate delay for retry with exponential backoff.
-
-        Args:
-            attempt: Current attempt number.
-
-        Returns:
-            Delay in milliseconds.
-        """
-        delay = self.config.initial_delay_ms * (
-            self.config.backoff_multiplier ** (attempt - 1)
-        )
-        return min(delay, self.config.max_delay_ms)
-
-    def _on_success(self) -> None:
-        """Handle successful operation."""
-        self._state.consecutive_failures = 0
-        if self._state.circuit_state == "half_open":
-            self._state.circuit_state = "closed"
-
-    def _on_failure(self) -> None:
-        """Handle failed operation."""
-        self._state.consecutive_failures += 1
-        self._state.last_failure = time.time()
-
-        if self.config.enable_circuit_breaker:
-            if self._state.consecutive_failures >= self.config.circuit_threshold:
-                self._state.circuit_state = "open"
-                logger.warning("Circuit breaker opened")
-
-    def _is_circuit_open(self) -> bool:
-        """Check if circuit breaker is open.
-
-        Returns:
-            True if circuit is open.
-        """
-        if not self.config.enable_circuit_breaker:
-            return False
-
-        if self._state.circuit_state == "open":
-            if self._state.last_failure:
-                reset_time = (
-                    self._state.last_failure +
-                    self.config.max_delay_ms / 1000 * 2
-                )
-                if time.time() > reset_time:
-                    self._state.circuit_state = "half_open"
-                    logger.info("Circuit breaker entering half-open state")
-                    return False
-            return True
-
-        return False
-
-    def reset(self) -> None:
-        """Reset recovery state."""
-        self._state = RecoveryState()
-
-    def get_state(self) -> RecoveryState:
-        """Get current recovery state.
-
-        Returns:
-            Current state.
-        """
-        return self._state
+    
+    def get_latest_checkpoint(self, workflow_id: Optional[str] = None) -> Optional[Checkpoint]:
+        """Get the latest checkpoint for a workflow."""
+        wid = workflow_id or self._current_workflow_id
+        if not wid:
+            return None
+        checkpoints = self._checkpoints.get(wid, [])
+        return checkpoints[-1] if checkpoints else None
+    
+    def get_recovery_actions(self, workflow_id: Optional[str] = None) -> list[RecoveryAction]:
+        """Get recovery actions for a workflow."""
+        wid = workflow_id or self._current_workflow_id
+        return self._recovery_actions.get(wid, []) if wid else []
+    
+    def get_stats(self) -> dict[str, Any]:
+        """Get recovery statistics."""
+        return {
+            **self._stats,
+            "active_workflows": len(self._checkpoints),
+            "recovery_rate": (
+                self._stats["successful_recoveries"] / self._stats["total_recoveries"]
+                if self._stats["total_recoveries"] > 0 else 0
+            )
+        }
+    
+    def end_workflow(self, workflow_id: Optional[str] = None) -> None:
+        """End tracking a workflow."""
+        wid = workflow_id or self._current_workflow_id
+        if wid:
+            self._checkpoints.pop(wid, None)
+            self._recovery_actions.pop(wid, None)
+            self._workflow_states.pop(wid, None)
+            if self._current_workflow_id == wid:
+                self._current_workflow_id = None
