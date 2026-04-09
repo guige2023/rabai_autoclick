@@ -1,263 +1,341 @@
 """
 Automation Observer Action Module.
 
-Implements the Observer pattern for automation event
-notification with subscription management.
+Provides Observer pattern implementation for event-driven
+automation workflows with subject/observer lifecycle management.
 """
 
-from __future__ import annotations
-
-import asyncio
-import logging
-import time
-import uuid
+from typing import Callable, Dict, List, Any, Optional, Set
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Optional
-
-logger = logging.getLogger(__name__)
+import threading
+import asyncio
+import time
+from collections import defaultdict
 
 
 class EventType(Enum):
-    """Automation event types."""
-
-    TASK_STARTED = "task_started"
-    TASK_COMPLETED = "task_completed"
-    TASK_FAILED = "task_failed"
-    TASK_CANCELLED = "task_cancelled"
-    STATE_CHANGED = "state_changed"
-    ERROR_OCCURRED = "error_occurred"
-    METRIC_UPDATED = "metric_updated"
-    CUSTOM = "custom"
+    """Common event types for automation."""
+    CREATED = "created"
+    UPDATED = "updated"
+    DELETED = "deleted"
+    STARTED = "started"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+    RETRY = "retry"
+    CANCELLED = "cancelled"
 
 
 @dataclass
-class AutomationEvent:
-    """Represents an automation event."""
-
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    event_type: EventType = EventType.CUSTOM
-    source: str = ""
+class Event:
+    """Event object passed to observers."""
+    type: EventType
+    subject_id: str
+    data: Dict[str, Any] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
-    data: dict[str, Any] = field(default_factory=dict)
-    metadata: dict[str, Any] = field(default_factory=dict)
+    source: Optional[str] = None
+
+    def __post_init__(self):
+        if isinstance(self.type, str):
+            self.type = EventType(self.type)
 
 
 @dataclass
-class Subscription:
-    """Represents an event subscription."""
+class ObserverConfig:
+    """Configuration for observer behavior."""
+    async_mode: bool = False
+    buffer_size: int = 1000
+    max_history: int = 100
+    propagate_errors: bool = False
+    error_handler: Optional[Callable[[Exception, Event], None]] = None
 
-    id: str
-    event_type: EventType
-    callback: Callable
-    filter_func: Optional[Callable] = None
-    created_at: float = field(default_factory=time.time)
-    is_active: bool = True
-    receive_count: int = 0
+
+class Observer:
+    """Base observer class."""
+
+    def __init__(
+        self,
+        observer_id: str,
+        event_types: Optional[List[EventType]] = None,
+        filter_func: Optional[Callable[[Event], bool]] = None,
+    ):
+        self.observer_id = observer_id
+        self.event_types: Set[EventType] = set(event_types or [])
+        self.filter_func = filter_func
+        self.event_count = 0
+        self.last_event: Optional[Event] = None
+        self.received_events: List[Event] = []
+
+    def can_handle(self, event: Event) -> bool:
+        """Check if observer can handle this event type."""
+        if not self.event_types:
+            return True
+        return event.type in self.event_types
+
+    def should_process(self, event: Event) -> bool:
+        """Check if observer's filter accepts this event."""
+        if self.filter_func is None:
+            return True
+        try:
+            return self.filter_func(event)
+        except Exception:
+            return False
+
+    def on_event(self, event: Event) -> None:
+        """Handle event. Override in subclass."""
+        self.event_count += 1
+        self.last_event = event
+        self.received_events.append(event)
+
+
+class AsyncObserver(Observer):
+    """Async observer for async event handling."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._queue: asyncio.Queue = None
+
+    async def on_event_async(self, event: Event) -> None:
+        """Handle event asynchronously."""
+        self.event_count += 1
+        self.last_event = event
+        self.received_events.append(event)
+
+
+class CallableObserver(Observer):
+    """Observer that wraps a callable."""
+
+    def __init__(
+        self,
+        observer_id: str,
+        handler: Callable[[Event], Any],
+        event_types: Optional[List[EventType]] = None,
+        filter_func: Optional[Callable[[Event], bool]] = None,
+    ):
+        super().__init__(observer_id, event_types, filter_func)
+        self.handler = handler
+
+    def on_event(self, event: Event) -> None:
+        super().on_event(event)
+        self.handler(event)
 
 
 class AutomationObserverAction:
     """
-    Manages observer pattern for automation events.
+    Observer pattern implementation for event-driven automation.
 
-    Features:
-    - Event subscription and filtering
-    - Synchronous and asynchronous notifications
-    - Event buffering for high-frequency events
-    - Dead letter queue for failed notifications
-
-    Example:
-        observer = AutomationObserverAction()
-        observer.subscribe(EventType.TASK_COMPLETED, on_complete_handler)
-        observer.emit(AutomationEvent(event_type=EventType.TASK_COMPLETED))
+    Manages subjects and observers with support for both sync and async
+    event handling, filtering, and error recovery.
     """
 
-    def __init__(
-        self,
-        buffer_size: int = 1000,
-        enable_dlq: bool = True,
-        max_retries: int = 3,
-    ) -> None:
-        """
-        Initialize observer action.
-
-        Args:
-            buffer_size: Event buffer size.
-            enable_dlq: Enable dead letter queue.
-            max_retries: Max notification retries.
-        """
-        self.buffer_size = buffer_size
-        self.enable_dlq = enable_dlq
-        self.max_retries = max_retries
-        self._subscriptions: dict[str, Subscription] = {}
-        self._event_buffer: list[AutomationEvent] = []
-        self._dlq: list[AutomationEvent] = []
-        self._event_count = 0
-        self._notification_errors = 0
-        self._lock = asyncio.Lock()
+    def __init__(self, config: Optional[ObserverConfig] = None):
+        self.config = config or ObserverConfig()
+        self._observers: Dict[str, Observer] = {}
+        self._subject_events: Dict[str, List[Event]] = defaultdict(list)
+        self._lock = threading.RLock()
+        self._event_history: List[Event] = []
+        self._async_mode = config.async_mode if config else False
 
     def subscribe(
         self,
+        observer_id: str,
+        event_types: Optional[List[EventType]] = None,
+        filter_func: Optional[Callable[[Event], bool]] = None,
+    ) -> Callable[[Event], None]:
+        """
+        Subscribe an observer to events.
+
+        Args:
+            observer_id: Unique identifier for observer
+            event_types: List of event types to subscribe to
+            filter_func: Optional filter function
+
+        Returns:
+            Callable to handle events
+        """
+        with self._lock:
+            if observer_id in self._observers:
+                raise ValueError(f"Observer {observer_id} already exists")
+
+            observer = CallableObserver(
+                observer_id=observer_id,
+                handler=self._create_handler(observer_id),
+                event_types=event_types,
+                filter_func=filter_func,
+            )
+            self._observers[observer_id] = observer
+            return observer.on_event
+
+    def subscribe_async(
+        self,
+        observer_id: str,
+        event_types: Optional[List[EventType]] = None,
+        filter_func: Optional[Callable[[Event], bool]] = None,
+    ) -> Callable[[Event], None]:
+        """Subscribe an async observer."""
+        with self._lock:
+            if observer_id in self._observers:
+                raise ValueError(f"Observer {observer_id} already exists")
+
+            observer = AsyncObserver(
+                observer_id=observer_id,
+                event_types=event_types,
+                filter_func=filter_func,
+            )
+            self._observers[observer_id] = observer
+            return observer.on_event
+
+    def unsubscribe(self, observer_id: str) -> None:
+        """Unsubscribe an observer."""
+        with self._lock:
+            if observer_id in self._observers:
+                del self._observers[observer_id]
+
+    def _create_handler(self, observer_id: str) -> Callable[[Event], None]:
+        """Create event handler for observer."""
+        def handler(event: Event):
+            observer = self._observers.get(observer_id)
+            if observer and observer.can_handle(event) and observer.should_process(event):
+                try:
+                    observer.on_event(event)
+                except Exception as e:
+                    if self.config.error_handler:
+                        self.config.error_handler(e, event)
+                    elif self.config.propagate_errors:
+                        raise
+        return handler
+
+    async def notify_async(self, event: Event) -> None:
+        """Notify all matching observers (async version)."""
+        for observer in list(self._observers.values()):
+            if observer.can_handle(event) and observer.should_process(event):
+                try:
+                    if asyncio.iscoroutinefunction(getattr(observer, "on_event_async", None)):
+                        await observer.on_event_async(event)
+                    elif hasattr(observer, "on_event"):
+                        observer.on_event(event)
+                except Exception as e:
+                    if self.config.error_handler:
+                        self.config.error_handler(e, event)
+                    elif self.config.propagate_errors:
+                        raise
+
+        # Record event
+        with self._lock:
+            self._event_history.append(event)
+            if len(self._event_history) > self.config.max_history:
+                self._event_history = self._event_history[-self.config.max_history:]
+
+    def notify(self, event: Event) -> None:
+        """Notify all matching observers (sync version)."""
+        if asyncio.iscoroutinefunction(self.notify_async):
+            asyncio.run(self.notify_async(event))
+        else:
+            for observer in list(self._observers.values()):
+                if observer.can_handle(event) and observer.should_process(event):
+                    try:
+                        observer.on_event(event)
+                    except Exception as e:
+                        if self.config.error_handler:
+                            self.config.error_handler(e, event)
+                        elif self.config.propagate_errors:
+                            raise
+
+            # Record event
+            with self._lock:
+                self._event_history.append(event)
+                if len(self._event_history) > self.config.max_history:
+                    self._event_history = self._event_history[-self.config.max_history:]
+
+    def emit(
+        self,
+        subject_id: str,
         event_type: EventType,
-        callback: Callable[[AutomationEvent], None],
-        filter_func: Optional[Callable] = None,
-    ) -> str:
-        """
-        Subscribe to an event type.
-
-        Args:
-            event_type: Event type to subscribe to.
-            callback: Callback function.
-            filter_func: Optional event filter.
-
-        Returns:
-            Subscription ID.
-        """
-        sub_id = str(uuid.uuid4())
-        subscription = Subscription(
-            id=sub_id,
-            event_type=event_type,
-            callback=callback,
-            filter_func=filter_func,
+        data: Optional[Dict[str, Any]] = None,
+        source: Optional[str] = None,
+    ) -> None:
+        """Emit an event."""
+        event = Event(
+            type=event_type,
+            subject_id=subject_id,
+            data=data or {},
+            timestamp=time.time(),
+            source=source,
         )
-        self._subscriptions[sub_id] = subscription
-        logger.info(f"Subscribed to {event_type.value}: {sub_id}")
-        return sub_id
 
-    def unsubscribe(self, subscription_id: str) -> bool:
-        """
-        Unsubscribe from an event.
+        # Record in subject history
+        with self._lock:
+            self._subject_events[subject_id].append(event)
+            if len(self._subject_events[subject_id]) > self.config.buffer_size:
+                self._subject_events[subject_id] = self._subject_events[subject_id][-self.config.buffer_size:]
 
-        Args:
-            subscription_id: Subscription ID.
+        self.notify(event)
 
-        Returns:
-            True if unsubscribed.
-        """
-        if subscription_id in self._subscriptions:
-            del self._subscriptions[subscription_id]
-            logger.info(f"Unsubscribed: {subscription_id}")
-            return True
-        return False
+    def get_observer(self, observer_id: str) -> Optional[Observer]:
+        """Get observer by ID."""
+        return self._observers.get(observer_id)
 
-    async def emit(
-        self,
-        event: AutomationEvent,
-        immediate: bool = False,
-    ) -> int:
-        """
-        Emit an event to all subscribers.
-
-        Args:
-            event: Event to emit.
-            immediate: Process immediately instead of buffering.
-
-        Returns:
-            Number of subscribers notified.
-        """
-        self._event_count += 1
-
-        if not immediate:
-            self._event_buffer.append(event)
-            if len(self._event_buffer) > self.buffer_size:
-                self._event_buffer.pop(0)
-
-        notified = 0
-        for subscription in self._subscriptions.values():
-            if not subscription.is_active:
-                continue
-
-            if subscription.event_type != event.event_type:
-                continue
-
-            if subscription.filter_func and not subscription.filter_func(event):
-                continue
-
-            try:
-                if asyncio.iscoroutinefunction(subscription.callback):
-                    await subscription.callback(event)
-                else:
-                    subscription.callback(event)
-
-                subscription.receive_count += 1
-                notified += 1
-
-            except Exception as e:
-                self._notification_errors += 1
-                logger.error(f"Notification error: {e}")
-
-                if self.enable_dlq:
-                    self._dlq.append(event)
-
-        logger.debug(f"Emitted event {event.id}: {notified} notified")
-        return notified
-
-    async def process_buffer(self) -> int:
-        """
-        Process all buffered events.
-
-        Returns:
-            Number of events processed.
-        """
-        processed = 0
-        async with self._lock:
-            while self._event_buffer:
-                event = self._event_buffer.pop(0)
-                await self.emit(event, immediate=True)
-                processed += 1
-
-        return processed
-
-    def get_subscriptions(
-        self,
-        event_type: Optional[EventType] = None,
-    ) -> list[Subscription]:
-        """
-        Get active subscriptions.
-
-        Args:
-            event_type: Filter by event type.
-
-        Returns:
-            List of subscriptions.
-        """
-        subs = [s for s in self._subscriptions.values() if s.is_active]
+    def get_observers(self, event_type: Optional[EventType] = None) -> List[Observer]:
+        """Get all observers, optionally filtered by event type."""
+        observers = list(self._observers.values())
         if event_type:
-            subs = [s for s in subs if s.event_type == event_type]
-        return subs
+            observers = [o for o in observers if o.can_handle(Event(type=event_type, subject_id="", data={}))]
+        return observers
 
-    def get_dlq(self) -> list[AutomationEvent]:
-        """
-        Get dead letter queue events.
+    def get_event_history(
+        self,
+        subject_id: Optional[str] = None,
+        event_type: Optional[EventType] = None,
+        limit: int = 100,
+    ) -> List[Event]:
+        """Get event history."""
+        events = self._event_history
+        if subject_id:
+            events = self._subject_events.get(subject_id, [])
+        if event_type:
+            events = [e for e in events if e.type == event_type]
+        return events[-limit:]
 
-        Returns:
-            List of DLQ events.
-        """
-        return self._dlq.copy()
-
-    def clear_dlq(self) -> int:
-        """
-        Clear dead letter queue.
-
-        Returns:
-            Number of events cleared.
-        """
-        count = len(self._dlq)
-        self._dlq.clear()
-        return count
-
-    def get_stats(self) -> dict[str, Any]:
-        """
-        Get observer statistics.
-
-        Returns:
-            Statistics dictionary.
-        """
+    def get_stats(self) -> Dict[str, Any]:
+        """Get observer statistics."""
         return {
-            "total_subscriptions": len(self._subscriptions),
-            "active_subscriptions": sum(1 for s in self._subscriptions.values() if s.is_active),
-            "total_events": self._event_count,
-            "buffered_events": len(self._event_buffer),
-            "dlq_events": len(self._dlq),
-            "notification_errors": self._notification_errors,
+            "total_observers": len(self._observers),
+            "observers_by_type": {
+                et.value: len([o for o in self._observers.values() if et in o.event_types])
+                for et in EventType
+            },
+            "total_events": len(self._event_history),
+            "events_by_type": {
+                et.value: len([e for e in self._event_history if e.type == et])
+                for et in EventType
+            },
+            "observer_counts": {
+                oid: o.event_count for oid, o in self._observers.items()
+            },
         }
+
+
+class Subject:
+    """Subject that can emit events."""
+
+    def __init__(
+        self,
+        subject_id: str,
+        observer_action: AutomationObserverAction,
+    ):
+        self.subject_id = subject_id
+        self.observer_action = observer_action
+
+    def emit(
+        self,
+        event_type: EventType,
+        data: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Emit event from this subject."""
+        self.observer_action.emit(
+            subject_id=self.subject_id,
+            event_type=event_type,
+            data=data,
+            source=self.subject_id,
+        )
