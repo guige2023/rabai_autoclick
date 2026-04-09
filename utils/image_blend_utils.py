@@ -1,468 +1,482 @@
 """
-Image blending and compositing utilities.
+Image blending and compositing utilities for UI automation.
 
-Provides utilities for blending, compositing, and layering images
-with various blend modes and opacity control.
+Provides functions for blending images, creating overlays,
+and generating visual effects.
 """
 
 from __future__ import annotations
 
-from typing import Optional, Tuple, List, Callable
-from dataclasses import dataclass
+from typing import Tuple, Optional, List, Union
+from enum import Enum, auto
 
 
-@dataclass
-class BlendRegion:
-    """Defines a rectangular region for blending operations."""
-    x: int
-    y: int
-    width: int
-    height: int
-    
-    @property
-    def right(self) -> int:
-        return self.x + self.width
-    
-    @property
-    def bottom(self) -> int:
-        return self.y + self.height
-    
-    def contains(self, px: int, py: int) -> bool:
-        """Check if a point is within this region."""
-        return self.x <= px < self.right and self.y <= py < self.bottom
+BlendMode = Enum('BlendMode', [
+    'NORMAL', 'MULTIPLY', 'SCREEN', 'OVERLAY', 
+    'DARKEN', 'LIGHTEN', 'SOFT_LIGHT', 'HARD_LIGHT',
+    'COLOR_DODGE', 'COLOR_BURN', 'DIFFERENCE', 'EXCLUSION',
+])
 
 
-@dataclass
-class Layer:
-    """Represents a single layer in a composite image."""
-    data: bytes
-    width: int
-    height: int
-    alpha: float = 1.0
-    blend_mode: str = "normal"
-    offset_x: int = 0
-    offset_y: int = 0
-    
-    @property
-    def channels(self) -> int:
-        """Return bytes per pixel (assumes RGBA)."""
-        return len(self.data) // (self.width * self.height) if self.width > 0 and self.height > 0 else 4
-
-
-def alpha_blend(base: int, overlay: int, alpha: float) -> int:
-    """Alpha blend two color values.
+def blend_pixels(
+    fg: Tuple[int, int, int],
+    bg: Tuple[int, int, int],
+    alpha: float,
+    mode: BlendMode = BlendMode.NORMAL,
+) -> Tuple[int, int, int]:
+    """Blend foreground pixel over background.
     
     Args:
-        base: Base color value (0-255)
-        overlay: Overlay color value (0-255)
-        alpha: Overlay alpha (0.0-1.0)
-        
+        fg: Foreground RGB
+        bg: Background RGB
+        alpha: Foreground alpha (0.0 to 1.0)
+        mode: Blend mode
+    
     Returns:
-        Blended color value
+        Blended RGB pixel
     """
-    return int(base * (1 - alpha) + overlay * alpha)
+    if alpha <= 0:
+        return bg
+    
+    if alpha >= 1:
+        return fg
+    
+    t = alpha
+    result = []
+    
+    for cf, cb in zip(fg, bg):
+        blended = _blend_channel(cf, cb, mode)
+        result.append(int(cb * (1 - t) + blended * t))
+    
+    return tuple(result)
 
 
-def blend_pixels_rgba(
-    base_r: int, base_g: int, base_b: int, base_a: int,
-    overlay_r: int, overlay_g: int, overlay_b: int, overlay_a: int,
-    blend_mode: str = "normal"
-) -> Tuple[int, int, int, int]:
-    """Blend two RGBA pixels using the specified blend mode.
+def _blend_channel(fg: int, bg: int, mode: BlendMode) -> float:
+    """Blend single channel."""
+    fg_f = fg / 255.0
+    bg_f = bg / 255.0
     
-    Args:
-        base_r, base_g, base_b, base_a: Base pixel components
-        overlay_r, overlay_g, overlay_b, overlay_a: Overlay pixel components
-        blend_mode: Blend mode name
-        
-    Returns:
-        Blended RGBA tuple
-    """
-    if overlay_a == 0:
-        return (base_r, base_g, base_b, base_a)
-    
-    effective_alpha = overlay_a / 255.0
-    
-    if blend_mode == "normal":
-        r = alpha_blend(base_r, overlay_r, effective_alpha)
-        g = alpha_blend(base_g, overlay_g, effective_alpha)
-        b = alpha_blend(base_b, overlay_b, effective_alpha)
-        
-    elif blend_mode == "multiply":
-        r = int(base_r * overlay_r / 255)
-        g = int(base_g * overlay_g / 255)
-        b = int(base_b * overlay_b / 255)
-        r = alpha_blend(base_r, r, effective_alpha)
-        g = alpha_blend(base_g, g, effective_alpha)
-        b = alpha_blend(base_b, b, effective_alpha)
-        
-    elif blend_mode == "screen":
-        r = int(255 - (255 - base_r) * (255 - overlay_r) / 255)
-        g = int(255 - (255 - base_g) * (255 - overlay_g) / 255)
-        b = int(255 - (255 - base_b) * (255 - overlay_b) / 255)
-        r = alpha_blend(base_r, r, effective_alpha)
-        g = alpha_blend(base_g, g, effective_alpha)
-        b = alpha_blend(base_b, b, effective_alpha)
-        
-    elif blend_mode == "overlay":
-        def overlay_channel(c1: int, c2: int) -> int:
-            if c1 < 128:
-                return int(2 * c1 * c2 / 255)
-            else:
-                return int(255 - 2 * (255 - c1) * (255 - c2) / 255)
-        r = overlay_channel(base_r, overlay_r)
-        g = overlay_channel(base_g, overlay_g)
-        b = overlay_channel(base_b, overlay_b)
-        r = alpha_blend(base_r, r, effective_alpha)
-        g = alpha_blend(base_g, g, effective_alpha)
-        b = alpha_blend(base_b, b, effective_alpha)
-        
-    elif blend_mode == "darken":
-        r = min(base_r, overlay_r)
-        g = min(base_g, overlay_g)
-        b = min(base_b, overlay_b)
-        r = alpha_blend(base_r, r, effective_alpha)
-        g = alpha_blend(base_g, g, effective_alpha)
-        b = alpha_blend(base_b, b, effective_alpha)
-        
-    elif blend_mode == "lighten":
-        r = max(base_r, overlay_r)
-        g = max(base_g, overlay_g)
-        b = max(base_b, overlay_b)
-        r = alpha_blend(base_r, r, effective_alpha)
-        g = alpha_blend(base_g, g, effective_alpha)
-        b = alpha_blend(base_b, b, effective_alpha)
-        
-    elif blend_mode == "color_dodge":
-        def dodge(c1: int, c2: int) -> int:
-            if c2 == 255:
-                return 255
-            return min(255, int(c1 / (255 - c2) * 255))
-        r = dodge(base_r, overlay_r)
-        g = dodge(base_g, overlay_g)
-        b = dodge(base_b, overlay_b)
-        r = alpha_blend(base_r, r, effective_alpha)
-        g = alpha_blend(base_g, g, effective_alpha)
-        b = alpha_blend(base_b, b, effective_alpha)
-        
-    elif blend_mode == "color_burn":
-        def burn(c1: int, c2: int) -> int:
-            if c2 == 0:
-                return 0
-            return max(0, 255 - int((255 - c1) / c2 * 255))
-        r = burn(base_r, overlay_r)
-        g = burn(base_g, overlay_g)
-        b = burn(base_b, overlay_b)
-        r = alpha_blend(base_r, r, effective_alpha)
-        g = alpha_blend(base_g, g, effective_alpha)
-        b = alpha_blend(base_b, b, effective_alpha)
-        
-    elif blend_mode == "soft_light":
-        def soft_light(c1: int, c2: int) -> int:
-            if c2 < 128:
-                return int(c1 - (255 - 2 * c2) * c1 * (255 - c1) / 255 / 256)
-            else:
-                d = 0 if c1 < 64 else int(256 * ((c1 - 64) / (255 - 64)))
-                return int(c1 + (2 * c2 - 255) * (d - c1) / 256)
-        r = soft_light(base_r, overlay_r)
-        g = soft_light(base_g, overlay_g)
-        b = soft_light(base_b, overlay_b)
-        r = alpha_blend(base_r, r, effective_alpha)
-        g = alpha_blend(base_g, g, effective_alpha)
-        b = alpha_blend(base_b, b, effective_alpha)
-        
-    elif blend_mode == "hard_light":
-        def hard_light(c1: int, c2: int) -> int:
-            if c2 < 128:
-                return int(2 * c1 * c2 / 255)
-            else:
-                return int(255 - 2 * (255 - c1) * (255 - c2) / 255)
-        r = hard_light(base_r, overlay_r)
-        g = hard_light(base_g, overlay_g)
-        b = hard_light(base_b, overlay_b)
-        r = alpha_blend(base_r, r, effective_alpha)
-        g = alpha_blend(base_g, g, effective_alpha)
-        b = alpha_blend(base_b, b, effective_alpha)
-        
-    elif blend_mode == "difference":
-        r = abs(base_r - overlay_r)
-        g = abs(base_g - overlay_g)
-        b = abs(base_b - overlay_b)
-        r = alpha_blend(base_r, r, effective_alpha)
-        g = alpha_blend(base_g, g, effective_alpha)
-        b = alpha_blend(base_b, b, effective_alpha)
-        
-    elif blend_mode == "exclusion":
-        r = int((base_r + overlay_r) / 2) - base_r * overlay_r / 128
-        g = int((base_g + overlay_g) / 2) - base_g * overlay_g / 128
-        b = int((base_b + overlay_b) / 2) - base_b * overlay_b / 128
-        r = alpha_blend(base_r, r, effective_alpha)
-        g = alpha_blend(base_g, g, effective_alpha)
-        b = alpha_blend(base_b, b, effective_alpha)
-    
+    if mode == BlendMode.NORMAL:
+        return fg_f
+    elif mode == BlendMode.MULTIPLY:
+        return fg_f * bg_f
+    elif mode == BlendMode.SCREEN:
+        return 1 - (1 - fg_f) * (1 - bg_f)
+    elif mode == BlendMode.OVERLAY:
+        if bg_f < 0.5:
+            return 2 * fg_f * bg_f
+        return 1 - 2 * (1 - fg_f) * (1 - bg_f)
+    elif mode == BlendMode.DARKEN:
+        return min(fg_f, bg_f)
+    elif mode == BlendMode.LIGHTEN:
+        return max(fg_f, bg_f)
+    elif mode == BlendMode.SOFT_LIGHT:
+        if fg_f < 0.5:
+            return bg_f - (1 - 2 * fg_f) * bg_f * (1 - bg_f)
+        d = bg_f if bg_f < 0.25 else 1 - (1 - bg_f)
+        return bg_f + (2 * fg_f - 1) * d
+    elif mode == BlendMode.HARD_LIGHT:
+        if fg_f < 0.5:
+            return 2 * fg_f * bg_f
+        return 1 - 2 * (1 - fg_f) * (1 - bg_f)
+    elif mode == BlendMode.COLOR_DODGE:
+        if fg_f >= 1:
+            return 1.0
+        return min(1.0, bg_f / (1 - fg_f))
+    elif mode == BlendMode.COLOR_BURN:
+        if fg_f <= 0:
+            return 0.0
+        return max(0.0, 1 - (1 - bg_f) / fg_f)
+    elif mode == BlendMode.DIFFERENCE:
+        return abs(fg_f - bg_f)
+    elif mode == BlendMode.EXCLUSION:
+        return fg_f + bg_f - 2 * fg_f * bg_f
     else:
-        r = alpha_blend(base_r, overlay_r, effective_alpha)
-        g = alpha_blend(base_g, overlay_g, effective_alpha)
-        b = alpha_blend(base_b, overlay_b, effective_alpha)
-    
-    # Combine alphas
-    out_a = base_a + int((255 - base_a) * overlay_a / 255)
-    
-    return (r, g, b, out_a)
+        return fg_f
 
 
-def composite_layers(
-    layers: List[Layer],
-    width: int,
-    height: int,
-    background: Tuple[int, int, int, int] = (0, 0, 0, 0)
-) -> bytes:
-    """Composite multiple layers into a single image.
+def alpha_composite(
+    fg: Tuple[int, int, int, float],
+    bg: Tuple[int, int, int, float],
+) -> Tuple[int, int, int, float]:
+    """Alpha composite two RGBA pixels.
     
     Args:
-        layers: List of layers to composite (bottom to top)
-        width: Output width
-        height: Output height
-        background: Background RGBA color
-        
+        fg: Foreground RGBA
+        bg: Background RGBA
+    
     Returns:
-        Composite image data as RGBA bytes
+        Composited RGBA
     """
-    # Initialize output with background
-    output = bytearray(width * height * 4)
+    rf, gf, bf, af = fg
+    rb, gb, bb, ab = bg
     
-    # Fill with background
-    for i in range(width * height):
-        output[i * 4:(i + 1) * 4] = background
+    out_alpha = af + ab * (1 - af)
     
-    # Composite each layer
-    for layer in layers:
-        layer_data = layer.data
-        
-        for py in range(layer.height):
-            for px in range(layer.width):
-                # Calculate output position
-                out_x = px + layer.offset_x
-                out_y = py + layer.offset_y
-                
-                if out_x < 0 or out_x >= width or out_y < 0 or out_y >= height:
-                    continue
-                
-                # Get layer pixel (assumes RGBA)
-                layer_idx = (py * layer.width + px) * 4
-                if layer_idx + 3 >= len(layer_data):
-                    continue
-                
-                lr = layer_data[layer_idx]
-                lg = layer_data[layer_idx + 1]
-                lb = layer_data[layer_idx + 2]
-                la = int(layer_data[layer_idx + 3] * layer.alpha)
-                
-                # Get output pixel
-                out_idx = (out_y * width + out_x) * 4
-                or_val = output[out_idx]
-                og_val = output[out_idx + 1]
-                ob_val = output[out_idx + 2]
-                oa_val = output[out_idx + 3]
-                
-                # Blend
-                br, bg, bb, ba = blend_pixels_rgba(
-                    or_val, og_val, ob_val, oa_val,
-                    lr, lg, lb, la,
-                    layer.blend_mode
-                )
-                
-                output[out_idx] = br
-                output[out_idx + 1] = bg
-                output[out_idx + 2] = bb
-                output[out_idx + 3] = ba
+    if out_alpha == 0:
+        return (0, 0, 0, 0)
     
-    return bytes(output)
+    out_r = (rf * af + rb * ab * (1 - af)) / out_alpha
+    out_g = (gf * af + gb * ab * (1 - af)) / out_alpha
+    out_b = (bf * af + bb * ab * (1 - af)) / out_alpha
+    
+    return (int(out_r), int(out_g), int(out_b), out_alpha)
 
 
-def create_gradient_layer(
-    width: int,
-    height: int,
-    start_color: Tuple[int, int, int, int],
-    end_color: Tuple[int, int, int, int],
-    direction: str = "vertical"
-) -> Layer:
-    """Create a gradient layer.
+def gradient_blend(
+    color1: Tuple[int, int, int],
+    color2: Tuple[int, int, int],
+    positions: List[float],
+) -> List[Tuple[int, int, int]]:
+    """Create gradient between two colors.
     
     Args:
-        width: Layer width
-        height: Layer height
-        start_color: Starting RGBA color
-        end_color: Ending RGBA color
-        direction: Gradient direction ('vertical', 'horizontal', 'diagonal')
-        
+        color1: Start color RGB
+        color2: End color RGB
+        positions: List of positions (0.0 to 1.0)
+    
     Returns:
-        Layer with gradient data
+        List of blended colors
     """
-    data = bytearray(width * height * 4)
+    result = []
+    
+    for pos in positions:
+        pos = max(0.0, min(1.0, pos))
+        t = pos
+        
+        r = int(color1[0] * (1 - t) + color2[0] * t)
+        g = int(color1[1] * (1 - t) + color2[1] * t)
+        b = int(color1[2] * (1 - t) + color2[2] * t)
+        
+        result.append((r, g, b))
+    
+    return result
+
+
+def linear_gradient(
+    start: Tuple[int, int],
+    end: Tuple[int, int],
+    color1: Tuple[int, int, int],
+    color2: Tuple[int, int, int],
+    width: int,
+    height: int,
+) -> List[List[Tuple[int, int, int]]]:
+    """Create linear gradient image.
+    
+    Args:
+        start: Start point (x, y)
+        end: End point (x, y)
+        color1: Start color RGB
+        color2: End color RGB
+        width: Image width
+        height: Image height
+    
+    Returns:
+        2D list of pixel colors
+    """
+    from math import sqrt
+    
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length = sqrt(dx * dx + dy * dy)
+    
+    if length == 0:
+        return [[color1 for _ in range(width)] for _ in range(height)]
+    
+    image = []
     
     for y in range(height):
+        row = []
         for x in range(width):
-            if direction == "vertical":
-                factor = y / (height - 1) if height > 1 else 0
-            elif direction == "horizontal":
-                factor = x / (width - 1) if width > 1 else 0
-            elif direction == "diagonal":
-                factor = (x + y) / (width + height - 2)
-            else:
-                factor = y / (height - 1) if height > 1 else 0
+            px = x - start[0]
+            py = y - start[1]
             
-            factor = max(0, min(1, factor))
+            t = max(0.0, min(1.0, (px * dx + py * dy) / (length * length)))
             
-            r = int(start_color[0] + (end_color[0] - start_color[0]) * factor)
-            g = int(start_color[1] + (end_color[1] - start_color[1]) * factor)
-            b = int(start_color[2] + (end_color[2] - start_color[2]) * factor)
-            a = int(start_color[3] + (end_color[3] - start_color[3]) * factor)
+            r = int(color1[0] * (1 - t) + color2[0] * t)
+            g = int(color1[1] * (1 - t) + color2[1] * t)
+            b = int(color1[2] * (1 - t) + color2[2] * t)
             
-            idx = (y * width + x) * 4
-            data[idx] = r
-            data[idx + 1] = g
-            data[idx + 2] = b
-            data[idx + 3] = a
+            row.append((r, g, b))
+        
+        image.append(row)
     
-    return Layer(
-        data=bytes(data),
-        width=width,
-        height=height,
-        alpha=1.0,
-        blend_mode="normal"
+    return image
+
+
+def radial_gradient(
+    center: Tuple[int, int],
+    radius: float,
+    color1: Tuple[int, int, int],
+    color2: Tuple[int, int, int],
+    width: int,
+    height: int,
+) -> List[List[Tuple[int, int, int]]]:
+    """Create radial gradient image.
+    
+    Args:
+        center: Center point (x, y)
+        radius: Gradient radius
+        color1: Center color RGB
+        color2: Edge color RGB
+        width: Image width
+        height: Image height
+    
+    Returns:
+        2D list of pixel colors
+    """
+    from math import sqrt
+    
+    image = []
+    
+    for y in range(height):
+        row = []
+        for x in range(width):
+            dx = x - center[0]
+            dy = y - center[1]
+            dist = sqrt(dx * dx + dy * dy)
+            
+            t = max(0.0, min(1.0, dist / radius))
+            
+            r = int(color1[0] * (1 - t) + color2[0] * t)
+            g = int(color1[1] * (1 - t) + color2[1] * t)
+            b = int(color1[2] * (1 - t) + color2[2] * t)
+            
+            row.append((r, g, b))
+        
+        image.append(row)
+    
+    return image
+
+
+def apply_opacity(
+    rgb: Tuple[int, int, int],
+    alpha: float,
+    background: Optional[Tuple[int, int, int]] = (255, 255, 255),
+) -> Tuple[int, int, int]:
+    """Apply opacity to RGB color with background.
+    
+    Args:
+        rgb: RGB color
+        alpha: Opacity (0.0 to 1.0)
+        background: Background color for blending
+    
+    Returns:
+        Blended RGB
+    """
+    if background is None:
+        background = (255, 255, 255)
+    
+    result = []
+    for cf, cb in zip(rgb, background):
+        result.append(int(cf * alpha + cb * (1 - alpha)))
+    
+    return tuple(result)
+
+
+def multiply_blend(
+    top: Tuple[int, int, int],
+    bottom: Tuple[int, int, int],
+) -> Tuple[int, int, int]:
+    """Multiply blend two RGB colors.
+    
+    Args:
+        top: Top layer RGB
+        bottom: Bottom layer RGB
+    
+    Returns:
+        Blended RGB
+    """
+    return tuple(int((t * b) / 255) for t, b in zip(top, bottom))
+
+
+def screen_blend(
+    top: Tuple[int, int, int],
+    bottom: Tuple[int, int, int],
+) -> Tuple[int, int, int]:
+    """Screen blend two RGB colors.
+    
+    Args:
+        top: Top layer RGB
+        bottom: Bottom layer RGB
+    
+    Returns:
+        Blended RGB
+    """
+    return tuple(
+        int(255 - (255 - t) * (255 - b) / 255) 
+        for t, b in zip(top, bottom)
     )
 
 
-def apply_vignette(
-    image_data: bytes,
-    width: int,
-    height: int,
-    strength: float = 0.5,
-    radius: float = 0.5
-) -> bytes:
-    """Apply a vignette effect to an image.
+def overlay_blend(
+    top: Tuple[int, int, int],
+    bottom: Tuple[int, int, int],
+) -> Tuple[int, int, int]:
+    """Overlay blend two RGB colors.
     
     Args:
-        image_data: RGBA image data
+        top: Top layer RGB
+        bottom: Bottom layer RGB
+    
+    Returns:
+        Blended RGB
+    """
+    result = []
+    for t, b in zip(top, bottom):
+        t_f = t / 255.0
+        b_f = b / 255.0
+        
+        if b_f < 0.5:
+            val = 2 * t_f * b_f
+        else:
+            val = 1 - 2 * (1 - t_f) * (1 - b_f)
+        
+        result.append(int(val * 255))
+    
+    return tuple(result)
+
+
+def create_vignette(
+    width: int,
+    height: int,
+    center: Optional[Tuple[int, int]] = None,
+    strength: float = 0.5,
+) -> List[List[float]]:
+    """Create vignette opacity map.
+    
+    Args:
         width: Image width
         height: Image height
-        strength: Vignette strength (0.0-1.0)
-        radius: Radius of effect (0.0-1.0, where 1.0 is corners)
-        
+        center: Vignette center (defaults to image center)
+        strength: Vignette strength (0.0 to 1.0)
+    
     Returns:
-        Modified image data
+        2D list of opacity values
     """
-    output = bytearray(image_data)
-    cx = width / 2
-    cy = height / 2
-    max_dist = ((cx * cx) + (cy * cy)) ** 0.5
+    if center is None:
+        cx, cy = width / 2, height / 2
+    else:
+        cx, cy = center
+    
+    max_dist = ((width / 2) ** 2 + (height / 2) ** 2) ** 0.5
+    
+    vignette = []
     
     for y in range(height):
+        row = []
         for x in range(width):
             dx = x - cx
             dy = y - cy
             dist = (dx * dx + dy * dy) ** 0.5
             
-            normalized_dist = min(1.0, dist / max_dist)
+            t = min(1.0, dist / max_dist)
+            opacity = strength * (t * t)
             
-            # Vignette curve
-            vignette = 1.0 - (normalized_dist - (1.0 - radius)) / radius
-            vignette = max(0.0, min(1.0, vignette))
-            vignette = vignette ** 2  # Sharper falloff
-            
-            factor = 1.0 - (vignette * strength)
-            
-            idx = (y * width + x) * 4
-            output[idx] = int(image_data[idx] * factor)
-            output[idx + 1] = int(image_data[idx + 1] * factor)
-            output[idx + 2] = int(image_data[idx + 2] * factor)
+            row.append(opacity)
+        
+        vignette.append(row)
     
-    return bytes(output)
+    return vignette
 
 
-def apply_blur_edge(
-    image_data: bytes,
-    width: int,
-    height: int,
-    edge_pixels: int = 5
-) -> bytes:
-    """Apply blur to edges of an image (for feathering).
+def apply_vignette(
+    image: List[List[Tuple[int, int, int]]],
+    strength: float = 0.5,
+    color: Optional[Tuple[int, int, int]] = None,
+) -> List[List[Tuple[int, int, int]]]:
+    """Apply vignette effect to image.
     
     Args:
-        image_data: RGBA image data
-        width: Image width
-        height: Image height
-        edge_pixels: Number of edge pixels to blur
+        image: 2D image RGB list
+        strength: Vignette strength
+        color: Vignette color (defaults to black)
+    
+    Returns:
+        Image with vignette applied
+    """
+    if color is None:
+        color = (0, 0, 0)
+    
+    height = len(image)
+    width = len(image[0]) if height > 0 else 0
+    
+    vignette_map = create_vignette(width, height, strength=strength)
+    
+    result = []
+    
+    for y in range(height):
+        row = []
+        for x in range(width):
+            pixel = image[y][x]
+            opacity = vignette_map[y][x]
+            
+            blended = []
+            for cf, cv in zip(pixel, color):
+                blended.append(int(cf * (1 - opacity) + cv * opacity))
+            
+            row.append(tuple(blended))
         
-    Returns:
-        Modified image data with blurred edges
-    """
-    output = bytearray(image_data)
+        result.append(row)
     
-    # Top edge
-    for y in range(edge_pixels):
-        factor = y / edge_pixels
-        for x in range(width):
-            idx = (y * width + x) * 4
-            # Average with pixel below
-            below_idx = ((y + 1) * width + x) * 4
-            for c in range(4):
-                output[idx + c] = int(image_data[idx + c] * factor + 
-                                     image_data[below_idx + c] * (1 - factor))
-    
-    # Bottom edge
-    for y in range(height - edge_pixels, height):
-        offset = height - 1 - y
-        factor = offset / edge_pixels
-        for x in range(width):
-            idx = (y * width + x) * 4
-            above_idx = ((y - 1) * width + x) * 4
-            for c in range(4):
-                output[idx + c] = int(image_data[idx + c] * factor + 
-                                     image_data[above_idx + c] * (1 - factor))
-    
-    # Left edge
-    for x in range(edge_pixels):
-        factor = x / edge_pixels
-        for y in range(width):
-            idx = (y * width + x) * 4
-            right_idx = (y * width + x + 1) * 4
-            for c in range(4):
-                output[idx + c] = int(image_data[idx + c] * factor + 
-                                     image_data[right_idx + c] * (1 - factor))
-    
-    # Right edge
-    for x in range(width - edge_pixels, width):
-        offset = width - 1 - x
-        factor = offset / edge_pixels
-        for y in range(height):
-            idx = (y * width + x) * 4
-            left_idx = (y * width + x - 1) * 4
-            for c in range(4):
-                output[idx + c] = int(image_data[idx + c] * factor + 
-                                     image_data[left_idx + c] * (1 - factor))
-    
-    return bytes(output)
+    return result
 
 
-def get_blend_mode_names() -> List[str]:
-    """Get list of available blend mode names.
+def color_dodge(fg: Tuple[int, int, int], bg: Tuple[int, int, int]) -> Tuple[int, int, int]:
+    """Color dodge blend.
+    
+    Args:
+        fg: Foreground RGB
+        bg: Background RGB
     
     Returns:
-        List of blend mode names
+        Blended RGB
     """
-    return [
-        "normal",
-        "multiply",
-        "screen",
-        "overlay",
-        "darken",
-        "lighten",
-        "color_dodge",
-        "color_burn",
-        "soft_light",
-        "hard_light",
-        "difference",
-        "exclusion",
-    ]
+    return tuple(
+        int(255 if f == 255 else min(255, b * 255 // (255 - f)))
+        if f != 255 else 255
+        for f, b in zip(fg, bg)
+    )
+
+
+def color_burn(fg: Tuple[int, int, int], bg: Tuple[int, int, int]) -> Tuple[int, int, int]:
+    """Color burn blend.
+    
+    Args:
+        fg: Foreground RGB
+        bg: Background RGB
+    
+    Returns:
+        Blended RGB
+    """
+    return tuple(
+        int(0 if f == 0 else max(0, 255 - (255 - b) * 255 // f))
+        if f != 0 else 0
+        for f, b in zip(fg, bg)
+    )
+
+
+def difference_blend(fg: Tuple[int, int, int], bg: Tuple[int, int, int]) -> Tuple[int, int, int]:
+    """Difference blend.
+    
+    Args:
+        fg: Foreground RGB
+        bg: Background RGB
+    
+    Returns:
+        Blended RGB
+    """
+    return tuple(abs(f - b) for f, b in zip(fg, bg))
+
+
+def exclusion_blend(fg: Tuple[int, int, int], bg: Tuple[int, int, int]) -> Tuple[int, int, int]:
+    """Exclusion blend.
+    
+    Args:
+        fg: Foreground RGB
+        bg: Background RGB
+    
+    Returns:
+        Blended RGB
+    """
+    return tuple(f + b - 2 * f * b // 255 for f, b in zip(fg, bg))
