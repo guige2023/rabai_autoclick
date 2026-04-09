@@ -1,322 +1,242 @@
-"""API partition action module for RabAI AutoClick.
+"""API partitioning and sharding utilities.
 
-Provides API request partitioning:
-- ApiPartitionAction: Partition large API requests
-- ApiPartitionByKeyAction: Partition by key/range
-- ApiPartitionBySizeAction: Partition by size limits
-- ApiPartitionMergeAction: Merge partitioned results
+This module provides API partitioning:
+- Consistent hashing
+- Round-robin distribution
+- Weighted routing
+- Partition management
+
+Example:
+    >>> from actions.api_partition_action import PartitionRouter
+    >>> router = PartitionRouter(partitions=10)
+    >>> partition = router.route(api_key)
 """
 
-from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from __future__ import annotations
 
-import sys
-import os
+import hashlib
+import threading
+from typing import Any, Callable, Optional
+from dataclasses import dataclass, field
+from collections import defaultdict
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
-
-
-class ApiPartitionAction(BaseAction):
-    """Partition large API requests into smaller chunks."""
-    action_type = "api_partition"
-    display_name = "API分区"
-    description = "将大型API请求分区"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "partition")
-            data = params.get("data", [])
-            partition_by = params.get("partition_by", "count")
-            partition_size = params.get("partition_size", 100)
-            partition_count = params.get("partition_count", 4)
-            key = params.get("key")
-
-            if operation == "partition":
-                if not data:
-                    return ActionResult(success=False, message="data is required")
-
-                if partition_by == "count":
-                    partitions = self._partition_by_count(data, partition_size)
-                elif partition_by == "number":
-                    partitions = self._partition_by_count(data, (len(data) + partition_count - 1) // partition_count)
-                elif partition_by == "key" and key:
-                    partitions = self._partition_by_key(data, key, partition_count)
-                else:
-                    partitions = self._partition_by_count(data, partition_size)
-
-                return ActionResult(
-                    success=True,
-                    message=f"Partitioned into {len(partitions)} parts",
-                    data={"partitions": partitions, "partition_count": len(partitions), "total_items": len(data)}
-                )
-
-            elif operation == "execute":
-                url = params.get("url")
-                method = params.get("method", "POST")
-                partitions = params.get("partitions", [])
-                parallel = params.get("parallel", False)
-
-                if not url or not partitions:
-                    return ActionResult(success=False, message="url and partitions required")
-
-                results = []
-                if parallel:
-                    with ThreadPoolExecutor(max_workers=min(len(partitions), 5)) as executor:
-                        futures = {executor.submit(self._execute_partition, url, method, p): i for i, p in enumerate(partitions)}
-                        for future in as_completed(futures):
-                            results.append(future.result())
-                else:
-                    for p in partitions:
-                        results.append(self._execute_partition(url, method, p))
-
-                return ActionResult(
-                    success=True,
-                    message=f"Executed {len(results)} partitions",
-                    data={"results": results, "partition_count": len(partitions)}
-                )
-
-            return ActionResult(success=False, message=f"Unknown operation: {operation}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"API partition error: {e}")
-
-    def _partition_by_count(self, data: List, size: int) -> List[List]:
-        """Partition by item count."""
-        return [data[i:i + size] for i in range(0, len(data), size)]
-
-    def _partition_by_key(self, data: List[Dict], key: str, num_partitions: int) -> List[List]:
-        """Partition by key hash."""
-        buckets = [[] for _ in range(num_partitions)]
-        for item in data:
-            if isinstance(item, dict) and key in item:
-                hash_val = hash(str(item[key])) % num_partitions
-                buckets[hash_val].append(item)
-            else:
-                buckets[0].append(item)
-        return [b for b in buckets if b]
-
-    def _execute_partition(self, url: str, method: str, partition: Any) -> Dict[str, Any]:
-        """Execute a single partition."""
-        try:
-            import urllib.request
-            import json as json_module
-
-            data = json_module.dumps(partition).encode() if isinstance(partition, (dict, list)) else str(partition).encode()
-            req = urllib.request.Request(url, method=method, data=data)
-            req.add_header("Content-Type", "application/json")
-
-            with urllib.request.urlopen(req, timeout=60) as response:
-                content = response.read().decode()
-                return {"success": True, "content": content, "status": response.status, "size": len(partition)}
-        except Exception as e:
-            return {"success": False, "error": str(e), "size": len(partition) if hasattr(partition, "__len__") else 0}
+logger = __import__('logging').getLogger(__name__)
 
 
-class ApiPartitionByKeyAction(BaseAction):
-    """Partition API requests by key/range."""
-    action_type = "api_partition_by_key"
-    display_name = "API按键分区"
-    description = "按键或范围分区API请求"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            partition_key = params.get("partition_key")
-            ranges = params.get("ranges", [])
-
-            if not data:
-                return ActionResult(success=False, message="data is required")
-
-            if partition_key and not ranges:
-                keys = set()
-                for item in data:
-                    if isinstance(item, dict) and partition_key in item:
-                        keys.add(item[partition_key])
-
-                key_partitions = {}
-                for key in keys:
-                    key_partitions[str(key)] = [item for item in data if isinstance(item, dict) and item.get(partition_key) == key]
-
-                return ActionResult(
-                    success=True,
-                    message=f"Partitioned by key '{partition_key}': {len(key_partitions)} partitions",
-                    data={"partitions": key_partitions, "partition_count": len(key_partitions), "keys": list(keys)}
-                )
-
-            elif ranges:
-                range_partitions = []
-                for r in ranges:
-                    min_val = r.get("min")
-                    max_val = r.get("max")
-                    partition = [item for item in data if isinstance(item, dict) and partition_key in item and min_val <= item.get(partition_key) <= max_val]
-                    range_partitions.append({"range": r, "items": partition, "count": len(partition)})
-
-                return ActionResult(
-                    success=True,
-                    message=f"Partitioned into {len(range_partitions)} range partitions",
-                    data={"partitions": range_partitions, "partition_count": len(range_partitions)}
-                )
-
-            return ActionResult(success=False, message="partition_key or ranges required")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Partition by key error: {e}")
+@dataclass
+class Partition:
+    """A partition for routing."""
+    id: int
+    weight: int = 1
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
-class ApiPartitionBySizeAction(BaseAction):
-    """Partition by size limits."""
-    action_type = "api_partition_by_size"
-    display_name = "API按大小分区"
-    description = "按大小限制分区"
+class PartitionRouter:
+    """Route requests to partitions using various strategies.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            max_partition_size = params.get("max_partition_size", 1000)
-            max_partition_bytes = params.get("max_partition_bytes", 1024 * 1024)
-            size_by = params.get("size_by", "items")
+    Example:
+        >>> router = PartitionRouter(partitions=10, strategy="consistent_hash")
+        >>> partition = router.route("user-123")
+    """
 
-            if not data:
-                return ActionResult(success=False, message="data is required")
+    STRATEGIES = ["consistent_hash", "round_robin", "random", "weighted"]
 
-            partitions = []
-            current_partition = []
-            current_size = 0
+    def __init__(
+        self,
+        partitions: int = 10,
+        strategy: str = "consistent_hash",
+        weights: Optional[list[int]] = None,
+    ) -> None:
+        if strategy not in self.STRATEGIES:
+            raise ValueError(f"Unknown strategy: {strategy}")
+        self.partitions = partitions
+        self.strategy = strategy
+        self._partition_weights = weights or [1] * partitions
+        self._round_robin_index = 0
+        self._round_robin_lock = threading.Lock()
+        self._partition_metadata: dict[int, dict[str, Any]] = {}
 
-            for item in data:
-                item_size = self._get_item_size(item, size_by)
+    def route(self, key: str) -> int:
+        """Route a key to a partition.
 
-                if len(current_partition) >= max_partition_size or current_size + item_size > max_partition_bytes:
-                    if current_partition:
-                        partitions.append(current_partition)
-                    current_partition = []
-                    current_size = 0
+        Args:
+            key: Key to route.
 
-                current_partition.append(item)
-                current_size += item_size
+        Returns:
+            Partition index.
+        """
+        if self.strategy == "consistent_hash":
+            return self._consistent_hash(key)
+        elif self.strategy == "round_robin":
+            return self._round_robin()
+        elif self.strategy == "random":
+            import random
+            return random.randint(0, self.partitions - 1)
+        elif self.strategy == "weighted":
+            return self._weighted_route(key)
+        return self._consistent_hash(key)
 
-            if current_partition:
-                partitions.append(current_partition)
+    def _consistent_hash(self, key: str) -> int:
+        """Consistent hash routing."""
+        hash_value = int(hashlib.md5(key.encode()).hexdigest(), 16)
+        return hash_value % self.partitions
 
-            partition_info = [
-                {"index": i, "count": len(p), "bytes": sum(self._get_item_size(item, size_by) for item in p)}
-                for i, p in enumerate(partitions)
-            ]
+    def _round_robin(self) -> int:
+        """Round-robin routing."""
+        with self._round_robin_lock:
+            partition = self._round_robin_index
+            self._round_robin_index = (self._round_robin_index + 1) % self.partitions
+            return partition
 
-            return ActionResult(
-                success=True,
-                message=f"Partitioned into {len(partitions)} parts by size ({size_by})",
-                data={"partitions": partitions, "partition_info": partition_info, "total_items": len(data)}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Partition by size error: {e}")
+    def _weighted_route(self, key: str) -> int:
+        """Weighted routing based on partition weights."""
+        hash_value = int(hashlib.md5(key.encode()).hexdigest(), 16)
+        total_weight = sum(self._partition_weights)
+        normalized = (hash_value % total_weight) + 1
+        cumulative = 0
+        for i, weight in enumerate(self._partition_weights):
+            cumulative += weight
+            if normalized <= cumulative:
+                return i
+        return self.partitions - 1
 
-    def _get_item_size(self, item: Any, size_by: str) -> int:
-        """Get size of an item."""
-        if size_by == "items":
-            return 1
-        elif size_by == "json":
-            import json
-            return len(json.dumps(item))
-        elif size_by == "str":
-            return len(str(item))
-        return 1
+    def set_partition_metadata(
+        self,
+        partition_id: int,
+        metadata: dict[str, Any],
+    ) -> None:
+        """Set metadata for a partition."""
+        self._partition_metadata[partition_id] = metadata
+
+    def get_partition_metadata(self, partition_id: int) -> dict[str, Any]:
+        """Get metadata for a partition."""
+        return self._partition_metadata.get(partition_id, {})
 
 
-class ApiPartitionMergeAction(BaseAction):
-    """Merge partitioned API results."""
-    action_type = "api_partition_merge"
-    display_name = "API分区合并"
-    description = "合并分区API结果"
+class ShardManager:
+    """Manage sharded data storage.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            partition_results = params.get("partition_results", [])
-            merge_strategy = params.get("merge_strategy", "concat")
-            deduplicate = params.get("deduplicate", False)
-            dedupe_key = params.get("dedupe_key")
+    Example:
+        >>> manager = ShardManager(num_shards=4, key_func=lambda x: x["user_id"])
+        >>> shard = manager.get_shard(user_data)
+    """
 
-            if not partition_results:
-                return ActionResult(success=False, message="partition_results required")
+    def __init__(
+        self,
+        num_shards: int = 10,
+        key_func: Optional[Callable[[Any], str]] = None,
+    ) -> None:
+        self.num_shards = num_shards
+        self.key_func = key_func or (lambda x: str(x) if not isinstance(x, str) else x)
+        self._shards: dict[int, list[Any]] = defaultdict(list)
+        self._shard_locks: dict[int, threading.Lock] = {
+            i: threading.Lock() for i in range(num_shards)
+        }
 
-            merged = []
+    def get_shard_id(self, key: str) -> int:
+        """Get shard ID for a key."""
+        hash_value = int(hashlib.md5(key.encode()).hexdigest(), 16)
+        return hash_value % self.num_shards
 
-            for result in partition_results:
-                if isinstance(result, dict):
-                    if "data" in result:
-                        merged.append(result["data"])
-                    elif "content" in result:
-                        try:
-                            import json
-                            merged.append(json.loads(result["content"]))
-                        except Exception:
-                            merged.append(result["content"])
-                elif isinstance(result, (list, tuple)):
-                    merged.extend(result)
-                else:
-                    merged.append(result)
+    def get_shard(self, key: str) -> list[Any]:
+        """Get all items in a shard."""
+        shard_id = self.get_shard_id(key)
+        return self._shards[shard_id]
 
-            if merge_strategy == "concat":
-                final = self._flatten(merged)
-            elif merge_strategy == "union":
-                final = self._union(merged)
-            else:
-                final = self._flatten(merged)
+    def add(self, item: Any, key: Optional[str] = None) -> int:
+        """Add an item to its shard.
 
-            if deduplicate and dedupe_key:
-                final = self._deduplicate_by_key(final, dedupe_key)
-            elif deduplicate:
-                final = list(dict.fromkeys(final))
+        Returns:
+            Shard ID where item was added.
+        """
+        key = key or self.key_func(item)
+        shard_id = self.get_shard_id(key)
+        with self._shard_locks[shard_id]:
+            self._shards[shard_id].append(item)
+        return shard_id
 
-            return ActionResult(
-                success=True,
-                message=f"Merged {len(partition_results)} results into {len(final)} items",
-                data={"merged": final, "merged_count": len(final), "source_count": len(partition_results)}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Merge error: {e}")
+    def remove(self, item: Any, key: Optional[str] = None) -> bool:
+        """Remove an item from its shard."""
+        key = key or self.key_func(item)
+        shard_id = self.get_shard_id(key)
+        with self._shard_locks[shard_id]:
+            if item in self._shards[shard_id]:
+                self._shards[shard_id].remove(item)
+                return True
+        return False
 
-    def _flatten(self, data: List) -> List:
-        """Flatten nested lists."""
-        result = []
-        for item in data:
-            if isinstance(item, list):
-                result.extend(self._flatten(item))
-            else:
-                result.append(item)
-        return result
+    def get_all_shard_ids(self) -> list[int]:
+        """Get all shard IDs."""
+        return list(range(self.num_shards))
 
-    def _union(self, data: List) -> List:
-        """Union of lists/dicts."""
-        if not data:
-            return []
-        if isinstance(data[0], dict):
-            seen = set()
-            result = []
-            for item in data:
-                key = self._dict_key(item)
-                if key not in seen:
-                    seen.add(key)
-                    result.append(item)
+    def get_shard_size(self, shard_id: int) -> int:
+        """Get size of a shard."""
+        return len(self._shards[shard_id])
+
+    def rebalance(
+        self,
+        new_key_func: Optional[Callable[[Any], str]] = None,
+    ) -> dict[int, int]:
+        """Rebalance items across shards with new key function.
+
+        Returns:
+            Dictionary of moved item counts per shard.
+        """
+        if new_key_func:
+            self.key_func = new_key_func
+        moved: dict[int, int] = {i: 0 for i in range(self.num_shards)}
+        for shard_id in list(self._shards.keys()):
+            items = list(self._shards[shard_id])
+            self._shards[shard_id].clear()
+            for item in items:
+                new_shard_id = self.get_shard_id(self.key_func(item))
+                self._shards[new_shard_id].append(item)
+                if new_shard_id != shard_id:
+                    moved[new_shard_id] += 1
+        return moved
+
+
+def consistent_hash(key: str, num_slots: int = 1024) -> int:
+    """Simple consistent hash function.
+
+    Args:
+        key: Key to hash.
+        num_slots: Number of hash slots.
+
+    Returns:
+        Hash slot index.
+    """
+    return int(hashlib.md5(key.encode()).hexdigest(), 16) % num_slots
+
+
+def hash_ring_get_node(
+    key: str,
+    nodes: list[str],
+    num_replicas: int = 100,
+) -> list[str]:
+    """Get nodes for a key using consistent hashing ring.
+
+    Args:
+        key: Key to route.
+        nodes: List of node identifiers.
+        num_replicas: Virtual node replicas.
+
+    Returns:
+        Ordered list of nodes for the key.
+    """
+    if not nodes:
+        return []
+    positions = []
+    for node in nodes:
+        for i in range(num_replicas):
+            position_key = f"{node}:{i}"
+            position = int(hashlib.md5(position_key.encode()).hexdigest(), 16)
+            positions.append((position, node))
+    key_position = int(hashlib.md5(key.encode()).hexdigest(), 16)
+    sorted_positions = sorted(positions)
+    for pos, node in sorted_positions:
+        if pos >= key_position:
+            idx = nodes.index(node)
+            result = [nodes[(idx + i) % len(nodes)] for i in range(len(nodes))]
             return result
-        return list(dict.fromkeys(self._flatten(data)))
-
-    def _dict_key(self, d: Dict) -> str:
-        """Generate hashable key from dict."""
-        import json
-        return json.dumps(d, sort_keys=True, default=str)
-
-    def _deduplicate_by_key(self, data: List[Dict], key: str) -> List[Dict]:
-        """Deduplicate list of dicts by key."""
-        seen = set()
-        result = []
-        for item in data:
-            if isinstance(item, dict) and key in item:
-                item_key = item[key]
-                if item_key not in seen:
-                    seen.add(item_key)
-                    result.append(item)
-            elif isinstance(item, dict):
-                result.append(item)
-        return result
+    return nodes
