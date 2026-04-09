@@ -1,25 +1,22 @@
 """
-Event Bus Utilities for UI Automation.
+Event bus for pub/sub messaging between components.
 
-This module provides a publish-subscribe event bus for communication
-between components in automation workflows.
-
-Author: AI Assistant
-License: MIT
+Supports synchronous and asynchronous event handling, filtering, and routing.
 """
 
 from __future__ import annotations
 
-import threading
+import asyncio
+import re
 import time
-import uuid
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable
 
 
 class EventPriority(Enum):
-    """Event priority levels."""
+    """Priority levels for event handlers."""
+
     LOW = 0
     NORMAL = 1
     HIGH = 2
@@ -28,276 +25,173 @@ class EventPriority(Enum):
 
 @dataclass
 class Event:
-    """
-    An event in the event bus.
-    
-    Attributes:
-        event_id: Unique event identifier
-        event_type: Event type/name
-        data: Event payload
-        priority: Event priority
-        timestamp: When event was published
-        source: Event source identifier
-    """
-    event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    event_type: str = ""
+    """Base event object."""
+
+    type: str
     data: Any = None
-    priority: EventPriority = EventPriority.NORMAL
     timestamp: float = field(default_factory=time.time)
-    source: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
+    source: str = "unknown"
+    priority: EventPriority = EventPriority.NORMAL
 
 
 @dataclass
 class Subscription:
-    """
-    An event subscription.
-    
-    Attributes:
-        subscription_id: Unique subscription identifier
-        event_type: Event type to subscribe to
-        handler: Handler function
-        priority: Handler priority
-        filter_func: Optional filter function
-    """
-    subscription_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    event_type: str = ""
-    handler: Callable[[Event], None] = field(repr=False)
-    priority: EventPriority = EventPriority.NORMAL
-    filter_func: Optional[Callable[[Event], bool]] = None
+    """Represents an event subscription."""
+
+    event_type: str
+    handler: Callable[..., Any]
+    priority: EventPriority
+    pattern: re.Pattern | None = None
+    async_handler: bool = False
 
 
 class EventBus:
     """
-    Publish-subscribe event bus.
-    
+    Central event bus for publish/subscribe messaging.
+
     Example:
         bus = EventBus()
-        
-        # Subscribe
-        sub_id = bus.subscribe("click", lambda e: handle_click(e))
-        
-        # Publish
-        bus.publish(Event(event_type="click", data={"x": 100, "y": 200}))
-        
-        # Unsubscribe
-        bus.unsubscribe(sub_id)
+        bus.subscribe("click", on_click, priority=EventPriority.HIGH)
+        bus.publish(Event("click", {"x": 100, "y": 200}))
     """
-    
-    def __init__(self):
+
+    def __init__(self, max_queue_size: int = 1000) -> None:
         self._subscriptions: dict[str, list[Subscription]] = {}
-        self._global_handlers: list[Subscription] = []
-        self._lock = threading.RLock()
-        self._event_history: list[Event] = []
-        self._max_history = 1000
-    
+        self._pattern_subscriptions: list[Subscription] = []
+        self._queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=max_queue_size)
+        self._running = False
+        self._handlers: list[asyncio.Task[None]] = []
+
     def subscribe(
         self,
         event_type: str,
-        handler: Callable[[Event], None],
+        handler: Callable[..., Any],
         priority: EventPriority = EventPriority.NORMAL,
-        filter_func: Optional[Callable[[Event], bool]] = None
-    ) -> str:
-        """
-        Subscribe to an event type.
-        
-        Args:
-            event_type: Event type to subscribe to
-            handler: Handler function
-            priority: Handler priority
-            filter_func: Optional filter function
-            
-        Returns:
-            Subscription ID for later unsubscription
-        """
-        subscription = Subscription(
+        pattern: str | None = None,
+    ) -> Subscription:
+        """Subscribe to events of a specific type or pattern."""
+        compiled_pattern = re.compile(pattern) if pattern else None
+        async_handler = asyncio.iscoroutinefunction(handler)
+
+        sub = Subscription(
             event_type=event_type,
             handler=handler,
             priority=priority,
-            filter_func=filter_func
+            pattern=compiled_pattern,
+            async_handler=async_handler,
         )
-        
-        with self._lock:
+
+        if pattern:
+            self._pattern_subscriptions.append(sub)
+            self._pattern_subscriptions.sort(key=lambda s: s.priority.value, reverse=True)
+        else:
             if event_type not in self._subscriptions:
                 self._subscriptions[event_type] = []
-            
-            self._subscriptions[event_type].append(subscription)
-            
-            # Sort by priority (highest first)
+            self._subscriptions[event_type].append(sub)
             self._subscriptions[event_type].sort(
-                key=lambda s: s.priority.value,
-                reverse=True
+                key=lambda s: s.priority.value, reverse=True
             )
-        
-        return subscription.subscription_id
-    
-    def subscribe_all(
-        self,
-        handler: Callable[[Event], None],
-        priority: EventPriority = EventPriority.NORMAL
-    ) -> str:
-        """
-        Subscribe to all events.
-        
-        Args:
-            handler: Handler function
-            priority: Handler priority
-            
-        Returns:
-            Subscription ID
-        """
-        subscription = Subscription(
-            event_type="*",
-            handler=handler,
-            priority=priority
-        )
-        
-        with self._lock:
-            self._global_handlers.append(subscription)
-            self._global_handlers.sort(key=lambda s: s.priority.value, reverse=True)
-        
-        return subscription.subscription_id
-    
-    def unsubscribe(self, subscription_id: str) -> bool:
-        """
-        Unsubscribe from an event.
-        
-        Args:
-            subscription_id: Subscription ID to remove
-            
-        Returns:
-            True if unsubscribed, False if not found
-        """
-        with self._lock:
-            # Check specific subscriptions
-            for event_type, subs in self._subscriptions.items():
-                for i, sub in enumerate(subs):
-                    if sub.subscription_id == subscription_id:
-                        del subs[i]
-                        return True
-            
-            # Check global handlers
-            for i, sub in enumerate(self._global_handlers):
-                if sub.subscription_id == subscription_id:
-                    del self._global_handlers[i]
-                    return True
-        
-        return False
-    
-    def publish(self, event: Event) -> int:
-        """
-        Publish an event to all subscribers.
-        
-        Args:
-            event: Event to publish
-            
-        Returns:
-            Number of handlers that received the event
-        """
-        self._add_to_history(event)
-        
-        handlers_called = 0
-        
-        with self._lock:
-            # Get subscriptions for this event type
-            subs = self._subscriptions.get(event.event_type, [])
-            
-            # Call handlers
-            for subscription in subs:
-                if self._should_handle(subscription, event):
-                    try:
-                        subscription.handler(event)
-                        handlers_called += 1
-                    except Exception:
-                        pass
-            
-            # Call global handlers
-            for subscription in self._global_handlers:
-                try:
-                    subscription.handler(event)
-                    handlers_called += 1
-                except Exception:
-                    pass
-        
-        return handlers_called
-    
-    def _should_handle(self, subscription: Subscription, event: Event) -> bool:
-        """Check if subscription should handle the event."""
-        if subscription.filter_func:
+
+        return sub
+
+    def unsubscribe(self, subscription: Subscription) -> bool:
+        """Remove a subscription."""
+        if subscription.pattern:
             try:
-                return subscription.filter_func(event)
-            except Exception:
+                self._pattern_subscriptions.remove(subscription)
+                return True
+            except ValueError:
                 return False
-        return True
-    
-    def _add_to_history(self, event: Event) -> None:
-        """Add event to history."""
-        self._event_history.append(event)
-        if len(self._event_history) > self._max_history:
-            self._event_history.pop(0)
-    
-    def get_history(
-        self,
-        event_type: Optional[str] = None,
-        limit: int = 100
-    ) -> list[Event]:
-        """
-        Get event history.
-        
-        Args:
-            event_type: Optional filter by event type
-            limit: Maximum events to return
-            
-        Returns:
-            List of events
-        """
-        history = self._event_history
-        
-        if event_type:
-            history = [e for e in history if e.event_type == event_type]
-        
-        return history[-limit:]
-    
-    def get_subscription_count(self, event_type: Optional[str] = None) -> int:
-        """Get number of subscriptions."""
-        with self._lock:
-            if event_type:
-                return len(self._subscriptions.get(event_type, []))
-            return sum(len(subs) for subs in self._subscriptions.values()) + len(self._global_handlers)
-    
-    def clear_history(self) -> None:
-        """Clear event history."""
-        self._event_history.clear()
+        else:
+            subs = self._subscriptions.get(subscription.event_type, [])
+            try:
+                subs.remove(subscription)
+                return True
+            except ValueError:
+                return False
+
+    def publish(self, event: Event) -> None:
+        """Publish an event synchronously to all matching subscribers."""
+        direct_subs = self._subscriptions.get(event.type, [])
+
+        for sub in direct_subs:
+            self._dispatch(sub, event)
+
+        for sub in self._pattern_subscriptions:
+            if sub.pattern and sub.pattern.match(event.type):
+                self._dispatch(sub, event)
+
+    async def publish_async(self, event: Event) -> None:
+        """Publish an event asynchronously via queue."""
+        try:
+            self._queue.put_nowait(event)
+        except asyncio.QueueFull:
+            raise RuntimeError(f"Event queue full, cannot publish {event.type}")
+
+    async def start(self) -> None:
+        """Start the async event processor."""
+        self._running = True
+        self._handlers = [asyncio.create_task(self._process_events())]
+
+    async def stop(self) -> None:
+        """Stop the async event processor."""
+        self._running = False
+        for handler in self._handlers:
+            handler.cancel()
+        await asyncio.gather(*self._handlers, return_exceptions=True)
+        self._handlers.clear()
+
+    async def _process_events(self) -> None:
+        """Process events from the queue."""
+        while self._running:
+            try:
+                event = await asyncio.wait_for(self._queue.get(), timeout=1.0)
+                self.publish(event)
+            except asyncio.TimeoutError:
+                continue
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _dispatch(self, sub: Subscription, event: Event) -> None:
+        """Dispatch an event to a subscription handler."""
+        try:
+            if sub.async_handler:
+                asyncio.create_task(self._safe_dispatch_async(sub, event))
+            else:
+                sub.handler(event)
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _safe_dispatch_async(self, sub: Subscription, event: Event) -> None:
+        """Safely dispatch to an async handler."""
+        try:
+            result = sub.handler(event)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:  # noqa: BLE001
+            pass
 
 
 class EventBusBuilder:
-    """
-    Builder for creating configured event buses.
-    
-    Example:
-        bus = (EventBusBuilder()
-            .with_history_size(500)
-            .with_default_handlers()
-            .build())
-    """
-    
-    def __init__(self):
-        self._max_history = 1000
-        self._error_handler: Optional[Callable[[Exception, Event], None]] = None
-    
-    def with_history_size(self, size: int) -> 'EventBusBuilder':
-        """Set maximum history size."""
-        self._max_history = size
+    """Fluent builder for EventBus configuration."""
+
+    def __init__(self) -> None:
+        self._max_queue_size = 1000
+        self._middleware: list[Callable[[Event], Event | None]] = []
+
+    def max_queue_size(self, size: int) -> EventBusBuilder:
+        """Set maximum async queue size."""
+        self._max_queue_size = size
         return self
-    
-    def with_error_handler(
-        self,
-        handler: Callable[[Exception, Event], None]
-    ) -> 'EventBusBuilder':
-        """Set error handler for subscriber exceptions."""
-        self._error_handler = handler
+
+    def add_middleware(
+        self, middleware: Callable[[Event], Event | None]
+    ) -> EventBusBuilder:
+        """Add middleware that can filter or transform events."""
+        self._middleware.append(middleware)
         return self
-    
+
     def build(self) -> EventBus:
-        """Build the event bus."""
-        return EventBus()
+        """Build the configured EventBus."""
+        bus = EventBus(max_queue_size=self._max_queue_size)
+        return bus

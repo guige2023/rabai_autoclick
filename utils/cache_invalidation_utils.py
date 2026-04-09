@@ -1,233 +1,218 @@
-"""Cache invalidation utilities for automation result caching.
+"""
+Cache invalidation strategies for persistent storage.
 
-Provides TTL-based caching, cache invalidation strategies,
-and memoization decorators for caching expensive
-automation computations.
-
-Example:
-    >>> from utils.cache_invalidation_utils import cached, invalidate_cache
-    >>> @cached(ttl=60)
-    ... def expensive_lookup(key):
-    ...     return do_lookup(key)
-    >>> invalidate_cache('expensive_lookup')
+Supports TTL-based, tag-based, and dependency-graph invalidation.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import time
-from dataclasses import dataclass
-from functools import wraps
-from typing import Any, Callable, Optional
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from pathlib import Path
+from typing import Any
 
-__all__ = [
-    "cached",
-    "CacheEntry",
-    "InMemoryCache",
-    "invalidate_cache",
-    "CacheStats",
-]
+
+class InvalidationStrategy(Enum):
+    """How to invalidate cache entries."""
+
+    IMMEDIATE = auto()
+    LAZY = auto()
+    BACKGROUND = auto()
 
 
 @dataclass
 class CacheEntry:
-    """A single cache entry with TTL."""
+    """A single cache entry with metadata."""
 
+    key: str
     value: Any
-    created_at: float
-    expires_at: float
-
-    def is_expired(self, ttl: float) -> bool:
-        return time.time() > self.expires_at
-
-
-@dataclass
-class CacheStats:
-    """Cache statistics."""
-
-    hits: int = 0
-    misses: int = 0
-    evictions: int = 0
-
-    @property
-    def hit_rate(self) -> float:
-        total = self.hits + self.misses
-        return self.hits / total if total > 0 else 0.0
+    created_at: float = field(default_factory=time.time)
+    last_accessed: float = field(default_factory=time.time)
+    tags: set[str] = field(default_factory=set)
+    size_bytes: int = 0
+    hit_count: int = 0
 
 
-class InMemoryCache:
-    """Thread-safe in-memory cache with TTL.
+class CacheInvalidator:
+    """
+    Manages cache invalidation based on TTL, tags, or dependencies.
 
     Example:
-        >>> cache = InMemoryCache(max_size=100, default_ttl=60)
-        >>> cache.set('key', 'value')
-        >>> cache.get('key')
-        'value'
+        invalidator = CacheInvalidator(max_size_mb=100)
+        invalidator.set("key", data, tags=["ui", "home"])
+        invalidator.invalidate_by_tag("ui")
     """
 
-    def __init__(self, max_size: int = 1000, default_ttl: float = 300.0):
-        self.max_size = max_size
-        self.default_ttl = default_ttl
+    def __init__(
+        self,
+        max_size_mb: float = 50.0,
+        default_ttl: float = 300.0,
+        strategy: InvalidationStrategy = InvalidationStrategy.LAZY,
+    ) -> None:
         self._store: dict[str, CacheEntry] = {}
-        self._lock = __import__("threading").Lock()
-        self.stats = CacheStats()
+        self._max_bytes = int(max_size_mb * 1024 * 1024)
+        self._default_ttl = default_ttl
+        self._strategy = strategy
+        self._total_bytes = 0
 
-    def get(self, key: str) -> Optional[Any]:
-        """Get a value from the cache.
+    def set(
+        self,
+        key: str,
+        value: Any,
+        ttl: float | None = None,
+        tags: list[str] | None = None,
+    ) -> None:
+        """Store a value in the cache."""
+        serialized = self._serialize(value)
+        size = len(serialized)
 
-        Returns:
-            Cached value, or None if not found or expired.
-        """
-        with self._lock:
-            entry = self._store.get(key)
-            if entry is None:
-                self.stats.misses += 1
-                return None
-            if entry.is_expired(self.default_ttl):
-                del self._store[key]
-                self.stats.misses += 1
-                self.stats.evictions += 1
-                return None
-            self.stats.hits += 1
-            return entry.value
+        if key in self._store:
+            self._total_bytes -= self._store[key].size_bytes
 
-    def set(self, key: str, value: Any, ttl: Optional[float] = None) -> None:
-        """Set a value in the cache."""
-        with self._lock:
-            if len(self._store) >= self.max_size and key not in self._store:
-                self._evict_oldest()
-            ttl = ttl if ttl is not None else self.default_ttl
-            now = time.time()
-            self._store[key] = CacheEntry(
-                value=value,
-                created_at=now,
-                expires_at=now + ttl,
-            )
+        self._store[key] = CacheEntry(
+            key=key,
+            value=value,
+            tags=set(tags) if tags else set(),
+            size_bytes=size,
+        )
+        self._total_bytes += size
 
-    def delete(self, key: str) -> bool:
-        """Delete a key from the cache."""
-        with self._lock:
-            if key in self._store:
-                del self._store[key]
-                return True
-            return False
+        if self._total_bytes > self._max_bytes:
+            self._evict_lru()
+
+    def get(self, key: str, ttl: float | None = None) -> Any | None:
+        """Retrieve a value if still valid."""
+        if key not in self._store:
+            return None
+
+        entry = self._store[key]
+        entry.last_accessed = time.time()
+        entry.hit_count += 1
+
+        effective_ttl = ttl if ttl is not None else self._default_ttl
+        if time.time() - entry.created_at > effective_ttl:
+            if self._strategy == InvalidationStrategy.IMMEDIATE:
+                self.delete(key)
+            return None
+
+        return entry.value
+
+    def delete(self, key: str) -> None:
+        """Remove a specific key from cache."""
+        if key in self._store:
+            self._total_bytes -= self._store[key].size_bytes
+            del self._store[key]
+
+    def invalidate_by_tag(self, tag: str) -> int:
+        """Remove all entries with a specific tag."""
+        to_delete = [k for k, e in self._store.items() if tag in e.tags]
+        for key in to_delete:
+            self.delete(key)
+        return len(to_delete)
+
+    def invalidate_prefix(self, prefix: str) -> int:
+        """Remove all entries whose key starts with prefix."""
+        to_delete = [k for k in self._store if k.startswith(prefix)]
+        for key in to_delete:
+            self.delete(key)
+        return len(to_delete)
 
     def clear(self) -> None:
-        """Clear all cached entries."""
-        with self._lock:
-            self._store.clear()
+        """Clear all cache entries."""
+        self._store.clear()
+        self._total_bytes = 0
 
-    def _evict_oldest(self) -> None:
-        """Evict the oldest non-expired entry."""
+    def stats(self) -> dict[str, Any]:
+        """Return cache statistics."""
+        return {
+            "entries": len(self._store),
+            "total_bytes": self._total_bytes,
+            "max_bytes": self._max_bytes,
+            "utilization": self._total_bytes / self._max_bytes if self._max_bytes else 0,
+            "total_hits": sum(e.hit_count for e in self._store.values()),
+        }
+
+    def _evict_lru(self) -> None:
+        """Evict least recently used entries until within size limit."""
         if not self._store:
             return
-        oldest_key = min(self._store, key=lambda k: self._store[k].created_at)
-        del self._store[oldest_key]
-        self.stats.evictions += 1
+        sorted_entries = sorted(self._store.values(), key=lambda e: e.last_accessed)
+        to_evict = int(len(sorted_entries) * 0.1) or 1
+        for entry in sorted_entries[:to_evict]:
+            self.delete(entry.key)
 
-    def invalidate_expired(self) -> int:
-        """Remove all expired entries.
-
-        Returns:
-            Number of entries removed.
-        """
-        with self._lock:
-            expired = [
-                k for k, v in self._store.items()
-                if v.is_expired(self.default_ttl)
-            ]
-            for k in expired:
-                del self._store[k]
-            self.stats.evictions += len(expired)
-            return len(expired)
+    def _serialize(self, value: Any) -> bytes:
+        """Serialize value to bytes for size estimation."""
+        try:
+            return json.dumps(value).encode()
+        except (TypeError, ValueError):
+            return str(value).encode()
 
 
-# Global cache registry
-_cache_registry: dict[str, InMemoryCache] = {}
-
-
-def cached(
-    ttl: float = 300.0,
-    max_size: int = 1000,
-    key_prefix: Optional[str] = None,
-) -> Callable:
-    """Decorator to cache function results.
-
-    Args:
-        ttl: Time-to-live in seconds.
-        max_size: Maximum cache entries.
-        key_prefix: Optional prefix for cache keys.
-
-    Returns:
-        Decorated function.
+class DependencyGraphInvalidator:
+    """
+    Tracks dependencies between cache keys and invalidates cascading.
 
     Example:
-        >>> @cached(ttl=60)
-        ... def get_data(key):
-        ...     return fetch_from_api(key)
+        dep_graph = DependencyGraphInvalidator()
+        dep_graph.set("user:1", user_data)
+        dep_graph.depends_on("user:1:profile", "user:1")
+        dep_graph.invalidate("user:1")  # Also invalidates profile
     """
-    cache = InMemoryCache(max_size=max_size, default_ttl=ttl)
-    cache_key = key_prefix or id(cached)
-    _cache_registry[cache_key] = cache
 
-    def decorator(fn: Callable) -> Callable:
-        @wraps(fn)
-        def wrapper(*args, **kwargs):
-            # Build cache key from function name and args
-            key_parts = [fn.__module__, fn.__name__]
-            key_parts.extend(str(a) for a in args)
-            key_parts.extend(f"{k}={v}" for k, v in sorted(kwargs.items()))
-            cache_key_str = "|".join(key_parts)
-            key_hash = hashlib.md5(cache_key_str.encode()).hexdigest()
+    def __init__(self, cache: CacheInvalidator | None = None) -> None:
+        self._cache = cache or CacheInvalidator()
+        self._dependents: dict[str, set[str]] = {}
+        self._dependencies: dict[str, set[str]] = {}
 
-            result = cache.get(key_hash)
-            if result is not None:
-                return result
+    def set(
+        self,
+        key: str,
+        value: Any,
+        ttl: float | None = None,
+        depends_on: list[str] | None = None,
+    ) -> None:
+        """Set a key and register its dependencies."""
+        if depends_on:
+            for dep in depends_on:
+                self._add_dependency(key, dep)
+        self._cache.set(key, value, ttl)
 
-            result = fn(*args, **kwargs)
-            cache.set(key_hash, result, ttl=ttl)
-            return result
+    def _add_dependency(self, key: str, dependency: str) -> None:
+        """Register that key depends on dependency."""
+        if dependency not in self._dependents:
+            self._dependents[dependency] = set()
+        self._dependents[dependency].add(key)
 
-        wrapper.cache = cache
-        wrapper.cache_key = cache_key
-        return wrapper
+        if key not in self._dependencies:
+            self._dependencies[key] = set()
+        self._dependencies[key].add(dependency)
 
-    return decorator
+    def invalidate(self, key: str) -> int:
+        """Invalidate key and all its dependents recursively."""
+        invalidated = {key}
+        to_process = [key]
 
+        while to_process:
+            current = to_process.pop()
+            self._cache.delete(current)
 
-def invalidate_cache(key_prefix: Optional[str] = None) -> None:
-    """Invalidate cache entries.
+            for dependent in self._dependents.get(current, []):
+                if dependent not in invalidated:
+                    invalidated.add(dependent)
+                    to_process.append(dependent)
 
-    Args:
-        key_prefix: If provided, invalidate entries with this prefix.
-            If None, invalidate all caches.
-    """
-    if key_prefix is None:
-        for cache in _cache_registry.values():
-            cache.clear()
-    else:
-        cache = _cache_registry.get(key_prefix)
-        if cache:
-            cache.clear()
+        return len(invalidated)
 
+    def get(self, key: str, ttl: float | None = None) -> Any | None:
+        """Get a cache entry."""
+        return self._cache.get(key, ttl)
 
-def get_cache_stats(key_prefix: Optional[str] = None) -> CacheStats:
-    """Get cache statistics.
-
-    Args:
-        key_prefix: Specific cache to query, or None for aggregate.
-
-    Returns:
-        CacheStats object.
-    """
-    if key_prefix:
-        cache = _cache_registry.get(key_prefix)
-        return cache.stats if cache else CacheStats()
-
-    # Aggregate stats
-    total = CacheStats()
-    for cache in _cache_registry.values():
-        total.hits += cache.stats.hits
-        total.misses += cache.stats.misses
-        total.evictions += cache.stats.evictions
-    return total
+    def get_stats(self) -> dict[str, Any]:
+        """Return cache and dependency stats."""
+        stats = self._cache.stats()
+        stats["dependency_edges"] = sum(len(d) for d in self._dependents.values())
+        return stats
