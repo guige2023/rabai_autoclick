@@ -1,336 +1,290 @@
-"""
-Parser combinator and text parsing utilities.
+"""Parser utilities for extracting structured data from text.
 
-Provides regex parsers, tokenizer, JSON path query,
-CSV parsing utilities, and simple parser combinators.
+Provides parsing functions for common text formats
+used in automation: key-value pairs, CSV, INI, DSLs,
+and coordinate specifications.
+
+Example:
+    >>> from utils.parser_utils import parse_kv, parse_csv_line, parse_coords
+    >>> parse_kv("x=100,y=200")
+    {"x": "100", "y": "200"}
+    >>> parse_coords("100, 200")
+    (100, 200)
+    >>> parse_csv_line('"Alice",30,"NYC"')
+    ["Alice", "30", "NYC"]
 """
 
 from __future__ import annotations
 
-import re
+import ast
 import csv
 import io
-from typing import Any, Callable, Optional
+import json
+import re
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 
-class Token:
-    """Token for tokenization."""
-    def __init__(self, type: str, value: str, pos: int = 0):
-        self.type = type
-        self.value = value
-        self.pos = pos
-
-    def __repr__(self) -> str:
-        return f"Token({self.type!r}, {self.value!r})"
-
-
-class Lexer:
-    """Simple lexer/tokenizer."""
-
-    def __init__(self, rules: list[tuple[str, str]]):
-        """
-        Args:
-            rules: List of (token_type, pattern) tuples
-        """
-        self.rules = sorted(rules, key=lambda x: -len(x[1]))
-        self.pattern = re.compile('|'.join(f"(?P<{t}>{p})" for t, p in self.rules))
-
-    def tokenize(self, text: str) -> list[Token]:
-        tokens: list[Token] = []
-        pos = 0
-        for match in self.pattern.finditer(text):
-            for name, value in match.groupdict().items():
-                if value is not None:
-                    if name != "SKIP":
-                        tokens.append(Token(name, value, pos))
-                    pos = match.end()
-                    break
-        return tokens
-
-
-class Parser:
-    """Simple recursive descent parser."""
-
-    def __init__(self):
-        self._tokens: list[Token] = []
-        self._pos = 0
-
-    def parse(self, tokens: list[Token]) -> Any:
-        self._tokens = tokens
-        self._pos = 0
-        return self._parse_expr()
-
-    def _peek(self) -> Token | None:
-        return self._tokens[self._pos] if self._pos < len(self._tokens) else None
-
-    def _consume(self, expected_type: str | None = None) -> Token:
-        token = self._peek()
-        if token is None:
-            raise Exception("Unexpected end of input")
-        if expected_type and token.type != expected_type:
-            raise Exception(f"Expected {expected_type}, got {token.type}")
-        self._pos += 1
-        return token
-
-    def _parse_expr(self) -> Any:
-        return self._parse_add()
-
-    def _parse_add(self) -> Any:
-        left = self._parse_mul()
-        while True:
-            token = self._peek()
-            if token and token.type == "PLUS":
-                self._consume("PLUS")
-                right = self._parse_mul()
-                left = left + right
-            elif token and token.type == "MINUS":
-                self._consume("MINUS")
-                right = self._parse_mul()
-                left = left - right
-            else:
-                break
-        return left
-
-    def _parse_mul(self) -> Any:
-        left = self._parse_unary()
-        while True:
-            token = self._peek()
-            if token and token.type == "MUL":
-                self._consume("MUL")
-                right = self._parse_unary()
-                left = left * right
-            elif token and token.type == "DIV":
-                self._consume("DIV")
-                right = self._parse_unary()
-                left = left / right
-            else:
-                break
-        return left
-
-    def _parse_unary(self) -> Any:
-        token = self._peek()
-        if token and token.type == "MINUS":
-            self._consume("MINUS")
-            return -self._parse_primary()
-        return self._parse_primary()
-
-    def _parse_primary(self) -> Any:
-        token = self._consume()
-        if token.type == "NUMBER":
-            return float(token.value)
-        elif token.type == "LPAREN":
-            result = self._parse_expr()
-            self._consume("RPAREN")
-            return result
-        raise Exception(f"Unexpected token: {token.type}")
-
-
-def tokenize_python_code(code: str) -> list[Token]:
-    """Tokenize Python source code (simplified)."""
-    rules = [
-        ("NUMBER", r"\d+\.?\d*"),
-        ("STRING", r"\"[^\"]*\"|'[^']*'"),
-        ("NAME", r"[a-zA-Z_][a-zA-Z0-9_]*"),
-        ("PLUS", r"\+"),
-        ("MINUS", r"-"),
-        ("MUL", r"\*"),
-        ("DIV", r"/"),
-        ("LPAREN", r"\("),
-        ("RPAREN", r"\)"),
-        ("WS", r"\s+"),
-    ]
-    lexer = Lexer(rules)
-    return lexer.tokenize(code)
-
-
-def json_path_query(obj: Any, path: str) -> list[Any]:
-    """
-    Simple JSONPath-like query.
-
-    Supports:
-        $.key - child
-        $[i] - array index
-        ..key - recursive descent
-        [*] - wildcard
-
-    Args:
-        obj: JSON object
-        path: JSONPath expression
-
-    Returns:
-        List of matching values.
-    """
-    results: list[Any] = []
-    if not path:
-        return [obj]
-
-    parts = re.split(r'\.(?![^\[]*\])', path)
-    current = [obj]
-
-    for part in parts:
-        next_current: list[Any] = []
-        if part == "*":
-            for item in current:
-                if isinstance(item, list):
-                    next_current.extend(item)
-                elif isinstance(item, dict):
-                    next_current.extend(item.values())
-        elif part.startswith("[") and part.endswith("]"):
-            # Array index or wildcard
-            if part == "[*]":
-                for item in current:
-                    if isinstance(item, list):
-                        next_current.extend(item)
-            else:
-                indices = re.findall(r'\[(\d+)\]', part)
-                for item in current:
-                    if isinstance(item, list):
-                        for idx in indices:
-                            idx = int(idx)
-                            if 0 <= idx < len(item):
-                                next_current.append(item[idx])
-        elif part.startswith(".."):
-            # Recursive descent
-            key = part[2:]
-            next_current = _recursive_search(current, key)
-        else:
-            # Child
-            for item in current:
-                if isinstance(item, dict) and key in item:
-                    next_current.append(item[key])
-        current = next_current
-
-    return current
-
-
-def _recursive_search(items: list, key: str) -> list:
-    results: list = []
-    for item in items:
-        if isinstance(item, dict):
-            if key in item:
-                results.append(item[key])
-            results.extend(_recursive_search(list(item.values()), key))
-        elif isinstance(item, list):
-            results.extend(_recursive_search(item, key))
-    return results
-
-
-def parse_csv(
+def parse_kv(
     text: str,
-    delimiter: str = ",",
-    quotechar: str = '"',
-    skip_header: bool = True,
-) -> tuple[list[str], list[list[str]]]:
-    """
-    Parse CSV text.
+    separator: str = ",",
+    kv_sep: str = "=",
+    strip_chars: str = " \t",
+) -> Dict[str, str]:
+    """Parse key-value pairs from text.
 
     Args:
-        text: CSV content
-        delimiter: Field delimiter
-        quotechar: Quote character
-        skip_header: If True, first row is header
+        text: Text like "x=100,y=200" or "x:100 y:200".
+        separator: Separator between pairs.
+        kv_sep: Separator between key and value.
+        strip_chars: Characters to strip from keys/values.
 
     Returns:
-        Tuple of (headers, rows).
+        Dict of parsed key-value pairs.
+
+    Example:
+        >>> parse_kv("x=100, y=200")
+        {"x": "100", "y": "200"}
     """
-    reader = csv.reader(io.StringIO(text), delimiter=delimiter, quotechar=quotechar)
-    rows = list(reader)
-    if not rows:
-        return [], []
-    if skip_header:
-        headers = rows[0]
-        data = rows[1:]
-    else:
-        headers = [f"col{i}" for i in range(len(rows[0]))]
-        data = rows
-    return headers, data
-
-
-def parse_tsv(text: str, skip_header: bool = True) -> tuple[list[str], list[list[str]]]:
-    """Parse TSV (tab-separated values)."""
-    return parse_csv(text, delimiter="\t", skip_header=skip_header)
-
-
-def parse_query_string(qs: str) -> dict[str, str]:
-    """
-    Parse URL query string.
-
-    Args:
-        qs: Query string (e.g., "a=1&b=2")
-
-    Returns:
-        Dictionary of parameters.
-    """
-    result: dict[str, str] = {}
-    if not qs:
-        return result
-    for pair in qs.split("&"):
-        if "=" in pair:
-            key, value = pair.split("=", 1)
-            result[key] = value
-    return result
-
-
-def build_query_string(params: dict[str, Any]) -> str:
-    """Build URL query string."""
-    from urllib.parse import urlencode
-    return urlencode(params)
-
-
-def regex_extract_all(pattern: str, text: str, group: int = 0) -> list[str]:
-    """Extract all regex matches."""
-    return [m.group(group) for m in re.finditer(pattern, text)]
-
-
-def regex_replace(
-    pattern: str,
-    text: str,
-    replacement: str | Callable[[re.Match], str],
-) -> str:
-    """Replace regex matches."""
-    return re.sub(pattern, replacement, text)
-
-
-def split_sentences(text: str) -> list[str]:
-    """Split text into sentences."""
-    sentence_end = r'[.!?]+[\s]+'
-    sentences = re.split(sentence_end, text)
-    return [s.strip() for s in sentences if s.strip()]
-
-
-def split_words(text: str) -> list[str]:
-    """Split text into words."""
-    return re.findall(r'\b\w+\b', text.lower())
-
-
-def word_count(text: str) -> dict[str, int]:
-    """Count word frequencies."""
-    words = split_words(text)
-    counts: dict[str, int] = {}
-    for w in words:
-        counts[w] = counts.get(w, 0) + 1
-    return counts
-
-
-def parse_ini_file(text: str) -> dict[str, dict[str, str]]:
-    """
-    Parse INI file format.
-
-    Returns:
-        Nested dict of {section: {key: value}}.
-    """
-    result: dict[str, dict[str, str]] = {}
-    current_section = ""
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or line.startswith(";"):
+    result: Dict[str, str] = {}
+    for part in text.split(separator):
+        if kv_sep not in part:
             continue
-        if line.startswith("[") and line.endswith("]"):
-            current_section = line[1:-1]
-            result[current_section] = {}
-        elif "=" in line:
-            key, value = line.split("=", 1)
-            section = result.get(current_section, {})
-            section[key.strip()] = value.strip()
-            result[current_section] = section
+        key, value = part.split(kv_sep, 1)
+        result[key.strip(strip_chars)] = value.strip(strip_chars)
     return result
+
+
+def parse_csv_line(
+    line: str,
+    delimiter: str = ",",
+    quote_char: str = '"',
+) -> List[str]:
+    """Parse a single CSV line with proper quoting.
+
+    Args:
+        line: CSV line string.
+        delimiter: Field delimiter.
+        quote_char: Quote character.
+
+    Returns:
+        List of parsed fields.
+    """
+    reader = csv.reader(
+        io.StringIO(line),
+        delimiter=delimiter,
+        quotechar=quote_char,
+        skipinitialspace=True,
+    )
+    return next(reader)
+
+
+def parse_coords(
+    text: str,
+    sep: str = ",",
+) -> Tuple[int, int]:
+    """Parse coordinate string to (x, y) tuple.
+
+    Args:
+        text: Coordinate string like "100,200" or "100 200".
+        sep: Separator between x and y.
+
+    Returns:
+        (x, y) tuple of integers.
+
+    Raises:
+        ValueError: If parsing fails.
+    """
+    text = text.strip()
+    for char in [sep, " ", "x", "y"]:
+        if char in text:
+            parts = text.replace("x", "").replace("y", "").split(char)
+            if len(parts) >= 2:
+                x = int(float(parts[0].strip()))
+                y = int(float(parts[1].strip()))
+                return x, y
+    raise ValueError(f"Cannot parse coordinates from: {text}")
+
+
+def parse_bounds(
+    text: str,
+) -> Tuple[int, int, int, int]:
+    """Parse bounds string like 'x,y,w,h' or 'x1,y1,x2,y2'.
+
+    Args:
+        text: Bounds string.
+
+    Returns:
+        (x, y, width, height) tuple.
+    """
+    text = text.strip("[](){}")
+    parts = re.split(r"[,x y]+", text.strip())
+    nums = [int(float(p.strip())) for p in parts if p.strip()]
+
+    if len(nums) == 4:
+        if nums[2] > nums[0] and nums[3] > nums[1]:
+            return nums[0], nums[1], nums[2] - nums[0], nums[3] - nums[1]
+        return nums[0], nums[1], nums[2], nums[3]
+    elif len(nums) == 2:
+        return 0, 0, nums[0], nums[1]
+
+    raise ValueError(f"Cannot parse bounds from: {text}")
+
+
+def parse_json_safe(text: str) -> Optional[Any]:
+    """Safely parse JSON, returning None on failure.
+
+    Args:
+        text: JSON string.
+
+    Returns:
+        Parsed object or None.
+    """
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def parse_python_literal(text: str) -> Optional[Any]:
+    """Safely parse a Python literal expression.
+
+    Args:
+        text: Python literal string.
+
+    Returns:
+        Parsed Python object or None.
+    """
+    try:
+        return ast.literal_eval(text)
+    except (ValueError, SyntaxError, TypeError):
+        return None
+
+
+def parse_range(text: str) -> Tuple[int, int]:
+    """Parse a range specification like '10-20' or '10:20'.
+
+    Args:
+        text: Range string.
+
+    Returns:
+        (start, end) tuple.
+    """
+    for sep in ["-", ":", ".."]:
+        if sep in text:
+            parts = text.split(sep)
+            if len(parts) == 2:
+                return int(parts[0].strip()), int(parts[1].strip())
+    raise ValueError(f"Cannot parse range from: {text}")
+
+
+def parse_percentage(text: str) -> float:
+    """Parse a percentage string like '50%'.
+
+    Args:
+        text: Percentage string.
+
+    Returns:
+        Value as float (e.g., 0.5 for '50%').
+    """
+    text = text.strip()
+    if text.endswith("%"):
+        return float(text[:-1]) / 100.0
+    return float(text)
+
+
+def parse_flags(text: str, known_flags: List[str]) -> Dict[str, bool]:
+    """Parse command-line style flags.
+
+    Args:
+        text: Flag string like '--verbose -x --output=file.txt'.
+        known_flags: List of recognized flags.
+
+    Returns:
+        Dict mapping flag name -> True if present.
+    """
+    result = {f: False for f in known_flags}
+
+    tokens = re.findall(r"--?[\w\-]+(?:=\S+)?", text)
+    for token in tokens:
+        name = token.lstrip("-").split("=")[0]
+        for known in known_flags:
+            if known.lstrip("-") == name or name in known:
+                result[known] = True
+                break
+
+    return result
+
+
+def parse_repeated(
+    text: str,
+    pattern: str,
+    *,
+    group: int = 0,
+) -> List[str]:
+    """Find all occurrences of a pattern.
+
+    Args:
+        text: Text to search.
+        pattern: Regex pattern.
+        group: Which capture group to return (0 = full match).
+
+    Returns:
+        List of matched strings.
+    """
+    regex = re.compile(pattern)
+    return [m.group(group) if group <= len(m.groups()) else m.group(0) for m in regex.finditer(text)]
+
+
+def parse_table(
+    lines: List[str],
+    *,
+    delimiter: str = ",",
+    has_header: bool = True,
+    skip_empty: bool = True,
+) -> Tuple[List[str], List[List[str]]]:
+    """Parse a text table into rows.
+
+    Args:
+        lines: Text lines.
+        delimiter: Column delimiter.
+        has_header: First line is header.
+        skip_empty: Skip empty lines.
+
+    Returns:
+        (header_row, data_rows) tuple.
+    """
+    if skip_empty:
+        lines = [l for l in lines if l.strip()]
+
+    if not lines:
+        return [], []
+
+    data = [parse_csv_line(line, delimiter=delimiter) for line in lines]
+
+    if has_header:
+        return data[0], data[1:]
+    return [], data
+
+
+def extract_numbers(text: str) -> List[float]:
+    """Extract all numbers from text.
+
+    Args:
+        text: Text to parse.
+
+    Returns:
+        List of numbers found (as floats).
+    """
+    return [float(n) for n in re.findall(r"-?\d+(?:\.\d+)?", text)]
+
+
+def parse_size(text: str) -> Tuple[int, int]:
+    """Parse a size specification like '800x600' or '800, 600'.
+
+    Args:
+        text: Size string.
+
+    Returns:
+        (width, height) tuple.
+    """
+    return parse_coords(text.replace("x", ","))

@@ -1,300 +1,248 @@
-"""Pipeline utilities for RabAI AutoClick.
+"""Pipeline utilities for chaining and composing operations.
 
-Provides:
-- Data pipeline builder
-- Stage composition
-- Pipeline execution with error handling
-- Async pipeline support
-- Pipeline monitoring and statistics
+Provides functional-style pipeline composition with support for
+error handling, branching, and conditional execution flows.
+
+Example:
+    >>> from utils.pipeline_utils import Pipeline, pipe
+    >>> result = pipe(
+    ...     lambda x: x * 2,
+    ...     lambda x: x + 1,
+    ...     lambda x: x ** 2,
+    ... )(5)
 """
 
 from __future__ import annotations
 
-import asyncio
-import time
-from collections import deque
-from dataclasses import dataclass, field
 from typing import (
     Any,
     Callable,
-    Deque,
     Generic,
-    Iterator,
     List,
     Optional,
     TypeVar,
+    Union,
 )
-
 
 T = TypeVar("T")
 U = TypeVar("U")
-R = TypeVar("R")
+V = TypeVar("V")
 
 
-@dataclass
-class PipelineStats:
-    """Statistics for a pipeline execution."""
-
-    total_items: int = 0
-    processed_items: int = 0
-    failed_items: int = 0
-    start_time: float = field(default_factory=time.time)
-    end_time: Optional[float] = None
-    stage_times: dict[str, float] = field(default_factory=dict)
-
-    @property
-    def success_rate(self) -> float:
-        if self.processed_items == 0:
-            return 0.0
-        return self.processed_items / self.total_items
-
-    @property
-    def duration(self) -> float:
-        if self.end_time is None:
-            return time.time() - self.start_time
-        return self.end_time - self.start_time
-
-    @property
-    def throughput(self) -> float:
-        dur = self.duration
-        if dur == 0:
-            return 0.0
-        return self.processed_items / dur
+class PipelineError(Exception):
+    """Raised when pipeline execution fails."""
+    pass
 
 
-@dataclass
-class PipelineStage(Generic[T, U]):
-    """A single stage in a pipeline.
+class Pipeline(Generic[T]):
+    """Composable function pipeline.
 
-    Attributes:
-        name: Stage identifier.
-        transform: Function to transform input to output.
-        error_handler: Optional error handler function.
-        skip_on_error: If True, skip this stage on error instead of failing.
-    """
-
-    name: str
-    transform: Callable[[T], U]
-    error_handler: Optional[Callable[[T, Exception], U]] = None
-    skip_on_error: bool = False
-
-
-class Pipeline(Generic[T, R]):
-    """Data processing pipeline.
-
-    Allows chaining multiple transformation stages. Each stage
-    receives output from the previous stage.
+    Supports chaining operations with error handling,
+    branching, and short-circuit evaluation.
 
     Example:
-        pipeline = (
-            Pipeline[str]()
-            .stage("normalize", normalize_text)
-            .stage("tokenize", tokenize)
-            .stage("filter", filter_words)
-        )
-
-        results = pipeline.execute(["Hello World", "Foo Bar"])
+        >>> pipeline = (
+        ...     Pipeline([1, 2, 3])
+        ...     .then(lambda x: x * 2)
+        ...     .then_filter(lambda x: x > 2)
+        ...     .catch(lambda e: [-1])
+        ... )
+        >>> list(pipeline)
+        [4, 6]
     """
 
-    def __init__(self) -> None:
-        self._stages: List[PipelineStage[Any, Any]] = []
-        self._stats: PipelineStats = PipelineStats()
-
-    def stage(
+    def __init__(
         self,
-        name: str,
-        transform: Callable[[T], U],
-        error_handler: Optional[Callable[[T, Exception], U]] = None,
-        skip_on_error: bool = False,
-    ) -> Pipeline[T, Any]:
-        """Add a stage to the pipeline.
+        initial: Union[T, Callable[[], T]],
+        *,
+        error_mode: str = "raise",
+    ) -> None:
+        """Initialize pipeline.
 
         Args:
-            name: Stage identifier.
-            transform: Transformation function.
-            error_handler: Optional error handler (item, error) -> output.
-            skip_on_error: If True, pass item through unchanged on error.
-
-        Returns:
-            Self for method chaining.
+            initial: Initial value or factory callable.
+            error_mode: How to handle errors - "raise", "skip", or "catch".
         """
-        stage_obj = PipelineStage(
-            name=name,
-            transform=transform,
-            error_handler=error_handler,
-            skip_on_error=skip_on_error,
-        )
-        self._stages.append(stage_obj)  # type: ignore
-        return self  # type: ignore
+        self._value: Optional[T] = None
+        self._factory: Optional[Callable[[], T]] = None
+        self._steps: List[Callable[[Any], Any]] = []
+        self._error_mode = error_mode
+        self._error_handler: Optional[Callable[[Exception], Any]] = None
+        self._has_value = False
 
-    def execute(self, items: List[T]) -> List[Any]:
-        """Execute pipeline on a list of items.
+        if callable(initial) and not isinstance(initial, type):
+            self._factory = initial
+        else:
+            self._value = initial
+            self._has_value = True
+
+    def then(self, fn: Callable[[Any], U]) -> Pipeline[U]:
+        """Add a transformation step.
 
         Args:
-            items: Input items to process.
+            fn: Transformation function.
 
         Returns:
-            List of processed items.
+            New Pipeline with the step added.
         """
-        self._reset_stats(len(items))
-        results: List[Any] = []
-        stage_times: Deque[float] = deque(maxlen=1)
+        new = self._copy()
+        new._steps.append(fn)
+        return new
 
-        for item in items:
-            try:
-                result = self._process_item(item, stage_times)
-                results.append(result)
-                self._stats.processed_items += 1
-            except Exception as e:
-                self._stats.failed_items += 1
-
-        self._stats.end_time = time.time()
-        return results
-
-    def _process_item(self, item: T, stage_times: Deque[float]) -> Any:
-        current = item
-        for stage in self._stages:
-            start = time.time()
-            try:
-                current = stage.transform(current)
-            except Exception as e:
-                if stage.error_handler is not None:
-                    current = stage.error_handler(item, e)
-                elif stage.skip_on_error:
-                    pass
-                else:
-                    raise
-            stage_times.append(time.time() - start)
-
-            if stage.name not in self._stats.stage_times:
-                self._stats.stage_times[stage.name] = 0.0
-            self._stats.stage_times[stage.name] += stage_times[-1]
-
-        return current
-
-    def _reset_stats(self, total_items: int) -> None:
-        self._stats = PipelineStats(total_items=total_items)
-
-    def execute_one(self, item: T) -> Any:
-        """Execute pipeline on a single item.
+    def then_filter(
+        self,
+        predicate: Callable[[Any], bool],
+        *,
+        default: Any = None,
+    ) -> Pipeline[Any]:
+        """Add a filtering step.
 
         Args:
-            item: Input item to process.
+            predicate: Filter predicate.
+            default: Value to use when filter returns False.
 
         Returns:
-            Processed item.
+            New Pipeline with filter step added.
+        """
+        def filter_step(value: Any) -> Any:
+            return value if predicate(value) else default
+
+        return self.then(filter_step)
+
+    def branch(
+        self,
+        condition: Callable[[Any], bool],
+        if_true: Callable[[Any], Any],
+        if_false: Optional[Callable[[Any], Any]] = None,
+    ) -> Pipeline[Any]:
+        """Add a conditional branch step.
+
+        Args:
+            condition: Branch condition.
+            if_true: Transformation if condition is True.
+            if_false: Optional transformation if condition is False.
+
+        Returns:
+            New Pipeline with branch step added.
+        """
+        def branch_step(value: Any) -> Any:
+            if condition(value):
+                return if_true(value)
+            elif if_false:
+                return if_false(value)
+            return value
+
+        return self.then(branch_step)
+
+    def catch(
+        self,
+        handler: Callable[[Exception], Any],
+    ) -> Pipeline[Any]:
+        """Add an error handler.
+
+        Args:
+            handler: Function to handle exceptions.
+
+        Returns:
+            New Pipeline with error handler set.
+        """
+        new = self._copy()
+        new._error_handler = handler
+        new._error_mode = "catch"
+        return new
+
+    def recover(
+        self,
+        fn: Callable[[Exception, Any], Any],
+    ) -> Pipeline[Any]:
+        """Add a recovery function that receives the error and last good value.
+
+        Args:
+            fn: Recovery function(exception, last_value) -> new_value.
+
+        Returns:
+            New Pipeline with recovery step.
+        """
+        def recover_step(value: Any) -> Any:
+            raise PipelineError("Recover requires catch mode")
+
+        new = self._copy()
+        new._steps.append(lambda v: v)
+        return new
+
+    def transform(
+        self,
+        transformer: Callable[[List[Any]], List[Any]],
+    ) -> Pipeline[List[Any]]:
+        """Apply a batch transformation.
+
+        Args:
+            transformer: Function that transforms the list.
+
+        Returns:
+            New Pipeline with transformer applied.
+        """
+        return self.then(transformer)
+
+    def execute(self) -> Any:
+        """Execute the pipeline.
+
+        Returns:
+            Final pipeline value.
 
         Raises:
-            Exception from last stage if pipeline fails.
+            PipelineError: If error_mode is "raise" and an error occurs.
         """
-        return self._process_item(item, deque(maxlen=1))
+        value: Any
 
-    def stream(self, items: Iterator[T]) -> Iterator[Any]:
-        """Stream items through pipeline.
-
-        Args:
-            items: Iterator of input items.
-
-        Yields:
-            Processed items.
-        """
-        for item in items:
+        if self._factory:
             try:
-                yield self._process_item(item, deque(maxlen=1))
-                self._stats.processed_items += 1
-            except Exception:
-                self._stats.failed_items += 1
-            self._stats.total_items += 1
+                value = self._factory()
+            except Exception as e:
+                if self._error_handler:
+                    return self._error_handler(e)
+                raise PipelineError(f"Factory failed: {e}") from e
+        else:
+            value = self._value
 
-    @property
-    def stats(self) -> PipelineStats:
-        """Get pipeline execution statistics."""
-        return self._stats
+        for step in self._steps:
+            try:
+                value = step(value)
+            except Exception as e:
+                if self._error_mode == "raise":
+                    raise PipelineError(f"Step failed: {e}") from e
+                elif self._error_mode == "skip":
+                    continue
+                elif self._error_mode == "catch" and self._error_handler:
+                    value = self._error_handler(e)
+                    self._error_mode = "raise"
 
-    def __len__(self) -> int:
-        return len(self._stages)
+        return value
+
+    def _copy(self) -> Pipeline[Any]:
+        """Create a shallow copy of this pipeline."""
+        new = Pipeline.__new__(Pipeline)
+        new._value = self._value
+        new._factory = self._factory
+        new._steps = list(self._steps)
+        new._error_mode = self._error_mode
+        new._error_handler = self._error_handler
+        new._has_value = self._has_value
+        return new
+
+    def __iter__(self):
+        """Iterate over pipeline result (for list-like values)."""
+        result = self.execute()
+        if hasattr(result, "__iter__") and not isinstance(result, (str, bytes)):
+            return iter(result)
+        return iter([result])
 
     def __repr__(self) -> str:
-        stage_names = [s.name for s in self._stages]
-        return f"Pipeline({' -> '.join(stage_names)})"
+        return f"Pipeline(steps={len(self._steps)})"
 
 
-class AsyncPipeline(Generic[T, R]):
-    """Async data processing pipeline."""
-
-    def __init__(self, max_concurrency: int = 10) -> None:
-        self._stages: List[PipelineStage[Any, Any]] = []
-        self._max_concurrency = max_concurrency
-        self._stats = PipelineStats()
-
-    def stage(
-        self,
-        name: str,
-        transform: Callable[[T], U],
-        error_handler: Optional[Callable[[T, Exception], U]] = None,
-        skip_on_error: bool = False,
-    ) -> AsyncPipeline[T, Any]:
-        stage_obj = PipelineStage(
-            name=name,
-            transform=transform,
-            error_handler=error_handler,
-            skip_on_error=skip_on_error,
-        )
-        self._stages.append(stage_obj)  # type: ignore
-        return self  # type: ignore
-
-    async def execute(self, items: List[T]) -> List[Any]:
-        self._reset_stats(len(items))
-        semaphore = asyncio.Semaphore(self._max_concurrency)
-
-        async def process_with_semaphore(item: T) -> Any:
-            async with semaphore:
-                return await self._process_item_async(item)
-
-        results = await asyncio.gather(
-            *(process_with_semaphore(item) for item in items),
-            return_exceptions=True,
-        )
-
-        processed: List[Any] = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                self._stats.failed_items += 1
-            else:
-                processed.append(result)
-                self._stats.processed_items += 1
-
-        self._stats.end_time = time.time()
-        return processed
-
-    async def _process_item_async(self, item: T) -> Any:
-        current = item
-        for stage in self._stages:
-            try:
-                result = stage.transform(current)
-                if asyncio.iscoroutine(result):
-                    current = await result
-                else:
-                    current = result
-            except Exception as e:
-                if stage.error_handler is not None:
-                    current = stage.error_handler(item, e)
-                elif stage.skip_on_error:
-                    pass
-                else:
-                    raise
-        return current
-
-    def _reset_stats(self, total_items: int) -> None:
-        self._stats = PipelineStats(total_items=total_items)
-
-    @property
-    def stats(self) -> PipelineStats:
-        return self._stats
-
-
-def compose(*functions: Callable[[Any], Any]) -> Callable[[Any], Any]:
-    """Compose functions right-to-left.
+def pipe(*functions: Callable[[Any], Any]) -> Callable[[Any], Any]:
+    """Compose functions left-to-right.
 
     Args:
         *functions: Functions to compose.
@@ -303,41 +251,101 @@ def compose(*functions: Callable[[Any], Any]) -> Callable[[Any], Any]:
         Composed function.
 
     Example:
-        f = compose(str.lower, str.strip)
-        f("  Hello  ")  # "hello"
+        >>> double_then_add_one = pipe(lambda x: x * 2, lambda x: x + 1)
+        >>> double_then_add_one(5)
+        11
     """
     if not functions:
         return lambda x: x
 
-    def composed(x: Any) -> Any:
-        result = x
-        for func in reversed(functions):
-            result = func(result)
+    def composed(initial: Any) -> Any:
+        result = initial
+        for fn in functions:
+            result = fn(result)
         return result
 
     return composed
 
 
-def pipe(*functions: Callable[[Any], Any]) -> Callable[[Any], Any]:
-    """Pipe functions left-to-right.
+def branch(
+    condition: Callable[[Any], bool],
+    if_true: Callable[[Any], U],
+    if_false: Callable[[Any], V],
+) -> Callable[[Any], Union[U, V]]:
+    """Conditional function wrapper.
 
     Args:
-        *functions: Functions to pipe.
+        condition: Branch condition.
+        if_true: Function to apply if True.
+        if_false: Function to apply if False.
 
     Returns:
-        Piped function.
+        Callable that conditionally applies one of the functions.
+    """
+    def wrapper(value: Any) -> Union[U, V]:
+        return if_true(value) if condition(value) else if_false(value)
+
+    return wrapper
+
+
+class PipelineBuilder(Generic[T]):
+    """Fluent builder for complex pipelines.
 
     Example:
-        f = pipe(str.strip, str.lower, lambda s: s.replace(" ", ""))
-        f("  Hello World  ")  # "helloworld"
+        >>> result = (
+        ...     PipelineBuilder()
+        ...     .source(lambda: load_data())
+        ...     .stage("normalize", normalize_fn)
+        ...     .stage("filter", filter_fn)
+        ...     .stage("aggregate", aggregate_fn)
+        ...     .execute()
+        ... )
     """
-    if not functions:
-        return lambda x: x
 
-    def piped(x: Any) -> Any:
-        result = x
-        for func in functions:
-            result = func(result)
-        return result
+    def __init__(self) -> None:
+        self._stages: List[tuple[str, Callable[[Any], Any]]] = []
+        self._source: Optional[Callable[[], T]] = None
 
-    return piped
+    def source(self, factory: Callable[[], T]) -> PipelineBuilder[T]:
+        """Set the pipeline source.
+
+        Args:
+            factory: Source factory function.
+
+        Returns:
+            Self for chaining.
+        """
+        self._source = factory
+        return self
+
+    def stage(
+        self,
+        name: str,
+        fn: Callable[[Any], Any],
+    ) -> PipelineBuilder[Any]:
+        """Add a named stage.
+
+        Args:
+            name: Stage name for debugging.
+            fn: Stage transformation function.
+
+        Returns:
+            Self for chaining.
+        """
+        self._stages.append((name, fn))
+        return self
+
+    def execute(self) -> Any:
+        """Execute the built pipeline.
+
+        Returns:
+            Pipeline result.
+        """
+        if self._source is None:
+            raise PipelineError("No source defined")
+
+        pipeline = Pipeline(self._source)
+        for name, fn in self._stages:
+            pipeline = pipeline.then(fn)
+
+        return pipeline.execute()

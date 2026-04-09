@@ -1,313 +1,268 @@
-"""Bulk operation utilities.
+"""Bulk operation utilities for batch processing automation actions.
 
-Efficient batch processing for database operations, file I/O, and API calls.
-Supports chunking, retry logic, and progress tracking.
+Provides batching, chunking, parallel execution, and
+result aggregation for large-scale automation operations.
 
 Example:
-    results = bulk_update(
-        records=[{"id": i, "value": i * 10} for i in range(1000)],
-        chunk_size=100,
-        update_fn=lambda batch: db.execute_many("UPDATE ...", batch),
-    )
+    >>> from utils.bulk_operation_utils import BatchProcessor, chunk
+    >>> processor = BatchProcessor(batch_size=50, max_workers=4)
+    >>> results = processor.process(large_element_set, action_fn)
 """
 
 from __future__ import annotations
 
-import logging
-import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from typing import Any, Callable, Generator, Sequence, TypeVar
-
-logger = logging.getLogger(__name__)
+from dataclasses import dataclass, field
+from typing import (
+    Any,
+    Callable,
+    Iterator,
+    List,
+    Optional,
+    TypeVar,
+    Generic,
+)
 
 T = TypeVar("T")
-R = TypeVar("R")
+U = TypeVar("U")
 
 
 @dataclass
-class BulkOperationResult:
-    """Result of a bulk operation."""
+class BatchResult(Generic[T]):
+    """Result of a batch operation."""
     total: int
-    successful: int
+    succeeded: int
     failed: int
-    duration_ms: float
-    errors: list[tuple[Any, Exception]]
-    results: list[R]
+    results: List[T]
+    errors: List[tuple[int, Exception]]
+    duration_seconds: float
 
 
-def chunked(iterable: Sequence[T], size: int) -> Generator[list[T], None, None]:
-    """Split an iterable into chunks of specified size.
+@dataclass
+class BatchConfig:
+    """Configuration for batch processing."""
+    batch_size: int = 50
+    max_workers: int = 4
+    stop_on_error: bool = False
+    progress_callback: Optional[Callable[[int, int], None]] = None
+
+
+def chunk(items: List[T], size: int) -> Iterator[List[T]]:
+    """Split items into chunks of specified size.
 
     Args:
-        iterable: Input sequence.
-        size: Chunk size.
+        items: List of items to chunk.
+        size: Maximum chunk size.
 
     Yields:
-        Chunks of up to `size` elements.
+        Chunks of items.
+
+    Example:
+        >>> list(chunk([1, 2, 3, 4, 5], 2))
+        [[1, 2], [3, 4], [5]]
     """
-    for i in range(0, len(iterable), size):
-        yield list(iterable[i:i + size])
+    for i in range(0, len(items), size):
+        yield items[i : i + size]
 
 
-def bulk_process(
-    items: Sequence[T],
-    processor: Callable[[T], R],
-    *,
-    chunk_size: int = 100,
-    max_workers: int = 4,
-    fail_fast: bool = False,
-) -> BulkOperationResult[T, R]:
-    """Process items in bulk with parallel execution.
+class BatchProcessor(Generic[T]):
+    """Batch processor for automating large sets of operations.
 
-    Args:
-        items: Items to process.
-        processor: Function to apply to each item.
-        chunk_size: Items per chunk.
-        max_workers: Max parallel threads.
-        fail_fast: If True, stop on first error.
+    Supports sequential and parallel batch processing with
+    configurable error handling and progress reporting.
 
-    Returns:
-        BulkOperationResult with all outcomes.
+    Example:
+        >>> processor = BatchProcessor(batch_size=20, max_workers=8)
+        >>> result = processor.process(elements, click_action)
+        >>> print(f"Succeeded: {result.succeeded}/{result.total}")
     """
-    import time
-    start = time.perf_counter()
 
-    successful: list[R] = []
-    errors: list[tuple[Any, Exception]] = []
-    total = len(items)
+    def __init__(
+        self,
+        batch_size: int = 50,
+        max_workers: int = 4,
+        stop_on_error: bool = False,
+    ) -> None:
+        """Initialize batch processor.
 
-    if max_workers <= 1:
-        for item in items:
-            try:
-                result = processor(item)
-                successful.append(result)
-            except Exception as e:
-                errors.append((item, e))
-                if fail_fast:
-                    break
-    else:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_item = {executor.submit(processor, item): item for item in items}
+        Args:
+            batch_size: Items per batch.
+            max_workers: Parallel worker threads.
+            stop_on_error: Stop processing on first error.
+        """
+        self.batch_size = batch_size
+        self.max_workers = max_workers
+        self.stop_on_error = stop_on_error
 
-            for future in as_completed(future_to_item):
-                item = future_to_item[future]
+    def process(
+        self,
+        items: List[T],
+        action: Callable[[T], U],
+        *,
+        sequential: bool = False,
+    ) -> BatchResult[U]:
+        """Process items in batches.
+
+        Args:
+            items: Items to process.
+            action: Action to apply to each item.
+            sequential: If True, process in main thread sequentially.
+
+        Returns:
+            BatchResult with all results and statistics.
+        """
+        import time
+        start = time.monotonic()
+
+        results: List[U] = []
+        errors: List[tuple[int, Exception]] = []
+        succeeded = 0
+        failed = 0
+
+        batches = list(chunk(items, self.batch_size))
+
+        if sequential:
+            for batch_idx, batch in enumerate(batches):
+                for item_idx, item in enumerate(batch):
+                    global_idx = batch_idx * self.batch_size + item_idx
+                    try:
+                        result = action(item)
+                        results.append(result)
+                        succeeded += 1
+                    except Exception as e:
+                        errors.append((global_idx, e))
+                        failed += 1
+                        if self.stop_on_error:
+                            break
+        else:
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = {}
+                for batch_idx, batch in enumerate(batches):
+                    for item_idx, item in enumerate(batch):
+                        global_idx = batch_idx * self.batch_size + item_idx
+                        future = executor.submit(_safe_call, action, item)
+                        futures[future] = global_idx
+
+                for future in as_completed(futures):
+                    global_idx = futures[future]
+                    try:
+                        result = future.result()
+                        results.append(result)
+                        succeeded += 1
+                    except Exception as e:
+                        errors.append((global_idx, e))
+                        failed += 1
+                        if self.stop_on_error:
+                            for f in futures:
+                                f.cancel()
+
+        duration = time.monotonic() - start
+        return BatchResult(
+            total=len(items),
+            succeeded=succeeded,
+            failed=failed,
+            results=results,
+            errors=errors,
+            duration_seconds=duration,
+        )
+
+    def process_with_retry(
+        self,
+        items: List[T],
+        action: Callable[[T], U],
+        max_retries: int = 2,
+    ) -> BatchResult[U]:
+        """Process items with per-item retry logic.
+
+        Args:
+            items: Items to process.
+            action: Action to apply to each item.
+            max_retries: Maximum retries per item.
+
+        Returns:
+            BatchResult with all results.
+        """
+        import time
+        start = time.monotonic()
+
+        results: List[U] = []
+        errors: List[tuple[int, Exception]] = []
+        succeeded = 0
+        failed = 0
+
+        for idx, item in enumerate(items):
+            last_error: Optional[Exception] = None
+            for attempt in range(max_retries + 1):
                 try:
-                    result = future.result()
-                    successful.append(result)
+                    result = action(item)
+                    results.append(result)
+                    succeeded += 1
+                    break
                 except Exception as e:
-                    errors.append((item, e))
-                    if fail_fast:
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        break
+                    last_error = e
+            else:
+                errors.append((idx, last_error or Exception("Unknown")))
+                failed += 1
 
-    return BulkOperationResult(
-        total=total,
-        successful=len(successful),
-        failed=len(errors),
-        duration_ms=(time.perf_counter() - start) * 1000,
-        errors=errors,
-        results=successful,
-    )
+        duration = time.monotonic() - start
+        return BatchResult(
+            total=len(items),
+            succeeded=succeeded,
+            failed=failed,
+            results=results,
+            errors=errors,
+            duration_seconds=duration,
+        )
 
 
-def bulk_create(
-    connection: Any,
-    table: str,
-    records: list[dict[str, Any]],
-    chunk_size: int = 100,
-    on_conflict: str | None = None,
-) -> BulkOperationResult:
-    """Bulk insert records into database.
+def _safe_call(fn: Callable[[T], U], arg: T) -> U:
+    """Safely call a function and return result."""
+    return fn(arg)
 
-    Args:
-        connection: Database connection.
-        table: Target table name.
-        records: List of dicts with column names.
-        chunk_size: Records per INSERT statement.
-        on_conflict: Optional ON CONFLICT clause for PostgreSQL.
 
-    Returns:
-        BulkOperationResult with insert statistics.
+class BulkOperationTracker:
+    """Track progress of bulk operations with checkpoints.
+
+    Example:
+        >>> tracker = BulkOperationTracker(total=1000)
+        >>> tracker.checkpoint("started")
+        >>> # ... do work ...
+        >>> tracker.checkpoint("halfway")
+        >>> print(tracker.summary())
     """
-    import time
-    start = time.perf_counter()
-    successful = 0
-    errors: list[tuple[Any, Exception]] = []
-
-    if not records:
-        return BulkOperationResult(0, 0, 0, 0, [], [])
-
-    columns = list(records[0].keys())
-    placeholders = ", ".join(["%s"] * len(columns))
-
-    cursor = connection.cursor()
-
-    for chunk in chunked(records, chunk_size):
-        values = [tuple(row.get(col) for col in columns) for row in chunk]
-
-        query = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})"
-
-        if on_conflict:
-            query += f" ON CONFLICT {on_conflict}"
-
-        try:
-            cursor.executemany(query, values)
-            successful += len(values)
-        except Exception as e:
-            errors.append((chunk, e))
-            logger.error("Bulk insert failed: %s", e)
-
-    connection.commit()
-
-    return BulkOperationResult(
-        total=len(records),
-        successful=successful,
-        failed=len(records) - successful,
-        duration_ms=(time.perf_counter() - start) * 1000,
-        errors=errors,
-        results=[],
-    )
-
-
-def bulk_update(
-    connection: Any,
-    table: str,
-    records: list[dict[str, Any]],
-    id_column: str = "id",
-    chunk_size: int = 100,
-) -> BulkOperationResult:
-    """Bulk update records in database.
-
-    Args:
-        connection: Database connection.
-        table: Target table name.
-        records: List of dicts with column names and values.
-        id_column: Primary key column name.
-        chunk_size: Records per UPDATE statement.
-
-    Returns:
-        BulkOperationResult with update statistics.
-    """
-    import time
-    start = time.perf_counter()
-    successful = 0
-    errors: list[tuple[Any, Exception]] = []
-
-    cursor = connection.cursor()
-
-    for chunk in chunked(records, chunk_size):
-        for record in chunk:
-            record_id = record.get(id_column)
-            if record_id is None:
-                errors.append((record, ValueError(f"Missing {id_column}")))
-                continue
-
-            set_clause = ", ".join(
-                f"{k} = %s" for k in record if k != id_column
-            )
-            values = [v for k, v in record.items() if k != id_column] + [record_id]
-
-            query = f"UPDATE {table} SET {set_clause} WHERE {id_column} = %s"
-
-            try:
-                cursor.execute(query, values)
-                successful += 1
-            except Exception as e:
-                errors.append((record, e))
-                logger.error("Bulk update failed for id=%s: %s", record_id, e)
-
-    connection.commit()
-
-    return BulkOperationResult(
-        total=len(records),
-        successful=successful,
-        failed=len(errors),
-        duration_ms=(time.perf_counter() - start) * 1000,
-        errors=errors,
-        results=[],
-    )
-
-
-def paginate(
-    query_fn: Callable[[int, int], Sequence[T]],
-    page_size: int = 100,
-    max_pages: int | None = None,
-) -> Generator[T, None, None]:
-    """Generic paginated query iterator.
-
-    Args:
-        query_fn: Function(page_number, page_size) returning records.
-        page_size: Records per page.
-        max_pages: Optional maximum pages to fetch.
-
-    Yields:
-        Individual records from all pages.
-    """
-    page = 0
-    while True:
-        if max_pages and page >= max_pages:
-            break
-
-        records = query_fn(page, page_size)
-        if not records:
-            break
-
-        yield from records
-
-        if len(records) < page_size:
-            break
-
-        page += 1
-
-
-class ProgressTracker:
-    """Tracks progress of bulk operations."""
 
     def __init__(self, total: int) -> None:
         self.total = total
-        self.processed = 0
-        self.succeeded = 0
-        self.failed = 0
-        self.start_time = time.perf_counter()
-        self._lock = __import__("threading").RLock()
+        self._completed = 0
+        self._checkpoints: dict[str, int] = {}
+        self._lock = threading.Lock()
 
-    def increment(self, success: bool = True) -> None:
-        """Increment processed count."""
+    def increment(self, count: int = 1) -> None:
+        """Increment completed count."""
         with self._lock:
-            self.processed += 1
-            if success:
-                self.succeeded += 1
-            else:
-                self.failed += 1
+            self._completed = min(self.total, self._completed + count)
+
+    def checkpoint(self, name: str) -> None:
+        """Record a named checkpoint with current progress."""
+        with self._lock:
+            self._checkpoints[name] = self._completed
 
     @property
-    def percent(self) -> float:
-        """Progress percentage."""
+    def completed(self) -> int:
+        return self._completed
+
+    @property
+    def progress_percent(self) -> float:
         if self.total == 0:
-            return 0.0
-        return (self.processed / self.total) * 100
+            return 100.0
+        return (self._completed / self.total) * 100
 
-    @property
-    def rate(self) -> float:
-        """Items processed per second."""
-        elapsed = time.perf_counter() - self.start_time
-        if elapsed == 0:
-            return 0.0
-        return self.processed / elapsed
-
-    @property
-    def eta_seconds(self) -> float:
-        """Estimated seconds remaining."""
-        if self.rate == 0:
-            return 0.0
-        remaining = self.total - self.processed
-        return remaining / self.rate
-
-    def __str__(self) -> str:
-        return (
-            f"Progress: {self.processed}/{self.total} "
-            f"({self.percent:.1f}%) "
-            f"S: {self.succeeded} F: {self.failed} "
-            f"Rate: {self.rate:.1f}/s ETA: {self.eta_seconds:.0f}s"
-        )
+    def summary(self) -> dict[str, Any]:
+        """Get summary of operation progress."""
+        return {
+            "total": self.total,
+            "completed": self._completed,
+            "percent": self.progress_percent,
+            "checkpoints": dict(self._checkpoints),
+        }

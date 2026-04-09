@@ -1,10 +1,13 @@
-"""Filter utilities for RabAI AutoClick.
+"""Filter utilities for selecting and filtering UI elements.
 
-Provides:
-- Predicate-based filtering helpers
-- Multi-condition filters
-- Partition utilities
-- Key-function based filtering
+Provides filtering, sorting, and ranking functions for
+automation element selection based on properties,
+visibility, and affinity scores.
+
+Example:
+    >>> from utils.filter_utils import filter_by, rank_elements, dedupe_elements
+    >>> visible = filter_by(elements, visible=True, enabled=True)
+    >>> ranked = rank_elements(visible, affinity_fn=score_element)
 """
 
 from __future__ import annotations
@@ -18,253 +21,281 @@ from typing import (
     Optional,
     Tuple,
     TypeVar,
-    Union,
 )
 
-import re
-
-
 T = TypeVar("T")
-K = TypeVar("K")
-V = TypeVar("V")
 
 
 def filter_by(
-    items: List[T],
-    predicate: Callable[[T], bool],
-) -> List[T]:
-    """Filter items using a predicate function.
-
-    Args:
-        items: List of items to filter.
-        predicate: Function that returns True to keep item.
-
-    Returns:
-        Filtered list.
-    """
-    return [item for item in items if predicate(item)]
-
-
-def filter_by_key(
     items: List[Dict[str, Any]],
-    key: str,
-    value: Any,
+    *,
+    visible: Optional[bool] = None,
+    enabled: Optional[bool] = None,
+    role: Optional[str] = None,
+    text_contains: Optional[str] = None,
+    text_matches: Optional[str] = None,
+    custom: Optional[Callable[[Dict[str, Any]], bool]] = None,
 ) -> List[Dict[str, Any]]:
-    """Filter dict items by a key=value pair.
+    """Filter elements by common properties.
 
     Args:
-        items: List of dicts.
-        key: Dict key to match.
-        value: Required value.
+        items: List of element dicts.
+        visible: Filter by visibility.
+        enabled: Filter by enabled state.
+        role: Filter by accessibility role.
+        text_contains: Element text must contain this substring.
+        text_matches: Element text must match this regex pattern.
+        custom: Custom filter function.
 
     Returns:
-        Filtered list of dicts.
+        Filtered list of elements.
     """
-    return [item for item in items if item.get(key) == value]
+    import re
+
+    results = list(items)
+
+    if visible is not None:
+        results = [e for e in results if e.get("visible", True) == visible]
+
+    if enabled is not None:
+        results = [e for e in results if e.get("enabled", True) == enabled]
+
+    if role is not None:
+        results = [e for e in results if e.get("role", "").lower() == role.lower()]
+
+    if text_contains is not None:
+        results = [
+            e for e in results
+            if text_contains.lower() in e.get("title", "").lower()
+            or text_contains.lower() in e.get("description", "").lower()
+        ]
+
+    if text_matches is not None:
+        pattern = re.compile(text_matches, re.IGNORECASE)
+        results = [
+            e for e in results
+            if pattern.search(e.get("title", "") or "")
+            or pattern.search(e.get("description", "") or "")
+        ]
+
+    if custom is not None:
+        results = [e for e in results if custom(e)]
+
+    return results
 
 
-def filter_by_keys(
+def rank_elements(
     items: List[Dict[str, Any]],
-    criteria: Dict[str, Any],
-) -> List[Dict[str, Any]]:
-    """Filter dict items by multiple key=value criteria.
+    *,
+    affinity_fn: Optional[Callable[[Dict[str, Any]], float]] = None,
+    top_k: Optional[int] = None,
+) -> List[Tuple[Dict[str, Any], float]]:
+    """Rank elements by affinity score.
 
     Args:
-        items: List of dicts.
-        criteria: Dict of {key: value} pairs to match.
+        items: List of element dicts.
+        affinity_fn: Function returning score (higher = better).
+        top_k: Return only top K elements.
 
     Returns:
-        Filtered list of dicts.
+        List of (element, score) tuples sorted by score descending.
     """
-    def matches(item: Dict[str, Any]) -> bool:
-        return all(item.get(k) == v for k, v in criteria.items())
-    return [item for item in items if matches(item)]
+    if affinity_fn is None:
+        affinity_fn = lambda e: e.get("score", 0.0)
+
+    scored = [(item, affinity_fn(item)) for item in items]
+    scored.sort(key=lambda x: -x[1])
+
+    if top_k is not None:
+        scored = scored[:top_k]
+
+    return scored
 
 
-def partition(
-    items: List[T],
-    predicate: Callable[[T], bool],
-) -> Tuple[List[T], List[T]]:
-    """Partition items into two lists based on predicate.
-
-    Args:
-        items: Items to partition.
-        predicate: Function that returns True for first group.
-
-    Returns:
-        Tuple of (matching, non_matching).
-    """
-    yes: List[T] = []
-    no: List[T] = []
-    for item in items:
-        if predicate(item):
-            yes.append(item)
-        else:
-            no.append(item)
-    return yes, no
-
-
-def partition_by_key(
+def sort_elements(
     items: List[Dict[str, Any]],
+    *,
     key: str,
-) -> Dict[Any, List[Dict[str, Any]]]:
-    """Group items by a dict key.
+    reverse: bool = False,
+    nulls_last: bool = True,
+) -> List[Dict[str, Any]]:
+    """Sort elements by a property.
 
     Args:
-        items: List of dicts.
-        key: Key to group by.
+        items: List of element dicts.
+        key: Property name to sort by.
+        reverse: Sort descending.
+        nulls_last: Put None values at end.
 
     Returns:
-        Dict mapping key values to lists of items.
+        Sorted list.
     """
-    result: Dict[Any, List[Dict[str, Any]]] = {}
-    for item in items:
-        k = item.get(key)
-        if k not in result:
-            result[k] = []
-        result[k].append(item)
-    return result
+    def sort_key(e: Dict[str, Any]) -> Tuple[bool, Any]:
+        val = e.get(key)
+        if val is None:
+            return (nulls_last, "")
+        return (False, val)
+
+    return sorted(items, key=sort_key, reverse=reverse)
 
 
-def filter_regex(
-    items: List[str],
-    pattern: str,
-    flags: int = 0,
-) -> List[str]:
-    """Filter strings by a regex pattern.
+def dedupe_elements(
+    items: List[Dict[str, Any]],
+    *,
+    key: Optional[Callable[[Dict[str, Any]], Any]] = None,
+    strategy: str = "first",
+) -> List[Dict[str, Any]]:
+    """Remove duplicate elements.
 
     Args:
-        items: List of strings.
-        pattern: Regex pattern (items that match are kept).
-        flags: Regex flags.
-
-    Returns:
-        Filtered list of matching strings.
-    """
-    compiled = re.compile(pattern, flags)
-    return [item for item in items if compiled.search(item)]
-
-
-def reject(
-    items: List[T],
-    predicate: Callable[[T], bool],
-) -> List[T]:
-    """Reject items that match the predicate (inverse filter).
-
-    Args:
-        items: Items to filter.
-        predicate: Function that returns True to exclude.
-
-    Returns:
-        List with matching items removed.
-    """
-    return [item for item in items if not predicate(item)]
-
-
-def unique_by(
-    items: List[T],
-    key: Callable[[T], K],
-) -> List[T]:
-    """Return items with duplicate keys removed (first occurrence kept).
-
-    Args:
-        items: Items to dedupe.
-        key: Function to extract comparison key.
-
-    Returns:
-        Deduplicated list preserving order.
-    """
-    seen: set = set()
-    result: List[T] = []
-    for item in items:
-        k = key(item)
-        if k not in seen:
-            seen.add(k)
-            result.append(item)
-    return result
-
-
-def deduplicate(
-    items: List[T],
-) -> List[T]:
-    """Remove duplicate items preserving order.
-
-    Args:
-        items: Items to dedupe.
+        items: List of element dicts.
+        key: Key function for identity (default: element's "id" or "hash").
+        strategy: "first" keeps first occurrence, "last" keeps last.
 
     Returns:
         Deduplicated list.
     """
-    seen: set = set()
-    result: List[T] = []
+    if key is None:
+        key = lambda e: (e.get("id"), e.get("hash"))
+
+    seen: Dict[Any, Dict[str, Any]] = {}
     for item in items:
-        if item not in seen:
-            seen.add(item)
-            result.append(item)
-    return result
+        k = key(item)
+        if strategy == "first":
+            if k not in seen:
+                seen[k] = item
+        else:
+            seen[k] = item
+
+    return list(seen.values())
 
 
-def chunk_filter(
-    items: List[T],
-    chunk_size: int,
-    predicate: Callable[[List[T]], bool],
-) -> List[List[T]]:
-    """Partition items into chunks and filter chunks by predicate.
+def find_ancestor(
+    element: Dict[str, Any],
+    elements: List[Dict[str, Any]],
+    *,
+    role: Optional[str] = None,
+    max_depth: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    """Find an ancestor element matching criteria.
 
     Args:
-        items: Items to chunk.
-        chunk_size: Size of each chunk.
-        predicate: Returns True to keep chunk.
+        element: Starting element.
+        elements: All elements (to search in).
+        role: Required ancestor role.
+        max_depth: Maximum depth to search.
 
     Returns:
-        List of kept chunks.
+        Matching ancestor or None.
     """
-    result: List[List[T]] = []
-    for i in range(0, len(items), chunk_size):
-        chunk = items[i : i + chunk_size]
-        if predicate(chunk):
-            result.append(chunk)
-    return result
+    parent_id = element.get("parent_id")
+    if not parent_id:
+        return None
+
+    depth = 0
+    current_id = parent_id
+
+    while current_id and (max_depth is None or depth < max_depth):
+        for e in elements:
+            if e.get("id") == current_id:
+                if role is None or e.get("role", "").lower() == role.lower():
+                    return e
+                current_id = e.get("parent_id")
+                depth += 1
+                break
+        else:
+            break
+
+    return None
 
 
-def filter_by_range(
-    items: List[T],
-    key: Callable[[T], float],
-    min_val: Optional[float] = None,
-    max_val: Optional[float] = None,
-) -> List[T]:
-    """Filter items by numeric range on a key function.
+def find_children(
+    element: Dict[str, Any],
+    elements: List[Dict[str, Any]],
+    *,
+    role: Optional[str] = None,
+    recursive: bool = False,
+) -> List[Dict[str, Any]]:
+    """Find child elements matching criteria.
 
     Args:
-        items: Items to filter.
-        key: Numeric extraction function.
-        min_val: Minimum value (inclusive).
-        max_val: Maximum value (inclusive).
+        element: Parent element.
+        elements: All elements.
+        role: Filter by role.
+        recursive: Search recursively.
 
     Returns:
-        Filtered list.
+        List of matching child elements.
     """
-    result: List[T] = []
+    eid = element.get("id")
+    children: List[Dict[str, Any]] = []
+
+    for e in elements:
+        if e.get("parent_id") == eid:
+            if role is None or e.get("role", "").lower() == role.lower():
+                children.append(e)
+            if recursive:
+                children.extend(find_children(e, elements, role=role, recursive=True))
+
+    return children
+
+
+def nearest_to_point(
+    items: List[Dict[str, Any]],
+    point: Tuple[int, int],
+    *,
+    key: str = "position",
+) -> Optional[Dict[str, Any]]:
+    """Find element nearest to a point.
+
+    Args:
+        items: Elements with position info.
+        point: (x, y) reference point.
+        key: Key containing position tuple in element.
+
+    Returns:
+        Nearest element or None.
+    """
+    px, py = point
+    best: Optional[Dict[str, Any]] = None
+    best_dist = float("inf")
+
     for item in items:
-        val = key(item)
-        if min_val is not None and val < min_val:
+        pos = item.get(key)
+        if not pos:
             continue
-        if max_val is not None and val > max_val:
-            continue
-        result.append(item)
-    return result
+        if isinstance(pos, (list, tuple)) and len(pos) >= 2:
+            ex, ey = pos[0], pos[1]
+            dist = ((ex - px) ** 2 + (ey - py) ** 2) ** 0.5
+            if dist < best_dist:
+                best_dist = dist
+                best = item
+
+    return best
 
 
-__all__ = [
-    "filter_by",
-    "filter_by_key",
-    "filter_by_keys",
-    "partition",
-    "partition_by_key",
-    "filter_regex",
-    "reject",
-    "unique_by",
-    "deduplicate",
-    "chunk_filter",
-    "filter_by_range",
-]
+def within_bounds(
+    element: Dict[str, Any],
+    bounds: Tuple[int, int, int, int],
+) -> bool:
+    """Check if element is within screen bounds.
+
+    Args:
+        element: Element with "position" or "frame" key.
+        bounds: (x, y, width, height) bounding rect.
+
+    Returns:
+        True if element is fully within bounds.
+    """
+    bx, by, bw, bh = bounds
+    pos = element.get("position") or element.get("frame")
+    if not pos or len(pos) < 4:
+        return False
+
+    ex, ey, ew, eh = pos[0], pos[1], pos[2], pos[3]
+    return (
+        ex >= bx
+        and ey >= by
+        and (ex + ew) <= (bx + bw)
+        and (ey + eh) <= (by + bh)
+    )

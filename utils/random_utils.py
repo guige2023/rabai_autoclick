@@ -1,235 +1,242 @@
-"""Random data generation utilities.
+"""Random data generation utilities for testing and automation.
 
-Provides random data generators for testing and
-automation workflow initialization.
+Provides functions for generating random coordinates, text,
+sequences, and structured test data for automation testing.
+
+Example:
+    >>> from utils.random_utils import random_coords, random_text, random_delay
+    >>> random_coords(screen_w=1920, screen_h=1080)
+    (847, 392)
+    >>> random_text(length=16)
+    'aKj9xPm2QwZbRnYs'
 """
+
+from __future__ import annotations
 
 import random
 import string
+import time
 import uuid
-from typing import List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
+
+T = TypeVar("T")
 
 
-def random_string(length: int = 10, charset: Optional[str] = None) -> str:
-    """Generate random string.
+def random_coords(
+    *,
+    screen_w: int = 1920,
+    screen_h: int = 1080,
+    margin: int = 0,
+) -> Tuple[int, int]:
+    """Generate random screen coordinates.
 
     Args:
-        length: Length of string.
+        screen_w: Screen width.
+        screen_h: Screen height.
+        margin: Margin from screen edges.
+
+    Returns:
+        Random (x, y) tuple.
+    """
+    x = random.randint(margin, screen_w - margin - 1)
+    y = random.randint(margin, screen_h - margin - 1)
+    return x, y
+
+
+def random_text(
+    length: int = 16,
+    *,
+    charset: Optional[str] = None,
+    case_sensitive: bool = True,
+) -> str:
+    """Generate random text string.
+
+    Args:
+        length: Length of string to generate.
         charset: Character set to use.
+        case_sensitive: Use mixed case vs lowercase only.
 
     Returns:
         Random string.
     """
     if charset is None:
-        charset = string.ascii_letters + string.digits
+        if case_sensitive:
+            charset = string.ascii_letters + string.digits
+        else:
+            charset = string.ascii_lowercase + string.digits
+
     return "".join(random.choice(charset) for _ in range(length))
 
 
-def random_alphanumeric(length: int = 10) -> str:
-    """Generate random alphanumeric string.
+def random_delay(
+    min_ms: float = 50,
+    max_ms: float = 500,
+    distribution: str = "uniform",
+) -> float:
+    """Generate random delay in seconds.
 
     Args:
-        length: Length of string.
+        min_ms: Minimum delay in milliseconds.
+        max_ms: Maximum delay in milliseconds.
+        distribution: "uniform", "normal", or "exponential".
 
     Returns:
-        Random alphanumeric string.
+        Random delay in seconds.
     """
-    return random_string(length, string.ascii_letters + string.digits)
+    min_s = min_ms / 1000.0
+    max_s = max_ms / 1000.0
+
+    if distribution == "uniform":
+        return random.uniform(min_s, max_s)
+    elif distribution == "normal":
+        mean = (min_s + max_s) / 2
+        std = (max_s - min_s) / 6
+        return max(min_s, min(max_s, random.gauss(mean, std)))
+    elif distribution == "exponential":
+        lambd = 1.0 / ((min_s + max_s) / 2)
+        return min(max_s, random.expovariate(lambd))
+    else:
+        return random.uniform(min_s, max_s)
 
 
-def random_alpha(length: int = 10) -> str:
-    """Generate random alphabetic string.
+def random_choice(
+    items: List[T],
+    *,
+    weights: Optional[List[float]] = None,
+) -> T:
+    """Randomly select an item.
 
     Args:
-        length: Length of string.
+        items: List of items to choose from.
+        weights: Optional weights for each item.
 
     Returns:
-        Random alphabetic string.
+        Randomly selected item.
     """
-    return random_string(length, string.ascii_letters)
+    if not items:
+        raise ValueError("Cannot choose from empty list")
+    return random.choices(items, weights=weights, k=1)[0]
 
 
-def random_digits(length: int = 10) -> str:
-    """Generate random numeric string.
+def random_subset(
+    items: List[T],
+    min_size: int = 0,
+    max_size: Optional[int] = None,
+) -> List[T]:
+    """Get a random subset of items.
 
     Args:
-        length: Length of string.
+        items: Items to choose from.
+        min_size: Minimum subset size.
+        max_size: Maximum subset size.
 
     Returns:
-        Random numeric string.
+        Random subset of items.
     """
-    return random_string(length, string.digits)
+    if not items:
+        return []
+    max_size = max_size or len(items)
+    size = random.randint(min_size, max_size)
+    return random.sample(items, min(size, len(items)))
 
 
-def random_hex(length: int = 10) -> str:
-    """Generate random hexadecimal string.
+def random_element_with_properties(
+    properties: Dict[str, List[Any]],
+) -> Dict[str, Any]:
+    """Generate a random element with random property values.
 
     Args:
-        length: Length of string.
+        properties: Dict mapping property name -> list of possible values.
 
     Returns:
-        Random hex string.
+        Dict with randomly selected property values.
+
+    Example:
+        >>> random_element_with_properties({
+        ...     "color": ["red", "blue", "green"],
+        ...     "size": [10, 20, 30],
+        ... })
+        {"color": "blue", "size": 20}
     """
-    return random_string(length, string.hexdigits.lower())
-
-
-def random_int(min_val: int = 0, max_val: int = 100) -> int:
-    """Generate random integer in range.
-
-    Args:
-        min_val: Minimum value.
-        max_val: Maximum value.
-
-    Returns:
-        Random integer.
-    """
-    return random.randint(min_val, max_val)
-
-
-def random_float(min_val: float = 0.0, max_val: float = 1.0) -> float:
-    """Generate random float in range.
-
-    Args:
-        min_val: Minimum value.
-        max_val: Maximum value.
-
-    Returns:
-        Random float.
-    """
-    return random.uniform(min_val, max_val)
-
-
-def random_bool(prob_true: float = 0.5) -> bool:
-    """Generate random boolean.
-
-    Args:
-        prob_true: Probability of True.
-
-    Returns:
-        Random boolean.
-    """
-    return random.random() < prob_true
+    return {key: random.choice(values) for key, values in properties.items()}
 
 
 def random_uuid() -> str:
-    """Generate random UUID.
+    """Generate a random UUID string.
 
     Returns:
-        UUID string.
+        UUID4 string.
     """
     return str(uuid.uuid4())
 
 
-def random_choice(choices: List[T]) -> T:
-    """Randomly select from choices.
+def random_coordinates_cluster(
+    center: Tuple[float, float],
+    radius: float,
+    count: int = 5,
+) -> List[Tuple[float, float]]:
+    """Generate random coordinates clustered around a center.
 
     Args:
-        choices: List of choices.
+        center: (x, y) cluster center.
+        radius: Maximum distance from center.
+        count: Number of points to generate.
 
     Returns:
-        Random choice.
+        List of (x, y) coordinate tuples.
     """
-    return random.choice(choices)
+    cx, cy = center
+    points: List[Tuple[float, float]] = []
+    for _ in range(count):
+        angle = random.uniform(0, 2 * 3.14159)
+        r = radius * random.uniform(0, 1) ** 0.5
+        x = cx + r * random.choice([-1, 1]) * abs(random.gauss(0, 0.5))
+        y = cy + r * random.choice([-1, 1]) * abs(random.gauss(0, 0.5))
+        points.append((x, y))
+    return points
 
 
-def random_sample(population: List[T], k: int) -> List[T]:
-    """Randomly sample k items from population.
+def random_mouse_path(
+    start: Tuple[int, int],
+    end: Tuple[int, int],
+    *,
+    segments: int = 10,
+    jitter: float = 5.0,
+) -> List[Tuple[int, int]]:
+    """Generate a realistic mouse movement path.
 
     Args:
-        population: Population to sample from.
-        k: Number of items to sample.
+        start: Starting (x, y).
+        end: Ending (x, y).
+        segments: Number of path segments.
+        jitter: Random position jitter amount.
 
     Returns:
-        List of sampled items.
+        List of (x, y) points along the path.
     """
-    return random.sample(population, k)
+    sx, sy = start
+    ex, ey = end
+    path: List[Tuple[int, int]] = []
+
+    for i in range(segments + 1):
+        t = i / segments
+        x = sx + (ex - sx) * t + random.uniform(-jitter, jitter)
+        y = sy + (ey - sy) * t + random.uniform(-jitter, jitter)
+        path.append((int(x), int(y)))
+
+    path[0] = start
+    path[-1] = end
+    return path
 
 
-def random_color_rgb() -> Tuple[int, int, int]:
-    """Generate random RGB color.
-
-    Returns:
-        (R, G, B) tuple.
-    """
-    return (random_int(0, 255), random_int(0, 255), random_int(0, 255))
-
-
-def random_color_hex() -> str:
-    """Generate random hex color.
-
-    Returns:
-        Hex color string (e.g., "#A3F4C8").
-    """
-    return "#{:02X}{:02X}{:02X}".format(*random_color_rgb())
-
-
-def random_date(
-    start_year: int = 2000,
-    end_year: int = 2030,
-) -> Tuple[int, int, int]:
-    """Generate random date.
+def seeded_random(seed: int) -> Callable:
+    """Create a seeded random generator.
 
     Args:
-        start_year: Start year.
-        end_year: End year.
+        seed: Random seed.
 
     Returns:
-        (year, month, day) tuple.
+        Seeded random.Random instance.
     """
-    year = random_int(start_year, end_year)
-    month = random_int(1, 12)
-    day = random_int(1, 28)
-    return (year, month, day)
-
-
-def random_ip() -> str:
-    """Generate random IPv4 address.
-
-    Returns:
-        IP address string.
-    """
-    return ".".join(str(random_int(0, 255)) for _ in range(4))
-
-
-def random_email(domain: Optional[str] = None) -> str:
-    """Generate random email address.
-
-    Args:
-        domain: Domain name. Random if None.
-
-    Returns:
-        Email address string.
-    """
-    if domain is None:
-        domain = f"{random_alpha(6)}.com"
-    username = random_alphanumeric(random_int(5, 12))
-    return f"{username}@{domain}"
-
-
-def random_name() -> str:
-    """Generate random name.
-
-    Returns:
-        Random name string.
-    """
-    first = random.choice(["James", "John", "Mary", "Patricia", "Robert", "Jennifer", "Michael", "Linda", "William", "Barbara", "David", "Elizabeth", "Richard", "Susan", "Joseph", "Jessica", "Thomas", "Sarah", "Charles", "Karen"])
-    last = random.choice(["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson", "Thomas", "Taylor", "Moore", "Jackson", "Martin"])
-    return f"{first} {last}"
-
-
-def random_phone() -> str:
-    """Generate random phone number.
-
-    Returns:
-        Phone number string.
-    """
-    return f"+1-{random_digits(3)}-{random_digits(3)}-{random_digits(4)}"
-
-
-def shuffle_in_place(lst: List[T]) -> None:
-    """Shuffle list in place.
-
-    Args:
-        lst: List to shuffle.
-    """
-    random.shuffle(lst)
+    rng = random.Random(seed)
+    return rng

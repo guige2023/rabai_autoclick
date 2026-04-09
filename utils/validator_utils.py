@@ -1,30 +1,30 @@
-"""Validation utilities for RabAI AutoClick.
+"""Validation utilities for automation action parameters.
 
-Provides:
-- Schema validation
-- Type checking validators
-- Composite validators
-- Field validators
-- Validation error handling
+Provides schema-based and rule-based validation for
+UI elements, action parameters, and configuration data.
+
+Example:
+    >>> from utils.validator_utils import Validator, Schema, Required, Range
+    >>> schema = Schema({"x": Range(0, 1000), "y": Range(0, 1000)})
+    >>> validator = Validator(schema)
+    >>> validator.validate({"x": 100, "y": 200})  # raises ValidationError
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import (
     Any,
     Callable,
     Dict,
-    Generic,
     List,
     Optional,
     Pattern,
-    Set,
+    Tuple,
     TypeVar,
     Union,
 )
-
 
 T = TypeVar("T")
 
@@ -33,42 +33,108 @@ class ValidationError(Exception):
     """Raised when validation fails."""
 
     def __init__(self, message: str, field: Optional[str] = None) -> None:
-        self.message = message
         self.field = field
         super().__init__(message)
 
-    def __repr__(self) -> str:
-        if self.field:
-            return f"ValidationError({self.field}: {self.message})"
-        return f"ValidationError({self.message})"
 
+class Validator:
+    """Schema-based validator for dictionaries.
 
-class Validator(Generic[T]):
-    """Base validator class."""
+    Example:
+        >>> schema = Schema({
+        ...     "name": Required(str),
+        ...     "age": Range(0, 150),
+        ... })
+        >>> Validator(schema).validate({"name": "Alice", "age": 30})
+    """
 
-    def validate(self, value: T) -> None:
-        """Validate value. Raises ValidationError on failure."""
-        raise NotImplementedError
+    def __init__(
+        self,
+        schema: Dict[str, Any],
+        *,
+        allow_extra: bool = True,
+        allow_missing: bool = False,
+    ) -> None:
+        self.schema = schema
+        self.allow_extra = allow_extra
+        self.allow_missing = allow_missing
 
-    def __call__(self, value: T) -> None:
-        self.validate(value)
+    def validate(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate data against schema.
 
+        Args:
+            data: Data to validate.
 
-class TypeValidator(Validator[T]):
-    """Validator that checks type."""
+        Returns:
+            Validated data (possibly transformed).
 
-    def __init__(self, expected_type: type | tuple[type, ...]) -> None:
-        self.expected_type = expected_type
+        Raises:
+            ValidationError: If validation fails.
+        """
+        errors: List[Tuple[Optional[str], str]] = []
 
-    def validate(self, value: T) -> None:
-        if not isinstance(value, self.expected_type):  # type: ignore
+        for field, rule in self.schema.items():
+            if field not in data:
+                if isinstance(rule, Required):
+                    errors.append((field, f"Required field missing: {field}"))
+                elif not self.allow_missing:
+                    errors.append((field, f"Missing field: {field}"))
+                continue
+
+            try:
+                rule.validate(data[field])
+            except ValidationError as e:
+                errors.append((field, str(e)))
+
+        extra_fields = set(data.keys()) - set(self.schema.keys())
+        if extra_fields and not self.allow_extra:
+            for field in extra_fields:
+                errors.append((field, f"Extra field not allowed: {field}"))
+
+        if errors:
             raise ValidationError(
-                f"Expected {self.expected_type}, got {type(value)}"
+                f"Validation failed: {errors[0][1]}",
+                field=errors[0][0],
             )
 
+        return data
 
-class RangeValidator(Validator[T]):
-    """Validator for numeric ranges."""
+    def is_valid(self, data: Dict[str, Any]) -> bool:
+        """Check if data is valid without raising.
+
+        Args:
+            data: Data to validate.
+
+        Returns:
+            True if valid.
+        """
+        try:
+            self.validate(data)
+            return True
+        except ValidationError:
+            return False
+
+
+class Required:
+    """Required field rule."""
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+
+    def validate(self, value: Any) -> None:
+        if value is None:
+            raise ValidationError("Value is required")
+        if hasattr(self.inner, "validate"):
+            self.inner.validate(value)
+
+
+class Range:
+    """Numeric range rule.
+
+    Args:
+        min_val: Minimum value (inclusive).
+        max_val: Maximum value (inclusive).
+    """
 
     def __init__(
         self,
@@ -78,245 +144,183 @@ class RangeValidator(Validator[T]):
         self.min_val = min_val
         self.max_val = max_val
 
-    def validate(self, value: T) -> None:
+    def validate(self, value: Any) -> None:
+        if not isinstance(value, (int, float)):
+            raise ValidationError(f"Expected number, got {type(value).__name__}")
         if self.min_val is not None and value < self.min_val:
-            raise ValidationError(f"Value {value} is less than {self.min_val}")
+            raise ValidationError(f"Value {value} below minimum {self.min_val}")
         if self.max_val is not None and value > self.max_val:
-            raise ValidationError(f"Value {value} is greater than {self.max_val}")
+            raise ValidationError(f"Value {value} above maximum {self.max_val}")
 
 
-class LengthValidator(Validator[T]):
-    """Validator for string/collection length."""
+class Length:
+    """String/collection length rule."""
 
     def __init__(
         self,
-        min_length: Optional[int] = None,
-        max_length: Optional[int] = None,
+        min_len: Optional[int] = None,
+        max_len: Optional[int] = None,
     ) -> None:
-        self.min_length = min_length
-        self.max_length = max_length
+        self.min_len = min_len
+        self.max_len = max_len
 
-    def validate(self, value: T) -> None:
-        length = len(value)  # type: ignore
-        if self.min_length is not None and length < self.min_length:
-            raise ValidationError(
-                f"Length {length} is less than minimum {self.min_length}"
-            )
-        if self.max_length is not None and length > self.max_length:
-            raise ValidationError(
-                f"Length {length} is greater than maximum {self.max_length}"
-            )
+    def validate(self, value: Any) -> None:
+        if not hasattr(value, "__len__"):
+            raise ValidationError(f"Value has no length")
+        length = len(value)
+        if self.min_len is not None and length < self.min_len:
+            raise ValidationError(f"Length {length} below minimum {self.min_len}")
+        if self.max_len is not None and length > self.max_len:
+            raise ValidationError(f"Length {length} above maximum {self.max_len}")
 
 
-class PatternValidator(Validator[str]):
-    """Validator for string patterns."""
+class PatternRule:
+    """Regex pattern rule."""
 
-    def __init__(self, pattern: str | Pattern[str], message: Optional[str] = None) -> None:
+    def __init__(self, pattern: Union[str, Pattern[str]]) -> None:
         if isinstance(pattern, str):
             self.pattern = re.compile(pattern)
         else:
             self.pattern = pattern
-        self.message = message
-
-    def validate(self, value: str) -> None:
-        if not self.pattern.match(value):
-            msg = self.message or f"String does not match pattern {self.pattern.pattern}"
-            raise ValidationError(msg)
-
-
-class ChoiceValidator(Validator[T]):
-    """Validator for enum-like choices."""
-
-    def __init__(self, choices: Set[T]) -> None:
-        self.choices = choices
-
-    def validate(self, value: T) -> None:
-        if value not in self.choices:
-            raise ValidationError(f"Value {value} not in allowed choices: {self.choices}")
-
-
-class RequiredValidator(Validator[Any]):
-    """Validator that checks for None and empty values."""
 
     def validate(self, value: Any) -> None:
-        if value is None:
-            raise ValidationError("Value is required but was None")
-        if isinstance(value, (str, list, dict, tuple, set)) and len(value) == 0:
-            raise ValidationError("Value is required but was empty")
+        if not isinstance(value, str):
+            raise ValidationError(f"Expected string, got {type(value).__name__}")
+        if not self.pattern.match(value):
+            raise ValidationError(f"Pattern '{self.pattern.pattern}' did not match")
 
 
-class EmailValidator(Validator[str]):
-    """Validator for email addresses."""
+class OneOf:
+    """Value must be one of the options."""
 
-    EMAIL_PATTERN = re.compile(
-        r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-    )
+    def __init__(self, *options: Any) -> None:
+        self.options = set(options)
 
-    def validate(self, value: str) -> None:
-        if not self.EMAIL_PATTERN.match(value):
-            raise ValidationError(f"Invalid email address: {value}")
-
-
-class URLValidator(Validator[str]):
-    """Validator for URLs."""
-
-    URL_PATTERN = re.compile(
-        r"^https?://"
-        r"(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|"
-        r"localhost|"
-        r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})"
-        r"(?::\d+)?"
-        r"(?:/?|[/?]\S+)$",
-        re.IGNORECASE,
-    )
-
-    def validate(self, value: str) -> None:
-        if not self.URL_PATTERN.match(value):
-            raise ValidationError(f"Invalid URL: {value}")
+    def validate(self, value: Any) -> None:
+        if value not in self.options:
+            raise ValidationError(f"Value '{value}' not in {self.options}")
 
 
-class CustomValidator(Validator[T]):
-    """Validator that uses a custom function."""
+class AnyOf:
+    """Value must match at least one of the rules."""
 
-    def __init__(
-        self,
-        func: Callable[[T], bool],
-        message: str = "Custom validation failed",
-    ) -> None:
-        self.func = func
-        self.message = message
+    def __init__(self, *rules: Any) -> None:
+        self.rules = rules
 
-    def validate(self, value: T) -> None:
-        if not self.func(value):
-            raise ValidationError(self.message)
-
-
-class CompositeValidator(Validator[T]):
-    """Combines multiple validators."""
-
-    def __init__(
-        self,
-        *validators: Validator[Any],
-        require_all: bool = True,
-    ) -> None:
-        self.validators = validators
-        self.require_all = require_all
-
-    def validate(self, value: T) -> None:
-        errors: List[ValidationError] = []
-        for validator in self.validators:
+    def validate(self, value: Any) -> None:
+        errors: List[str] = []
+        for rule in self.rules:
             try:
-                validator.validate(value)
+                if hasattr(rule, "validate"):
+                    rule.validate(value)
+                    return
+                elif callable(rule) and not isinstance(rule, type):
+                    rule(value)
+                    return
+                elif isinstance(value, rule):
+                    return
             except ValidationError as e:
-                if self.require_all:
-                    raise
-                errors.append(e)
-
-        if not self.require_all and errors:
-            raise errors[0]
+                errors.append(str(e))
+        raise ValidationError(f"Value did not match any rule: {errors}")
 
 
-class OptionalValidator(Validator[Optional[T]]):
-    """Wraps validator to make value optional (None passes)."""
+class Schema:
+    """Nested schema for dict validation."""
 
-    def __init__(self, validator: Validator[T]) -> None:
-        self.validator = validator
-
-    def validate(self, value: Optional[T]) -> None:
-        if value is None:
-            return
-        self.validator.validate(value)
-
-
-class SchemaValidator:
-    """Validates data against a schema.
-
-    Example:
-        schema = SchemaValidator({
-            "name": RequiredValidator(),
-            "age": CompositeValidator(TypeValidator(int), RangeValidator(0, 150)),
-            "email": CompositeValidator(TypeValidator(str), EmailValidator()),
-        })
-
-        schema.validate({"name": "John", "age": 30, "email": "john@example.com"})
-    """
-
-    def __init__(self, fields: Dict[str, Validator[Any]]) -> None:
+    def __init__(self, fields: Dict[str, Any]) -> None:
         self.fields = fields
 
-    def validate(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Validate data against schema.
-
-        Args:
-            data: Data to validate.
-
-        Returns:
-            Validated data.
-
-        Raises:
-            ValidationError: If validation fails.
-        """
-        errors: Dict[str, List[str]] = {}
-
-        for field_name, validator in self.fields.items():
-            try:
-                if field_name in data:
-                    validator.validate(data[field_name])
-                else:
-                    if isinstance(validator, RequiredValidator):
-                        raise ValidationError(f"Missing required field: {field_name}")
-            except ValidationError as e:
-                if field_name not in errors:
-                    errors[field_name] = []
-                errors[field_name].append(e.message)
-
-        if errors:
-            error_messages = [
-                f"{field}: {', '.join(msgs)}"
-                for field, msgs in errors.items()
-            ]
-            raise ValidationError("; ".join(error_messages))
-
-        return data
+    def validate(self, value: Any) -> None:
+        if not isinstance(value, dict):
+            raise ValidationError(f"Expected dict, got {type(value).__name__}")
+        for field, rule in self.fields.items():
+            if hasattr(rule, "validate"):
+                if field in value:
+                    rule.validate(value[field])
 
 
-@dataclass
-class ValidationResult:
-    """Result of a validation operation."""
-
-    is_valid: bool
-    errors: List[ValidationError] = field(default_factory=list)
-    field_errors: Dict[str, List[str]] = field(default_factory=dict)
-
-    @property
-    def error_messages(self) -> List[str]:
-        return [e.message for e in self.errors]
-
-
-def validate(
-    value: T,
-    *validators: Validator[Any],
-    raise_on_error: bool = False,
-) -> ValidationResult:
-    """Validate value with multiple validators.
+def validate_coordinates(
+    x: Any,
+    y: Any,
+    *,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    screen_width: Optional[int] = None,
+    screen_height: Optional[int] = None,
+) -> Tuple[int, int]:
+    """Validate screen coordinates.
 
     Args:
-        value: Value to validate.
-        *validators: Validators to apply.
-        raise_on_error: If True, raise ValidationError on failure.
+        x: X coordinate.
+        y: Y coordinate.
+        width: Optional element width.
+        height: Optional element height.
+        screen_width: Screen width bound.
+        screen_height: Screen height bound.
 
     Returns:
-        ValidationResult.
+        Validated (x, y) as integers.
+
+    Raises:
+        ValidationError: If coordinates are invalid.
     """
-    result = ValidationResult(is_valid=True)
-    for validator in validators:
-        try:
-            validator.validate(value)
-        except ValidationError as e:
-            result.is_valid = False
-            result.errors.append(e)
+    try:
+        x = int(x)
+        y = int(y)
+    except (TypeError, ValueError) as e:
+        raise ValidationError(f"Invalid coordinate type: {e}")
 
-    if not result.is_valid and raise_on_error:
-        raise result.errors[0]
+    if x < 0 or y < 0:
+        raise ValidationError(f"Coordinates must be non-negative: ({x}, {y})")
 
-    return result
+    if screen_width is not None and x >= screen_width:
+        raise ValidationError(f"X coordinate {x} exceeds screen width {screen_width}")
+
+    if screen_height is not None and y >= screen_height:
+        raise ValidationError(f"Y coordinate {y} exceeds screen height {screen_height}")
+
+    if width is not None and x + width > (screen_width or 999999):
+        raise ValidationError(f"Element extends beyond screen width")
+
+    if height is not None and y + height > (screen_height or 999999):
+        raise ValidationError(f"Element extends beyond screen height")
+
+    return x, y
+
+
+def validate_action_params(
+    action: str,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Validate common action parameters.
+
+    Args:
+        action: Action name (e.g., "click", "type").
+        params: Action parameters dict.
+
+    Returns:
+        Validated parameters.
+
+    Raises:
+        ValidationError: If validation fails.
+    """
+    if action == "click":
+        if "x" not in params and "element" not in params:
+            raise ValidationError("click requires 'x' or 'element'")
+        if "x" in params:
+            x = int(params["x"])
+            y = int(params["y"])
+            validate_coordinates(x, y)
+
+    elif action == "type":
+        if "text" not in params:
+            raise ValidationError("type requires 'text'")
+        if not isinstance(params["text"], str):
+            raise ValidationError("type 'text' must be string")
+
+    elif action == "drag":
+        for coord in ["x1", "y1", "x2", "y2"]:
+            if coord not in params:
+                raise ValidationError(f"drag requires '{coord}'")
+
+    return params

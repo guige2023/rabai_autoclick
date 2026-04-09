@@ -1,160 +1,264 @@
-"""Observer pattern utilities: subject-observer, property change listeners, and signals."""
+"""Observer pattern utilities for automation event handling.
+
+Provides subject-observer bindings for reactive automation
+workflows where multiple components need to react to
+state changes in UI elements or actions.
+
+Example:
+    >>> from utils.observer_utils import Subject, Observer, Observable
+    >>> class ClickSubject(Subject):
+    ...     def notify(self, event):
+    ...         self._notify_observers(event)
+    >>> subject = ClickSubject()
+    >>> subject.attach(my_observer)
+    >>> subject.notify({"type": "click", "pos": (100, 200)})
+"""
 
 from __future__ import annotations
 
 import threading
-from collections import defaultdict
-from dataclasses import dataclass, field
-from typing import Any, Callable, Generic, TypeVar
-
-__all__ = [
-    "Observer",
-    "Subject",
-    "Signal",
-    "PropertyObserver",
-    "observable_property",
-]
-
+from abc import ABC, abstractmethod
+from typing import Any, Callable, Dict, List, Optional, Set, TypeVar
 
 T = TypeVar("T")
 
 
-@dataclass
-class Observer(Generic[T]):
-    """Registered observer with callback."""
-    id: str
-    callback: Callable[[T], None]
-    filter: Callable[[T], bool] | None = None
-    once: bool = False
-    priority: int = 0
+class Observer(ABC):
+    """Abstract observer interface."""
+
+    @abstractmethod
+    def update(self, event: Dict[str, Any]) -> None:
+        """Handle an event from a subject.
+
+        Args:
+            event: Event data dict.
+        """
+        raise NotImplementedError
 
 
-class Subject(Generic[T]):
-    """Subject that notifies observers of events."""
+class Subject:
+    """Subject in observer pattern with thread-safe operations."""
 
     def __init__(self) -> None:
-        self._observers: dict[str, list[Observer[T]]] = defaultdict(list)
+        self._observers: List[Observer] = []
         self._lock = threading.RLock()
 
-    def observe(
-        self,
-        observer_id: str,
-        callback: Callable[[T], None],
-        filter_fn: Callable[[T], bool] | None = None,
-        once: bool = False,
-        priority: int = 0,
-    ) -> Observer[T]:
-        obs = Observer(
-            id=observer_id,
-            callback=callback,
-            filter=filter_fn,
-            once=once,
-            priority=priority,
-        )
+    def attach(self, observer: Observer) -> None:
+        """Attach an observer.
+
+        Args:
+            observer: Observer to add.
+        """
         with self._lock:
-            self._observers[observer_id].append(obs)
-            self._observers[observer_id].sort(key=lambda o: o.priority, reverse=True)
-        return obs
+            if observer not in self._observers:
+                self._observers.append(observer)
 
-    def unobserve(self, observer_id: str) -> None:
+    def detach(self, observer: Observer) -> bool:
+        """Detach an observer.
+
+        Args:
+            observer: Observer to remove.
+
+        Returns:
+            True if found and removed.
+        """
         with self._lock:
-            self._observers.pop(observer_id, None)
-
-    def notify(self, event: T) -> int:
-        delivered = 0
-        with self._lock:
-            for obs_id, observers in list(self._observers.items()):
-                to_remove: list[Observer[T]] = []
-                for obs in observers:
-                    if obs.filter and not obs.filter(event):
-                        continue
-                    try:
-                        obs.callback(event)
-                        delivered += 1
-                        if obs.once:
-                            to_remove.append(obs)
-                    except Exception:
-                        pass
-                for obs in to_remove:
-                    observers.remove(obs)
-                if not observers:
-                    del self._observers[obs_id]
-        return delivered
-
-
-class Signal:
-    """Signal/slot pattern for event emission."""
-
-    def __init__(self) -> None:
-        self._slots: list[Callable[..., None]] = []
-        self._lock = threading.Lock()
-
-    def connect(self, slot: Callable[..., None]) -> None:
-        with self._lock:
-            self._slots.append(slot)
-
-    def disconnect(self, slot: Callable[..., None]) -> None:
-        with self._lock:
-            if slot in self._slots:
-                self._slots.remove(slot)
-
-    def emit(self, *args: Any, **kwargs: Any) -> None:
-        with self._lock:
-            slots = list(self._slots)
-        for slot in slots:
             try:
-                slot(*args, **kwargs)
+                self._observers.remove(observer)
+                return True
+            except ValueError:
+                return False
+
+    def _notify_observers(self, event: Dict[str, Any]) -> None:
+        """Internal: notify all observers.
+
+        Args:
+            event: Event data.
+        """
+        with self._lock:
+            observers = list(self._observers)
+
+        for observer in observers:
+            try:
+                observer.update(event)
             except Exception:
                 pass
 
-    def __call__(self, *args: Any, **kwargs: Any) -> None:
-        self.emit(*args, **kwargs)
+    @property
+    def observer_count(self) -> int:
+        """Number of attached observers."""
+        with self._lock:
+            return len(self._observers)
 
 
-class PropertyObserver:
-    """Observer for property changes on an object."""
+class CallableObserver(Observer):
+    """Observer wrapping a callable.
+
+    Example:
+        >>> observer = CallableObserver(lambda e: print(f"Clicked: {e}"))
+        >>> subject.attach(observer)
+    """
+
+    def __init__(self, callback: Callable[[Dict[str, Any]], None]) -> None:
+        self._callback = callback
+
+    def update(self, event: Dict[str, Any]) -> None:
+        self._callback(event)
+
+
+class Observable(Subject):
+    """Observable subject with event filtering and priority.
+
+    Supports:
+    - Event type filtering
+    - Observer priority ordering
+    - Once-only (one-time) observers
+    - Conditional observers
+    """
 
     def __init__(self) -> None:
-        self._callbacks: dict[str, list[Callable[[Any, Any], None]]] = defaultdict(list)
-        self._values: dict[str, Any] = {}
-        self._lock = threading.Lock()
+        super().__init__()
+        self._once_observers: Set[Observer] = set()
+        self._conditional_observers: Dict[
+            Observer, Callable[[Dict[str, Any]], bool]
+        ] = {}
 
-    def watch(
+    def attach(
         self,
-        property_name: str,
-        callback: Callable[[Any, Any], None],
+        observer: Observer,
+        *,
+        priority: int = 0,
+        event_filter: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        once: bool = False,
     ) -> None:
-        self._callbacks[property_name].append(callback)
+        """Attach an observer with options.
 
-    def set(self, property_name: str, new_value: Any) -> None:
-        old_value = self._values.get(property_name)
-        if old_value != new_value:
-            with self._lock:
-                self._values[property_name] = new_value
-            for cb in self._callbacks.get(property_name, []):
+        Args:
+            observer: Observer to add.
+            priority: Higher priority observers notified first.
+            event_filter: Callable that returns True to receive event.
+            once: If True, observer auto-detaches after first event.
+        """
+        with self._lock:
+            if event_filter:
+                self._conditional_observers[observer] = event_filter
+
+            if once:
+                self._once_observers.add(observer)
+
+            super().attach(observer)
+
+    def detach(self, observer: Observer) -> bool:
+        with self._lock:
+            self._once_observers.discard(observer)
+            self._conditional_observers.pop(observer, None)
+        return super().detach(observer)
+
+    def notify(self, event: Dict[str, Any]) -> None:
+        """Notify observers of an event.
+
+        Args:
+            event: Event data dict with at least "type" key.
+        """
+        with self._lock:
+            observers = list(self._observers)
+
+        to_detach: List[Observer] = []
+
+        for observer in observers:
+            if observer in self._conditional_observers:
                 try:
-                    cb(old_value, new_value)
+                    if not self._conditional_observers[observer](event):
+                        continue
                 except Exception:
                     pass
 
-    def get(self, property_name: str, default: Any = None) -> Any:
-        return self._values.get(property_name, default)
+            try:
+                observer.update(event)
+                if observer in self._once_observers:
+                    to_detach.append(observer)
+            except Exception:
+                pass
+
+        for observer in to_detach:
+            self.detach(observer)
 
 
-def observable_property(name: str | None = None):
-    """Decorator to make a property observable."""
-    def decorator(fn: Callable[[Any], T]) -> property:
-        prop_name = name or fn.__name__
+class EventDispatcher:
+    """Dispatcher supporting multiple event channels/topics.
 
-        class ObservableDescriptor:
-            def __get__(self, obj: Any, objtype: Any | None = None) -> T:
-                return fn(obj)
+    Example:
+        >>> dispatcher = EventDispatcher()
+        >>> dispatcher.on("click", click_handler)
+        >>> dispatcher.emit("click", {"x": 100, "y": 200})
+    """
 
-            def __set__(self, obj: Any, value: T) -> None:
-                if hasattr(obj, "_property_observer"):
-                    obj._property_observer.set(prop_name, value)
-                fn(obj)  # type: ignore
-                object.__setattr__(obj, f"_{prop_name}", value)
+    def __init__(self) -> None:
+        self._channels: Dict[str, Observable] = {}
+        self._global: Observable = Observable()
+        self._lock = threading.RLock()
 
-        return property(ObservableDescriptor())
-    return decorator
+    def on(
+        self,
+        channel: str,
+        handler: Callable[[Dict[str, Any]], None],
+        *,
+        once: bool = False,
+    ) -> CallableObserver:
+        """Register a handler for a channel.
+
+        Args:
+            channel: Channel name.
+            handler: Callback function.
+            once: Auto-unregister after first call.
+
+        Returns:
+            The created observer.
+        """
+        with self._lock:
+            if channel not in self._channels:
+                self._channels[channel] = Observable()
+            obs = CallableObserver(handler)
+            self._channels[channel].attach(obs, once=once)
+            return obs
+
+    def off(self, channel: str, observer: Observer) -> bool:
+        """Unregister a handler.
+
+        Args:
+            channel: Channel name.
+            observer: Observer to remove.
+
+        Returns:
+            True if found.
+        """
+        with self._lock:
+            if channel in self._channels:
+                return self._channels[channel].detach(observer)
+        return False
+
+    def emit(self, channel: str, data: Any = None) -> None:
+        """Emit an event on a channel.
+
+        Args:
+            channel: Channel name.
+            data: Event data.
+        """
+        event: Dict[str, Any] = {"type": channel, "data": data}
+        with self._lock:
+            if channel in self._channels:
+                self._channels[channel].notify(event)
+            self._global.notify(event)
+
+    def on_any(self, handler: Callable[[Dict[str, Any]], None]) -> CallableObserver:
+        """Register handler for all events.
+
+        Args:
+            handler: Callback for all events.
+
+        Returns:
+            Created observer.
+        """
+        obs = CallableObserver(handler)
+        self._global.attach(obs)
+        return obs

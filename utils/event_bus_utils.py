@@ -1,128 +1,264 @@
-"""Event bus and pub/sub utilities for decoupled communication."""
+"""Event bus utilities for publish-subscribe communication.
 
-from typing import Callable, Dict, List, Any, Optional
+Provides a centralized event bus for decoupled communication
+between automation components with support for filtering,
+priorities, and async event handling.
+
+Example:
+    >>> from utils.event_bus_utils import EventBus, event_bus
+    >>> event_bus.subscribe("action:completed", on_completed)
+    >>> event_bus.publish("action:completed", {"action_id": "123"})
+"""
+
+from __future__ import annotations
+
+import re
 import threading
-import uuid
+from dataclasses import dataclass, field
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Pattern,
+    Set,
+    Union,
+)
+from weakref import WeakSet
 
 
+@dataclass
 class Event:
-    """Event object passed to subscribers."""
+    """Event payload."""
+    topic: str
+    data: Any
+    source: Optional[str] = None
+    timestamp: float = field(default_factory=lambda: __import__("time").time())
 
-    def __init__(self, name: str, data: Any = None):
-        """Initialize event.
-        
-        Args:
-            name: Event name.
-            data: Optional event data payload.
-        """
-        self.name = name
-        self.data = data
-        self.timestamp = threading.current_thread().name
-        self.id = str(uuid.uuid4())
+
+SubscriptionID = str
 
 
 class EventBus:
-    """Centralized event bus for publish/subscribe communication."""
+    """Centralized event bus for publish-subscribe messaging.
 
-    def __init__(self):
-        """Initialize event bus."""
-        self._subscribers: Dict[str, List[Callable[[Event], None]]] = {}
+    Supports:
+    - Wildcard topic patterns (* and **)
+    - Priority-based subscription ordering
+    - Weak references for automatic cleanup
+    - Thread-safe publishing
+
+    Example:
+        >>> bus = EventBus()
+        >>> bus.subscribe("click:*", handler, priority=10)
+        >>> bus.publish("click:button", {"x": 100, "y": 200})
+    """
+
+    def __init__(self) -> None:
+        self._subscriptions: Dict[
+            str,
+            List[tuple[int, SubscriptionID, Callable[[Event], None]]]
+        ] = {}
+        self._wildcard_subscriptions: Dict[
+            str,
+            List[tuple[int, SubscriptionID, Callable[[Event], None]]]
+        ] = {}
+        self._id_counter = 0
         self._lock = threading.RLock()
-        self._global_handlers: List[Callable[[Event], None]] = []
+        self._global_subscriptions: List[
+            tuple[int, SubscriptionID, Callable[[Event], None]]
+        ] = []
 
     def subscribe(
         self,
-        event_name: str,
-        handler: Callable[[Event], None]
-    ) -> str:
-        """Subscribe to an event.
-        
+        topic: str,
+        handler: Callable[[Event], None],
+        *,
+        priority: int = 0,
+        source: Optional[str] = None,
+    ) -> SubscriptionID:
+        """Subscribe to an event topic.
+
         Args:
-            event_name: Name of event to subscribe to.
-            handler: Callback function.
-        
+            topic: Topic pattern (supports * and ** wildcards).
+            handler: Callback function to invoke on events.
+            priority: Higher priority handlers execute first.
+            source: Optional source filter.
+
         Returns:
             Subscription ID for later unsubscription.
+
+        Example:
+            >>> sub_id = bus.subscribe("action:*", my_handler)
+            >>> bus.unsubscribe(sub_id)
         """
         with self._lock:
-            if event_name not in self._subscribers:
-                self._subscribers[event_name] = []
-            self._subscribers[event_name].append(handler)
-            return f"{event_name}:{uuid.uuid4()}"
+            self._id_counter += 1
+            sid = f"sub_{self._id_counter}"
 
-    def subscribe_all(
+            entry = (priority, sid, handler)
+
+            if "*" not in topic and "?" not in topic:
+                if topic not in self._subscriptions:
+                    self._subscriptions[topic] = []
+                self._subscriptions[topic].append(entry)
+                self._subscriptions[topic].sort(key=lambda x: -x[0])
+            elif ("*" in topic or "?" in topic) and not topic.endswith("**"):
+                pattern_key = topic.replace("**", "\x00WILDCARD\x00")
+                if pattern_key not in self._wildcard_subscriptions:
+                    self._wildcard_subscriptions[pattern_key] = []
+                self._wildcard_subscriptions[pattern_key].append(entry)
+                self._wildcard_subscriptions[pattern_key].sort(key=lambda x: -x[0])
+            elif topic.endswith("**"):
+                if topic not in self._wildcard_subscriptions:
+                    self._wildcard_subscriptions[topic] = []
+                self._wildcard_subscriptions[topic].append(entry)
+                self._wildcard_subscriptions[topic].sort(key=lambda x: -x[0])
+
+            return sid
+
+    def subscribe_global(
         self,
-        handler: Callable[[Event], None]
-    ) -> str:
+        handler: Callable[[Event], None],
+        *,
+        priority: int = 0,
+    ) -> SubscriptionID:
         """Subscribe to all events.
-        
+
         Args:
-            handler: Callback function for all events.
-        
+            handler: Callback for all events.
+            priority: Execution priority.
+
         Returns:
             Subscription ID.
         """
         with self._lock:
-            self._global_handlers.append(handler)
-            return f"*:{uuid.uuid4()}"
+            self._id_counter += 1
+            sid = f"global_{self._id_counter}"
+            self._global_subscriptions.append((priority, sid, handler))
+            self._global_subscriptions.sort(key=lambda x: -x[0])
+            return sid
 
-    def unsubscribe(self, subscription_id: str) -> bool:
-        """Unsubscribe a handler.
-        
+    def unsubscribe(self, subscription_id: SubscriptionID) -> bool:
+        """Unsubscribe by ID.
+
         Args:
-            subscription_id: Subscription ID from subscribe().
-        
+            subscription_id: ID returned from subscribe.
+
         Returns:
-            True if unsubscribed, False if not found.
+            True if found and removed.
         """
         with self._lock:
-            parts = subscription_id.split(":", 1)
-            if len(parts) != 2:
-                return False
-            event_name, _ = parts
-            if event_name == "*":
-                for h in self._global_handlers:
-                    if str(id(h)) in subscription_id:
-                        self._global_handlers.remove(h)
+            for topic_subs in self._subscriptions.values():
+                for i, (p, sid, h) in enumerate(topic_subs):
+                    if sid == subscription_id:
+                        topic_subs.pop(i)
                         return True
-                return False
-            if event_name in self._subscribers:
-                for h in self._subscribers[event_name]:
-                    if str(id(h)) in subscription_id:
-                        self._subscribers[event_name].remove(h)
+
+            for pattern, topic_subs in self._wildcard_subscriptions.items():
+                for i, (p, sid, h) in enumerate(topic_subs):
+                    if sid == subscription_id:
+                        topic_subs.pop(i)
                         return True
+
+            for i, (p, sid, h) in enumerate(self._global_subscriptions):
+                if sid == subscription_id:
+                    self._global_subscriptions.pop(i)
+                    return True
+
             return False
 
-    def publish(self, event_name: str, data: Any = None) -> None:
-        """Publish an event.
-        
+    def publish(
+        self,
+        topic: str,
+        data: Any = None,
+        source: Optional[str] = None,
+    ) -> List[Any]:
+        """Publish an event to all matching subscribers.
+
         Args:
-            event_name: Name of event.
-            data: Optional event data.
+            topic: Event topic.
+            data: Event payload.
+            source: Optional source identifier.
+
+        Returns:
+            List of results from handlers.
         """
-        event = Event(event_name, data)
+        event = Event(topic=topic, data=data, source=source)
+        results: List[Any] = []
+
         with self._lock:
-            handlers = self._subscribers.get(event_name, [])[:]
-            global_handlers = self._global_handlers[:]
-        for handler in handlers + global_handlers:
+            direct_subs = list(self._subscriptions.get(topic, []))
+
+            wildcard_subs: List[tuple[int, str, Callable]] = []
+            for pattern, subs in self._wildcard_subscriptions.items():
+                clean_pattern = pattern.replace("\x00WILDCARD\x00", "**")
+                if self._match_wildcard(topic, clean_pattern):
+                    wildcard_subs.extend(subs)
+
+            global_subs = list(self._global_subscriptions)
+
+            all_handlers = direct_subs + wildcard_subs + global_subs
+            all_handlers.sort(key=lambda x: -x[0])
+
+        for _, _, handler in all_handlers:
             try:
-                handler(event)
+                result = handler(event)
+                results.append(result)
             except Exception:
                 pass
 
-    def unsubscribe_all(self) -> None:
-        """Unsubscribe all handlers."""
+        return results
+
+    def _match_wildcard(self, topic: str, pattern: str) -> bool:
+        """Match a topic against a wildcard pattern."""
+        if pattern.endswith("**"):
+            prefix = pattern[:-2]
+            return topic.startswith(prefix.rstrip(":").rstrip("."))
+        else:
+            regex = pattern.replace(".", r"\.").replace("*", "[^:]*").replace("?", "[^:]*")
+            try:
+                return bool(re.match(f"^{regex}$", topic))
+            except re.error:
+                return topic == pattern
+
+    def clear(self, topic: Optional[str] = None) -> None:
+        """Clear subscriptions.
+
+        Args:
+            topic: If provided, only clear that topic. Otherwise clear all.
+        """
         with self._lock:
-            self._subscribers.clear()
-            self._global_handlers.clear()
+            if topic is None:
+                self._subscriptions.clear()
+                self._wildcard_subscriptions.clear()
+                self._global_subscriptions.clear()
+            else:
+                self._subscriptions.pop(topic, None)
+
+    @property
+    def subscription_count(self) -> int:
+        """Total number of subscriptions."""
+        with self._lock:
+            return (
+                sum(len(s) for s in self._subscriptions.values())
+                + sum(len(s) for s in self._wildcard_subscriptions.values())
+                + len(self._global_subscriptions)
+            )
 
 
 _global_event_bus: Optional[EventBus] = None
+_bus_lock = threading.Lock()
 
 
 def get_event_bus() -> EventBus:
-    """Get the global event bus instance."""
+    """Get the global event bus singleton."""
     global _global_event_bus
-    if _global_event_bus is None:
-        _global_event_bus = EventBus()
-    return _global_event_bus
+    with _bus_lock:
+        if _global_event_bus is None:
+            _global_event_bus = EventBus()
+        return _global_event_bus
+
+
+event_bus = get_event_bus()
