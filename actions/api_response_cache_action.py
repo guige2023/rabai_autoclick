@@ -1,375 +1,244 @@
-"""API Response Cache Action module.
+"""API Response Cache Action.
 
-Provides intelligent caching for API responses with TTL,
-stale-while-revalidate, cache invalidation, and compression.
+Caches API responses with TTL, LRU eviction, compression,
+invalidation patterns, and cache-aside/read-through support.
 """
-
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import time
 import zlib
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Optional
-
-import aiohttp
+from typing import Any, Callable, Dict, List, Optional
 
 
 class CacheStrategy(Enum):
     """Cache strategies."""
-
-    CACHE_FIRST = "cache_first"
-    NETWORK_FIRST = "network_first"
-    STALE_WHILE_REVALIDATE = "stale_while_revalidate"
-    CACHE_ONLY = "cache_only"
-    NETWORK_ONLY = "network_only"
+    CACHE_ASIDE = "cache_aside"
+    READ_THROUGH = "read_through"
+    WRITE_THROUGH = "write_through"
+    WRITE_BACK = "write_back"
 
 
 @dataclass
 class CacheEntry:
-    """A cached response entry."""
-
+    """A single cache entry."""
     key: str
-    data: bytes
-    headers: dict[str, str]
-    status: int
+    value: Any
     created_at: float
-    accessed_at: float
-    expires_at: float
-    ttl: float
-    compress: bool
+    last_accessed: float
+    ttl: Optional[float] = None
     hit_count: int = 0
     size_bytes: int = 0
-
-    @property
-    def is_expired(self) -> bool:
-        """Check if entry has expired."""
-        return time.time() > self.expires_at
-
-    @property
-    def is_stale(self) -> bool:
-        """Check if entry is stale but not yet expired."""
-        if self.is_expired:
-            return False
-        stale_threshold = self.created_at + self.ttl * 0.8
-        return time.time() > stale_threshold
-
-    def touch(self) -> None:
-        """Update access time."""
-        self.accessed_at = time.time()
-        self.hit_count += 1
+    compressed: bool = False
 
 
 @dataclass
-class CacheConfig:
-    """Configuration for response cache."""
-
-    max_size_mb: float = 100.0
-    default_ttl: float = 300.0
-    compression_threshold: int = 1024
-    enable_stale_while_revalidate: bool = True
-    max_stale_age: float = 3600.0
-    cache_empty_responses: bool = False
-
-
-class ResponseCache:
-    """In-memory response cache with eviction."""
-
-    def __init__(self, config: Optional[CacheConfig] = None):
-        self.config = config or CacheConfig()
-        self._cache: dict[str, CacheEntry] = {}
-        self._lock = asyncio.Lock()
-        self._total_size = 0
-        self._hits = 0
-        self._misses = 0
-        self._revalidations = 0
-
-    def _make_key(self, url: str, method: str, params: Optional[dict]) -> str:
-        """Generate cache key."""
-        key_parts = [method.upper(), url]
-        if params:
-            key_parts.append(json.dumps(params, sort_keys=True))
-        key_str = "|".join(key_parts)
-        return hashlib.sha256(key_str.encode()).hexdigest()
-
-    def _compress(self, data: bytes) -> bytes:
-        """Compress data if beneficial."""
-        if len(data) < self.config.compression_threshold:
-            return data
-        return zlib.compress(data)
-
-    def _decompress(self, data: bytes, is_compressed: bool) -> bytes:
-        """Decompress data if needed."""
-        if is_compressed:
-            return zlib.decompress(data)
-        return data
-
-    async def get(
-        self,
-        url: str,
-        method: str = "GET",
-        params: Optional[dict] = None,
-    ) -> Optional[tuple[bytes, dict[str, str], int]]:
-        """Get cached response if available.
-
-        Returns:
-            Tuple of (data, headers, status) or None
-        """
-        key = self._make_key(url, method, params)
-
-        async with self._lock:
-            entry = self._cache.get(key)
-            if entry is None:
-                self._misses += 1
-                return None
-
-            if entry.is_expired:
-                self._misses += 1
-                del self._cache[key]
-                self._total_size -= entry.size_bytes
-                return None
-
-            entry.touch()
-            self._hits += 1
-            data = self._decompress(entry.data, entry.compress)
-            return data, entry.headers, entry.status
-
-    async def set(
-        self,
-        url: str,
-        data: bytes,
-        headers: dict[str, str],
-        status: int,
-        method: str = "GET",
-        params: Optional[dict] = None,
-        ttl: Optional[float] = None,
-    ) -> None:
-        """Cache a response."""
-        if status >= 400 and not self.config.cache_empty_responses:
-            return
-
-        key = self._make_key(url, method, params)
-        compress = len(data) >= self.config.compression_threshold
-        data_to_store = self._compress(data) if compress else data
-
-        entry = CacheEntry(
-            key=key,
-            data=data_to_store,
-            headers=headers,
-            status=status,
-            created_at=time.time(),
-            accessed_at=time.time(),
-            expires_at=time.time() + (ttl or self.config.default_ttl),
-            ttl=ttl or self.config.default_ttl,
-            compress=compress,
-            size_bytes=len(data_to_store),
-        )
-
-        async with self._lock:
-            old_entry = self._cache.get(key)
-            if old_entry:
-                self._total_size -= old_entry.size_bytes
-
-            self._cache[key] = entry
-            self._total_size += entry.size_bytes
-
-            await self._evict_if_needed()
-
-    async def _evict_if_needed(self) -> None:
-        """Evict entries if cache exceeds max size."""
-        max_bytes = self.config.max_size_mb * 1024 * 1024
-
-        while self._total_size > max_bytes and self._cache:
-            oldest = min(self._cache.values(), key=lambda e: e.accessed_at)
-            del self._cache[oldest.key]
-            self._total_size -= oldest.size_bytes
-
-    async def invalidate(self, pattern: Optional[str] = None) -> int:
-        """Invalidate cache entries matching pattern.
-
-        Args:
-            pattern: Optional URL pattern to match
-
-        Returns:
-            Number of entries invalidated
-        """
-        count = 0
-        async with self._lock:
-            if pattern is None:
-                count = len(self._cache)
-                self._cache.clear()
-                self._total_size = 0
-            else:
-                keys_to_delete = [
-                    k for k, v in self._cache.items() if pattern in k
-                ]
-                for key in keys_to_delete:
-                    self._total_size -= self._cache[key].size_bytes
-                    del self._cache[key]
-                    count += 1
-        return count
-
-    async def get_stale(
-        self,
-        url: str,
-        method: str = "GET",
-        params: Optional[dict] = None,
-    ) -> Optional[tuple[bytes, dict[str, str], int]]:
-        """Get cached response even if stale (for stale-while-revalidate)."""
-        key = self._make_key(url, method, params)
-
-        async with self._lock:
-            entry = self._cache.get(key)
-            if entry is None:
-                return None
-
-            max_stale = entry.created_at + self.config.max_stale_age
-            if time.time() > max_stale:
-                return None
-
-            if not entry.is_expired:
-                return None
-
-            entry.touch()
-            self._revalidations += 1
-            data = self._decompress(entry.data, entry.compress)
-            return data, entry.headers, entry.status
-
-    def get_stats(self) -> dict[str, Any]:
-        """Get cache statistics."""
-        total = self._hits + self._misses
-        hit_rate = self._hits / total if total > 0 else 0.0
-
-        return {
-            "entries": len(self._cache),
-            "size_mb": self._total_size / (1024 * 1024),
-            "hits": self._hits,
-            "misses": self._misses,
-            "hit_rate": hit_rate,
-            "revalidations": self._revalidations,
-        }
+class CacheStats:
+    """Cache statistics."""
+    hits: int = 0
+    misses: int = 0
+    evictions: int = 0
+    expirations: int = 0
+    writes: int = 0
+    current_size: int = 0
+    max_size: int = 0
 
 
-class CachedApiClient:
-    """API client with integrated caching."""
+class APIResponseCacheAction:
+    """High-performance cache for API responses."""
 
     def __init__(
         self,
-        cache: Optional[ResponseCache] = None,
-        cache_strategy: CacheStrategy = CacheStrategy.STALE_WHILE_REVALIDATE,
-    ):
-        self.cache = cache or ResponseCache()
-        self.strategy = cache_strategy
-        self._session: Optional[aiohttp.ClientSession] = None
-
-    async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create aiohttp session."""
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-        return self._session
-
-    async def request(
-        self,
-        method: str,
-        url: str,
-        params: Optional[dict] = None,
-        ttl: Optional[float] = None,
-        **kwargs: Any,
-    ) -> tuple[bytes, aiohttp.ClientResponse]:
-        """Make cached API request.
-
-        Args:
-            method: HTTP method
-            url: Request URL
-            params: Query parameters
-            ttl: Cache TTL in seconds
-            **kwargs: Additional request options
-
-        Returns:
-            Tuple of (response_data, response)
-        """
-        cache_key = self._make_key(url, method, params)
-
-        if self.strategy in (
-            CacheStrategy.CACHE_FIRST,
-            CacheStrategy.STALE_WHILE_REVALIDATE,
-        ):
-            cached = await self.cache.get(url, method, params)
-            if cached:
-                data, headers, status = cached
-                if self.strategy == CacheStrategy.STALE_WHILE_REVALIDATE:
-                    asyncio.create_task(
-                        self._revalidate(method, url, params, ttl, **kwargs)
-                    )
-                return data, self._make_response(status, headers)
-
-        if self.strategy == CacheStrategy.CACHE_ONLY:
-            cached = await self.cache.get(url, method, params)
-            if cached:
-                data, headers, status = cached
-                return data, self._make_response(status, headers)
-            raise ValueError("No cached response available")
-
-        session = await self._get_session()
-        async with session.request(
-            method,
-            url,
-            params=params,
-            **kwargs,
-        ) as response:
-            data = await response.read()
-            await self.cache.set(
-                url, data, dict(response.headers),
-                response.status, method, params, ttl,
-            )
-            return data, response
-
-    async def _revalidate(
-        self,
-        method: str,
-        url: str,
-        params: Optional[dict],
-        ttl: Optional[float],
-        **kwargs: Any,
+        max_size: int = 1000,
+        default_ttl: float = 300.0,
+        compression_threshold: int = 1024,
+        strategy: CacheStrategy = CacheStrategy.CACHE_ASIDE,
     ) -> None:
-        """Revalidate a stale cache entry."""
-        try:
-            stale = await self.cache.get_stale(url, method, params)
-            if stale is None:
-                return
+        self.max_size = max_size
+        self.default_ttl = default_ttl
+        self.compression_threshold = compression_threshold
+        self.strategy = strategy
 
-            session = await self._get_session()
-            async with session.request(method, url, params=params, **kwargs) as resp:
-                data = await resp.read()
-                if resp.status < 400:
-                    await self.cache.set(
-                        url, data, dict(resp.headers),
-                        resp.status, method, params, ttl,
-                    )
-        except Exception:
-            pass
+        self._cache: OrderedDict[str, CacheEntry] = OrderedDict()
+        self._stats = CacheStats(max_size=max_size)
+        self._lock = __import__("threading").Lock()
+        self._write_buffer: Dict[str, Any] = {}
 
-    def _make_key(self, url: str, method: str, params: Optional[dict]) -> str:
-        """Generate cache key."""
-        key_parts = [method.upper(), url]
-        if params:
-            key_parts.append(json.dumps(params, sort_keys=True))
-        return hashlib.sha256("|".join(key_parts).encode()).hexdigest()
+    def get(self, key: str) -> Optional[Any]:
+        """Get a value from cache."""
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is None:
+                self._stats.misses += 1
+                return None
 
-    def _make_response(self, status: int, headers: dict[str, str]) -> Any:
-        """Create a mock response object."""
-        class MockResponse:
-            status = status
-            headers = headers
-            def __init__(self, s, h):
-                self.status = s
-                self.headers = h
-        return MockResponse(status, headers)
+            if self._is_expired(entry):
+                del self._cache[key]
+                self._stats.expirations += 1
+                self._stats.misses += 1
+                return None
 
-    async def close(self) -> None:
-        """Close the client session."""
-        if self._session and not self._session.closed:
-            await self._session.close()
+            entry.last_accessed = time.time()
+            entry.hit_count += 1
+            self._cache.move_to_end(key)
+            self._stats.hits += 1
+
+            return self._decompress(entry.value, entry.compressed)
+
+    def set(
+        self,
+        key: str,
+        value: Any,
+        ttl: Optional[float] = None,
+    ) -> None:
+        """Set a value in cache."""
+        with self._lock:
+            compressed = False
+            serialized = self._serialize(value)
+            size = len(serialized)
+
+            if size > self.compression_threshold:
+                compressed_value = zlib.compress(serialized)
+                if len(compressed_value) < size:
+                    serialized = compressed_value
+                    compressed = True
+
+            entry = CacheEntry(
+                key=key,
+                value=serialized,
+                created_at=time.time(),
+                last_accessed=time.time(),
+                ttl=ttl or self.default_ttl,
+                size_bytes=len(serialized),
+                compressed=compressed,
+            )
+
+            if key in self._cache:
+                del self._cache[key]
+
+            while len(self._cache) >= self.max_size:
+                self._evict_lru()
+
+            self._cache[key] = entry
+            self._stats.writes += 1
+            self._update_size()
+
+    def delete(self, key: str) -> bool:
+        """Delete a key from cache."""
+        with self._lock:
+            if key in self._cache:
+                del self._cache[key]
+                self._update_size()
+                return True
+            return False
+
+    def clear(self) -> None:
+        """Clear all cache entries."""
+        with self._lock:
+            self._cache.clear()
+            self._write_buffer.clear()
+            self._update_size()
+
+    def invalidate_pattern(self, pattern: str) -> int:
+        """Invalidate all keys matching a pattern."""
+        import re
+        compiled = re.compile(pattern)
+        with self._lock:
+            to_delete = [k for k in self._cache if compiled.search(k)]
+            for k in to_delete:
+                del self._cache[k]
+            self._update_size()
+            return len(to_delete)
+
+    def get_or_compute(
+        self,
+        key: str,
+        compute_fn: Callable[[], Any],
+        ttl: Optional[float] = None,
+    ) -> Any:
+        """Get from cache or compute and store."""
+        value = self.get(key)
+        if value is not None:
+            return value
+
+        value = compute_fn()
+
+        if self.strategy == CacheStrategy.CACHE_ASIDE:
+            self.set(key, value, ttl)
+        elif self.strategy == CacheStrategy.READ_THROUGH:
+            self.set(key, value, ttl)
+
+        return value
+
+    def _is_expired(self, entry: CacheEntry) -> bool:
+        """Check if an entry has expired."""
+        if entry.ttl is None:
+            return False
+        return (time.time() - entry.created_at) > entry.ttl
+
+    def _evict_lru(self) -> None:
+        """Evict the least recently used entry."""
+        if self._cache:
+            self._cache.popitem(last=False)
+            self._stats.evictions += 1
+
+    def _serialize(self, value: Any) -> bytes:
+        """Serialize a value to bytes."""
+        return json.dumps(value, default=str).encode("utf-8")
+
+    def _deserialize(self, data: bytes) -> Any:
+        """Deserialize bytes to a value."""
+        return json.loads(data.decode("utf-8"))
+
+    def _decompress(self, data: Any, compressed: bool) -> Any:
+        """Decompress if needed and deserialize."""
+        if compressed:
+            data = zlib.decompress(data)
+        return self._deserialize(data)
+
+    def _update_size(self) -> None:
+        """Update current cache size."""
+        self._stats.current_size = len(self._cache)
+
+    def get_stats(self) -> CacheStats:
+        """Get cache statistics."""
+        with self._lock:
+            hit_rate = 0.0
+            total = self._stats.hits + self._stats.misses
+            if total > 0:
+                hit_rate = self._stats.hits / total
+            return CacheStats(
+                hits=self._stats.hits,
+                misses=self._stats.misses,
+                evictions=self._stats.evictions,
+                expirations=self._stats.expirations,
+                writes=self._stats.writes,
+                current_size=self._stats.current_size,
+                max_size=self._stats.max_size,
+            )
+
+    def get_hit_rate(self) -> float:
+        """Get cache hit rate."""
+        stats = self.get_stats()
+        total = stats.hits + stats.misses
+        if total == 0:
+            return 0.0
+        return stats.hits / total
+
+    def cleanup_expired(self) -> int:
+        """Remove all expired entries. Returns count removed."""
+        with self._lock:
+            now = time.time()
+            expired_keys = [
+                k for k, entry in self._cache.items()
+                if entry.ttl and (now - entry.created_at) > entry.ttl
+            ]
+            for k in expired_keys:
+                del self._cache[k]
+                self._stats.expirations += 1
+            self._update_size()
+            return len(expired_keys)
