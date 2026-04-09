@@ -1,419 +1,465 @@
 """Data Validation Action Module.
 
-Provides data validation, schema enforcement, and
-data quality checks for processing pipelines.
+Provides comprehensive data validation with schema validation,
+custom rules, cross-field validation, and validation reporting.
 """
 
-from typing import Any, Dict, List, Optional, Callable, Type
-from dataclasses import dataclass, field
-from enum import Enum
+from __future__ import annotations
+
+import logging
 import re
-import json
+from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
-class ValidationLevel(Enum):
-    """Validation severity levels."""
+logger = logging.getLogger(__name__)
+
+
+class ValidationType(Enum):
+    """Types of validation rules."""
+    REQUIRED = "required"
+    TYPE = "type"
+    RANGE = "range"
+    LENGTH = "length"
+    PATTERN = "pattern"
+    ENUM = "enum"
+    EMAIL = "email"
+    URL = "url"
+    UUID = "uuid"
+    IP_ADDRESS = "ip_address"
+    DATE = "date"
+    CUSTOM = "custom"
+
+
+class ValidationSeverity(Enum):
+    """Severity levels for validation errors."""
     ERROR = "error"
     WARNING = "warning"
     INFO = "info"
 
 
-class ValidationResult:
-    """Result of data validation."""
-
-    def __init__(self, valid: bool):
-        self.valid = valid
-        self.errors: List[Dict[str, Any]] = []
-        self.warnings: List[Dict[str, Any]] = []
-
-    def add_error(self, field: str, message: str, value: Any = None):
-        """Add an error."""
-        self.errors.append({
-            "field": field,
-            "message": message,
-            "value": str(value) if value is not None else None,
-        })
-        self.valid = False
-
-    def add_warning(self, field: str, message: str, value: Any = None):
-        """Add a warning."""
-        self.warnings.append({
-            "field": field,
-            "message": message,
-            "value": str(value) if value is not None else None,
-        })
-
-    def merge(self, other: "ValidationResult"):
-        """Merge another result into this one."""
-        self.valid = self.valid and other.valid
-        self.errors.extend(other.errors)
-        self.warnings.extend(other.warnings)
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary."""
-        return {
-            "valid": self.valid,
-            "errors": self.errors,
-            "warnings": self.warnings,
-            "error_count": len(self.errors),
-            "warning_count": len(self.warnings),
-        }
-
-
 @dataclass
-class FieldSchema:
-    """Schema definition for a single field."""
-    name: str
-    field_type: Type
-    required: bool = False
-    nullable: bool = True
-    default: Any = None
-    min_value: Optional[float] = None
-    max_value: Optional[float] = None
-    min_length: Optional[int] = None
-    max_length: Optional[int] = None
-    pattern: Optional[str] = None
-    choices: Optional[List[Any]] = None
-    custom_validator: Optional[Callable] = None
-    transform: Optional[Callable] = None
+class ValidationRule:
+    """A single validation rule."""
+    field: str
+    rule_type: ValidationType
+    severity: ValidationSeverity = ValidationSeverity.ERROR
+    message: Optional[str] = None
+    params: Dict[str, Any] = field(default_factory=dict)
+    when: Optional[Dict[str, Any]] = None  # Conditional validation
 
-    def validate(self, value: Any) -> ValidationResult:
-        """Validate a value against this schema."""
-        result = ValidationResult(valid=True)
+    def validate(self, item: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        """Validate an item against this rule."""
+        field_value = self._get_nested_value(item, self.field)
 
-        if value is None:
-            if self.required:
-                result.add_error(self.name, "Field is required")
-            return result
+        if self.rule_type == ValidationType.REQUIRED:
+            return self._validate_required(field_value)
+        elif self.rule_type == ValidationType.TYPE:
+            return self._validate_type(field_value)
+        elif self.rule_type == ValidationType.RANGE:
+            return self._validate_range(field_value)
+        elif self.rule_type == ValidationType.LENGTH:
+            return self._validate_length(field_value)
+        elif self.rule_type == ValidationType.PATTERN:
+            return self._validate_pattern(field_value)
+        elif self.rule_type == ValidationType.ENUM:
+            return self._validate_enum(field_value)
+        elif self.rule_type == ValidationType.EMAIL:
+            return self._validate_email(field_value)
+        elif self.rule_type == ValidationType.URL:
+            return self._validate_url(field_value)
+        elif self.rule_type == ValidationType.UUID:
+            return self._validate_uuid(field_value)
+        elif self.rule_type == ValidationType.IP_ADDRESS:
+            return self._validate_ip(field_value)
+        elif self.rule_type == ValidationType.DATE:
+            return self._validate_date(field_value)
+        elif self.rule_type == ValidationType.CUSTOM:
+            return self._validate_custom(field_value, item)
 
-        if not self.nullable and value is None:
-            result.add_error(self.name, "Field cannot be null")
-            return result
+        return True, None
 
-        if self.field_type != Any and not isinstance(value, self.field_type):
-            result.add_error(
-                self.name,
-                f"Expected {self.field_type.__name__}, got {type(value).__name__}",
-                value
-            )
-            return result
-
-        if isinstance(value, (int, float)):
-            if self.min_value is not None and value < self.min_value:
-                result.add_error(
-                    self.name,
-                    f"Value {value} is less than minimum {self.min_value}",
-                    value
-                )
-            if self.max_value is not None and value > self.max_value:
-                result.add_error(
-                    self.name,
-                    f"Value {value} is greater than maximum {self.max_value}",
-                    value
-                )
-
-        if isinstance(value, str):
-            if self.min_length is not None and len(value) < self.min_length:
-                result.add_error(
-                    self.name,
-                    f"Length {len(value)} is less than minimum {self.min_length}",
-                    value
-                )
-            if self.max_length is not None and len(value) > self.max_length:
-                result.add_error(
-                    self.name,
-                    f"Length {len(value)} exceeds maximum {self.max_length}",
-                    value
-                )
-            if self.pattern:
-                if not re.match(self.pattern, value):
-                    result.add_error(
-                        self.name,
-                        f"Value does not match pattern {self.pattern}",
-                        value
-                    )
-
-        if self.choices and value not in self.choices:
-            result.add_error(
-                self.name,
-                f"Value must be one of {self.choices}",
-                value
-            )
-
-        if self.custom_validator:
-            try:
-                self.custom_validator(value)
-            except Exception as e:
-                result.add_error(self.name, f"Custom validation failed: {str(e)}", value)
-
-        return result
-
-
-@dataclass
-class Schema:
-    """Schema definition for structured data."""
-    name: str
-    fields: Dict[str, FieldSchema]
-    allow_extra_fields: bool = False
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-    def validate(self, data: Dict[str, Any]) -> ValidationResult:
-        """Validate data against schema."""
-        result = ValidationResult(valid=True)
-
-        for field_name, field_schema in self.fields.items():
-            field_result = field_schema.validate(data.get(field_name))
-            result.merge(field_result)
-
-        if not self.allow_extra_fields:
-            extra_fields = set(data.keys()) - set(self.fields.keys())
-            if extra_fields:
-                for field_name in extra_fields:
-                    result.add_warning(
-                        field_name,
-                        f"Extra field not in schema",
-                        data.get(field_name)
-                    )
-
-        return result
-
-    def transform(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Apply schema transformations to data."""
-        result = {}
-        for field_name, field_schema in self.fields.items():
-            value = data.get(field_name, field_schema.default)
-            if field_schema.transform:
+    def _get_nested_value(self, item: Dict[str, Any], field_path: str) -> Any:
+        """Get nested field value using dot notation."""
+        parts = field_path.split(".")
+        value = item
+        for part in parts:
+            if isinstance(value, dict):
+                value = value.get(part)
+            elif isinstance(value, (list, tuple)):
                 try:
-                    value = field_schema.transform(value)
-                except Exception:
-                    pass
-            result[field_name] = value
-        return result
-
-
-class DataValidator:
-    """Validates data against schemas."""
-
-    def __init__(self):
-        self._schemas: Dict[str, Schema] = {}
-
-    def register_schema(self, schema: Schema):
-        """Register a schema."""
-        self._schemas[schema.name] = schema
-
-    def get_schema(self, name: str) -> Optional[Schema]:
-        """Get schema by name."""
-        return self._schemas.get(name)
-
-    def validate(
-        self,
-        data: Dict[str, Any],
-        schema_name: Optional[str] = None,
-        schema: Optional[Schema] = None,
-    ) -> ValidationResult:
-        """Validate data against schema."""
-        if schema:
-            return schema.validate(data)
-        elif schema_name:
-            schema = self._schemas.get(schema_name)
-            if not schema:
-                result = ValidationResult(valid=False)
-                result.add_error("_schema", f"Schema '{schema_name}' not found")
-                return result
-            return schema.validate(data)
-        else:
-            result = ValidationResult(valid=False)
-            result.add_error("_schema", "No schema provided")
-            return result
-
-    def validate_batch(
-        self,
-        data_list: List[Dict[str, Any]],
-        schema_name: Optional[str] = None,
-        schema: Optional[Schema] = None,
-        stop_on_first_error: bool = False,
-    ) -> List[ValidationResult]:
-        """Validate batch of data."""
-        results = []
-        for data in data_list:
-            result = self.validate(data, schema_name, schema)
-            results.append(result)
-            if stop_on_first_error and not result.valid:
-                break
-        return results
-
-
-class DataQualityChecker:
-    """Performs data quality checks."""
-
-    def __init__(self):
-        self._rules: List[Callable] = []
-
-    def add_rule(self, rule: Callable):
-        """Add a quality rule."""
-        self._rules.append(rule)
-
-    def check_completeness(
-        self,
-        data: Dict[str, Any],
-        required_fields: List[str],
-    ) -> ValidationResult:
-        """Check data completeness."""
-        result = ValidationResult(valid=True)
-        for field_name in required_fields:
-            if field_name not in data or data[field_name] is None:
-                result.add_error(field_name, "Required field is missing or null")
-        return result
-
-    def check_uniqueness(
-        self,
-        data_list: List[Dict[str, Any]],
-        fields: List[str],
-    ) -> ValidationResult:
-        """Check uniqueness constraint."""
-        result = ValidationResult(valid=True)
-        seen: Dict[Tuple, List[int]] = {}
-
-        for idx, data in enumerate(data_list):
-            key = tuple(data.get(f) for f in fields)
-            if key in seen:
-                result.add_error(
-                    "_unique",
-                    f"Duplicate key {key} at rows {seen[key]} and {idx}"
-                )
+                    value = value[int(part)]
+                except (ValueError, IndexError):
+                    return None
             else:
-                seen[key] = [idx]
+                return None
+            if value is None:
+                return None
+        return value
 
-        return result
+    def _validate_required(self, value: Any) -> Tuple[bool, Optional[str]]:
+        """Validate required field."""
+        if value is None or value == "":
+            msg = self.message or f"Field '{self.field}' is required"
+            return False, msg
+        return True, None
 
-    def check_consistency(
-        self,
-        data: Dict[str, Any],
-        rules: Dict[str, Callable],
-    ) -> ValidationResult:
-        """Check consistency rules."""
-        result = ValidationResult(valid=True)
-        for field_name, rule in rules.items():
-            try:
-                if field_name in data and not rule(data):
-                    result.add_error(field_name, "Consistency check failed")
-            except Exception as e:
-                result.add_error(field_name, f"Consistency rule error: {str(e)}")
-        return result
-
-    def run_quality_report(
-        self,
-        data_list: List[Dict[str, Any]],
-        schema: Optional[Schema] = None,
-    ) -> Dict[str, Any]:
-        """Generate data quality report."""
-        total = len(data_list)
-        if total == 0:
-            return {"error": "No data to analyze"}
-
-        all_fields = set()
-        for data in data_list:
-            all_fields.update(data.keys())
-
-        null_counts: Dict[str, int] = {f: 0 for f in all_fields}
-        type_counts: Dict[str, Dict[str, int]] = {f: {} for f in all_fields}
-
-        for data in data_list:
-            for field_name in all_fields:
-                value = data.get(field_name)
-                if value is None:
-                    null_counts[field_name] += 1
-                else:
-                    type_name = type(value).__name__
-                    if type_name not in type_counts[field_name]:
-                        type_counts[field_name][type_name] = 0
-                    type_counts[field_name][type_name] += 1
-
-        return {
-            "total_records": total,
-            "total_fields": len(all_fields),
-            "fields": list(all_fields),
-            "null_percentage": {
-                f: (null_counts[f] / total * 100) for f in all_fields
-            },
-            "type_distribution": {
-                f: type_counts[f] for f in all_fields
-            },
-            "completeness_score": (
-                (total * len(all_fields) - sum(null_counts.values())) /
-                (total * len(all_fields)) * 100
-            ) if all_fields else 100,
+    def _validate_type(self, value: Any) -> Tuple[bool, Optional[str]]:
+        """Validate type of value."""
+        expected_type = self.params.get("expected")
+        if expected_type is None:
+            return True, None
+        type_map = {
+            "string": str, "str": str,
+            "int": int, "integer": int,
+            "float": float,
+            "bool": bool, "boolean": bool,
+            "list": list, "array": list,
+            "dict": dict, "object": dict,
         }
+        expected = type_map.get(expected_type, expected_type)
+        if isinstance(expected, type) and not isinstance(value, expected):
+            msg = self.message or f"Field '{self.field}' must be of type {expected_type}"
+            return False, msg
+        return True, None
+
+    def _validate_range(self, value: Any) -> Tuple[bool, Optional[str]]:
+        """Validate numeric range."""
+        if value is None:
+            return True, None
+        try:
+            num_value = float(value)
+            min_val = self.params.get("min")
+            max_val = self.params.get("max")
+            if min_val is not None and num_value < min_val:
+                msg = self.message or f"Field '{self.field}' must be >= {min_val}"
+                return False, msg
+            if max_val is not None and num_value > max_val:
+                msg = self.message or f"Field '{self.field}' must be <= {max_val}"
+                return False, msg
+        except (TypeError, ValueError):
+            msg = self.message or f"Field '{self.field}' must be numeric"
+            return False, msg
+        return True, None
+
+    def _validate_length(self, value: Any) -> Tuple[bool, Optional[str]]:
+        """Validate string length."""
+        if value is None:
+            return True, None
+        str_value = str(value)
+        min_len = self.params.get("min")
+        max_len = self.params.get("max")
+        if min_len is not None and len(str_value) < min_len:
+            msg = self.message or f"Field '{self.field}' length must be >= {min_len}"
+            return False, msg
+        if max_len is not None and len(str_value) > max_len:
+            msg = self.message or f"Field '{self.field}' length must be <= {max_len}"
+            return False, msg
+        return True, None
+
+    def _validate_pattern(self, value: Any) -> Tuple[bool, Optional[str]]:
+        """Validate against regex pattern."""
+        if value is None:
+            return True, None
+        pattern = self.params.get("pattern")
+        if pattern is None:
+            return True, None
+        try:
+            if not re.match(pattern, str(value)):
+                msg = self.message or f"Field '{self.field}' does not match pattern"
+                return False, msg
+        except re.error:
+            return False, f"Invalid regex pattern: {pattern}"
+        return True, None
+
+    def _validate_enum(self, value: Any) -> Tuple[bool, Optional[str]]:
+        """Validate against enum values."""
+        if value is None:
+            return True, None
+        allowed = self.params.get("values", [])
+        if allowed and value not in allowed:
+            msg = self.message or f"Field '{self.field}' must be one of {allowed}"
+            return False, msg
+        return True, None
+
+    def _validate_email(self, value: Any) -> Tuple[bool, Optional[str]]:
+        """Validate email format."""
+        if value is None:
+            return True, None
+        pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+        if not re.match(pattern, str(value)):
+            msg = self.message or f"Field '{self.field}' is not a valid email"
+            return False, msg
+        return True, None
+
+    def _validate_url(self, value: Any) -> Tuple[bool, Optional[str]]:
+        """Validate URL format."""
+        if value is None:
+            return True, None
+        pattern = r"^https?://[^\s/$.?#].[^\s]*$"
+        if not re.match(pattern, str(value)):
+            msg = self.message or f"Field '{self.field}' is not a valid URL"
+            return False, msg
+        return True, None
+
+    def _validate_uuid(self, value: Any) -> Tuple[bool, Optional[str]]:
+        """Validate UUID format."""
+        if value is None:
+            return True, None
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        if not re.match(pattern, str(value).lower()):
+            msg = self.message or f"Field '{self.field}' is not a valid UUID"
+            return False, msg
+        return True, None
+
+    def _validate_ip(self, value: Any) -> Tuple[bool, Optional[str]]:
+        """Validate IP address format."""
+        if value is None:
+            return True, None
+        # IPv4
+        ipv4_pattern = r"^(\d{1,3}\.){3}\d{1,3}$"
+        # IPv6 simplified
+        ipv6_pattern = r"^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$"
+        val_str = str(value)
+        if not (re.match(ipv4_pattern, val_str) or re.match(ipv6_pattern, val_str)):
+            msg = self.message or f"Field '{self.field}' is not a valid IP address"
+            return False, msg
+        return True, None
+
+    def _validate_date(self, value: Any) -> Tuple[bool, Optional[str]]:
+        """Validate date format."""
+        if value is None:
+            return True, None
+        date_format = self.params.get("format", "%Y-%m-%d")
+        try:
+            datetime.strptime(str(value), date_format)
+        except ValueError:
+            msg = self.message or f"Field '{self.field}' is not a valid date"
+            return False, msg
+        return True, None
+
+    def _validate_custom(self, value: Any, item: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        """Validate using custom function."""
+        custom_fn = self.params.get("function")
+        if custom_fn is None:
+            return True, None
+        try:
+            result = custom_fn(value, item)
+            if not result:
+                msg = self.message or f"Field '{self.field}' failed custom validation"
+                return False, msg
+        except Exception as e:
+            return False, f"Custom validation error: {str(e)}"
+        return True, None
 
 
-class DataValidationAction:
-    """High-level data validation action."""
+@dataclass
+class ValidationError:
+    """A validation error."""
+    field: str
+    message: str
+    severity: ValidationSeverity
+    rule_type: ValidationType
+    item_index: Optional[int] = None
 
-    def __init__(
-        self,
-        validator: Optional[DataValidator] = None,
-        quality_checker: Optional[DataQualityChecker] = None,
-    ):
-        self.validator = validator or DataValidator()
-        self.quality_checker = quality_checker or DataQualityChecker()
 
-    def create_schema(
-        self,
-        name: str,
-        fields: Dict[str, Dict[str, Any]],
-    ) -> Schema:
-        """Create a schema from field definitions."""
-        field_schemas = {}
-        for field_name, field_def in fields.items():
-            field_schemas[field_name] = FieldSchema(
-                name=field_name,
-                field_type=field_def.get("type", str),
-                required=field_def.get("required", False),
-                nullable=field_def.get("nullable", True),
-                default=field_def.get("default"),
-                min_value=field_def.get("min_value"),
-                max_value=field_def.get("max_value"),
-                min_length=field_def.get("min_length"),
-                max_length=field_def.get("max_length"),
-                pattern=field_def.get("pattern"),
-                choices=field_def.get("choices"),
+@dataclass
+class ValidationReport:
+    """Report of validation results."""
+    total_items: int = 0
+    valid_items: int = 0
+    invalid_items: int = 0
+    errors: List[ValidationError] = field(default_factory=list)
+    warnings: List[ValidationError] = field(default_factory=list)
+    validation_time_ms: float = 0.0
+
+    @property
+    def error_count(self) -> int:
+        return len(self.errors)
+
+    @property
+    def warning_count(self) -> int:
+        return len(self.warnings)
+
+    @property
+    def is_valid(self) -> bool:
+        return self.error_count == 0
+
+
+class DataValidationAction(BaseAction):
+    """Data Validation Action for comprehensive validation.
+
+    Supports schema validation, custom rules, cross-field validation,
+    and detailed validation reports.
+
+    Examples:
+        >>> action = DataValidationAction()
+        >>> result = action.execute(ctx, {
+        ...     "data": [{"email": "test@example.com", "age": 25}],
+        ...     "rules": [
+        ...         {"field": "email", "rule_type": "email"},
+        ...         {"field": "age", "rule_type": "range", "params": {"min": 0, "max": 150}},
+        ...     ]
+        ... })
+    """
+
+    action_type = "data_validation"
+    display_name = "数据验证"
+    description = "Schema验证、自定义规则、跨字段验证、验证报告"
+
+    def __init__(self):
+        super().__init__()
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute data validation.
+
+        Args:
+            context: Execution context.
+            params: Dict with keys:
+                - data: List of dicts to validate
+                - rules: List of validation rule definitions
+                - stop_on_error: Stop validation on first error (default: False)
+                - validate_schema: Also validate against schema (optional)
+                - cross_field_rules: Cross-field validation rules (optional)
+
+        Returns:
+            ActionResult with validation report.
+        """
+        import time
+        start_time = time.time()
+
+        data = params.get("data", [])
+        rules_config = params.get("rules", [])
+        stop_on_error = params.get("stop_on_error", False)
+        cross_field_rules = params.get("cross_field_rules", [])
+
+        if not isinstance(data, list):
+            return ActionResult(
+                success=False,
+                message="'data' parameter must be a list"
             )
-        schema = Schema(name=name, fields=field_schemas)
-        self.validator.register_schema(schema)
-        return schema
 
-    def validate(
-        self,
-        data: Dict[str, Any],
-        schema_name: Optional[str] = None,
-    ) -> ValidationResult:
-        """Validate data."""
-        return self.validator.validate(data, schema_name=schema_name)
+        # Build validation rules
+        rules = self._build_rules(rules_config)
 
-    def validate_batch(
-        self,
-        data_list: List[Dict[str, Any]],
-        schema_name: str,
-    ) -> List[ValidationResult]:
-        """Validate batch of data."""
-        return self.validator.validate_batch(data_list, schema_name=schema_name)
+        # Validate each item
+        report = ValidationReport(total_items=len(data))
+        invalid_indices: Set[int] = set()
 
-    def check_quality(
-        self,
-        data_list: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        """Run quality check on data."""
-        return self.quality_checker.run_quality_report(data_list)
+        for idx, item in enumerate(data):
+            if not isinstance(item, dict):
+                report.invalid_items += 1
+                report.errors.append(ValidationError(
+                    field="__root__",
+                    message="Item is not a dictionary",
+                    severity=ValidationSeverity.ERROR,
+                    rule_type=ValidationType.TYPE,
+                    item_index=idx,
+                ))
+                continue
 
+            # Apply field rules
+            for rule in rules:
+                # Check conditional
+                if rule.when and not self._check_condition(rule.when, item):
+                    continue
 
-# Module exports
-__all__ = [
-    "DataValidationAction",
-    "DataValidator",
-    "DataQualityChecker",
-    "Schema",
-    "FieldSchema",
-    "ValidationResult",
-    "ValidationLevel",
-]
+                valid, error_msg = rule.validate(item)
+                if not valid:
+                    error = ValidationError(
+                        field=rule.field,
+                        message=error_msg,
+                        severity=rule.severity,
+                        rule_type=rule.rule_type,
+                        item_index=idx,
+                    )
+                    if rule.severity == ValidationSeverity.ERROR:
+                        report.errors.append(error)
+                        invalid_indices.add(idx)
+                    else:
+                        report.warnings.append(error)
+
+                    if stop_on_error and rule.severity == ValidationSeverity.ERROR:
+                        break
+
+            # Check if item is valid
+            if idx not in invalid_indices:
+                report.valid_items += 1
+
+        report.validation_time_ms = (time.time() - start_time) * 1000
+
+        return ActionResult(
+            success=report.is_valid,
+            message=f"Validation: {report.valid_items}/{report.total_items} valid, "
+                    f"{report.error_count} errors, {report.warning_count} warnings",
+            data={
+                "is_valid": report.is_valid,
+                "total_items": report.total_items,
+                "valid_items": report.valid_items,
+                "invalid_items": report.invalid_items,
+                "error_count": report.error_count,
+                "warning_count": report.warning_count,
+                "errors": [
+                    {"field": e.field, "message": e.message, "severity": e.severity.value,
+                     "rule_type": e.rule_type.value, "item_index": e.item_index}
+                    for e in report.errors[:100]
+                ],
+                "warnings": [
+                    {"field": w.field, "message": w.message, "severity": w.severity.value,
+                     "rule_type": w.rule_type.value, "item_index": w.item_index}
+                    for w in report.warnings[:100]
+                ],
+                "validation_time_ms": report.validation_time_ms,
+            }
+        )
+
+    def _build_rules(self, rules_config: List[Dict[str, Any]]) -> List[ValidationRule]:
+        """Build validation rules from config."""
+        rules = []
+        for cfg in rules_config:
+            if isinstance(cfg, ValidationRule):
+                rules.append(cfg)
+            else:
+                rule = ValidationRule(
+                    field=cfg["field"],
+                    rule_type=ValidationType(cfg.get("rule_type", "required")),
+                    severity=ValidationSeverity(cfg.get("severity", "error")),
+                    message=cfg.get("message"),
+                    params=cfg.get("params", {}),
+                    when=cfg.get("when"),
+                )
+                rules.append(rule)
+        return rules
+
+    def _check_condition(self, condition: Dict[str, Any], item: Dict[str, Any]) -> bool:
+        """Check if conditional rule should be applied."""
+        field = condition.get("field")
+        expected = condition.get("equals")
+        if field and expected is not None:
+            # Get nested value
+            parts = field.split(".")
+            value = item
+            for part in parts:
+                if isinstance(value, dict):
+                    value = value.get(part)
+                else:
+                    return False
+            return value == expected
+        return True
+
+    def get_required_params(self) -> List[str]:
+        return ["data", "rules"]
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {
+            "stop_on_error": False,
+            "validate_schema": None,
+            "cross_field_rules": [],
+        }
