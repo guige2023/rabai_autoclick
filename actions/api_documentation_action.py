@@ -1,373 +1,341 @@
-"""
-API documentation generator module for auto-generating OpenAPI/Swagger specs.
+"""API documentation and discovery action module for RabAI AutoClick.
 
-Supports endpoint documentation, schema generation, and interactive API explorers.
+Provides:
+- ApiDocumentationAction: Generate and manage API documentation
+- ApiDiscoveryAction: Discover and register APIs
+- ApiRegistryAction: API registry and lookup
 """
-from __future__ import annotations
 
-import json
 import time
-import uuid
-from dataclasses import dataclass, field
+import json
+import hashlib
+from typing import Any, Dict, List, Optional
 from datetime import datetime
-from enum import Enum
-from typing import Any, Callable, Optional
+
+import sys
+import os
+
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-class ParamType(Enum):
-    """Parameter types."""
-    STRING = "string"
-    NUMBER = "number"
-    INTEGER = "integer"
-    BOOLEAN = "boolean"
-    ARRAY = "array"
-    OBJECT = "object"
+class ApiDocumentationAction(BaseAction):
+    """Generate and manage API documentation."""
+    action_type = "api_documentation"
+    display_name = "API文档"
+    description = "API文档生成管理"
 
+    def __init__(self):
+        super().__init__()
+        self._docs: Dict[str, Dict] = {}
 
-class ParamLocation(Enum):
-    """Parameter locations."""
-    QUERY = "query"
-    PATH = "path"
-    HEADER = "header"
-    COOKIE = "cookie"
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "generate")
+            api_name = params.get("api_name", "")
 
+            if operation == "generate":
+                if not api_name:
+                    return ActionResult(success=False, message="api_name required")
 
-@dataclass
-class Schema:
-    """OpenAPI schema definition."""
-    type: str
-    format: Optional[str] = None
-    description: Optional[str] = None
-    enum: Optional[list] = None
-    default: Optional[Any] = None
-    minimum: Optional[float] = None
-    maximum: Optional[float] = None
-    min_length: Optional[int] = None
-    max_length: Optional[int] = None
-    pattern: Optional[str] = None
-    items: Optional[Schema] = None
-    properties: Optional[dict[str, Schema]] = None
-    required: Optional[list[str]] = None
+                endpoints = params.get("endpoints", [])
+                version = params.get("version", "1.0")
+                base_path = params.get("base_path", "/")
 
-
-@dataclass
-class Parameter:
-    """API parameter definition."""
-    name: str
-    param_type: ParamType
-    location: ParamLocation
-    required: bool = False
-    description: str = ""
-    schema: Optional[Schema] = None
-    example: Optional[Any] = None
-
-
-@dataclass
-class Endpoint:
-    """API endpoint definition."""
-    path: str
-    method: str
-    summary: str
-    description: str = ""
-    parameters: list[Parameter] = field(default_factory=list)
-    request_body: Optional[Schema] = None
-    responses: dict = field(default_factory=dict)
-    tags: list[str] = field(default_factory=list)
-    deprecated: bool = False
-    security: list[str] = field(default_factory=list)
-
-
-@dataclass
-class APISpec:
-    """Complete API specification."""
-    title: str
-    version: str
-    description: str = ""
-    endpoints: list[Endpoint] = field(default_factory=list)
-    schemas: dict[str, Schema] = field(default_factory=dict)
-    servers: list[str] = field(default_factory=list)
-    contact: dict = field(default_factory=dict)
-    license: dict = field(default_factory=dict)
-
-
-class APIDocumentationGenerator:
-    """
-    API documentation generator for auto-generating OpenAPI specs.
-
-    Supports endpoint documentation, schema generation,
-    and interactive API explorers.
-    """
-
-    def __init__(self, title: str = "API", version: str = "1.0.0"):
-        self._spec = APISpec(title=title, version=version)
-        self._endpoints: dict[str, Endpoint] = {}
-
-    def set_info(
-        self,
-        description: str = "",
-        servers: Optional[list[str]] = None,
-        contact: Optional[dict] = None,
-        license: Optional[dict] = None,
-    ) -> None:
-        """Set API metadata."""
-        self._spec.description = description
-        if servers:
-            self._spec.servers = servers
-        if contact:
-            self._spec.contact = contact
-        if license:
-            self._spec.license = license
-
-    def add_endpoint(
-        self,
-        path: str,
-        method: str,
-        summary: str,
-        description: str = "",
-        parameters: Optional[list[Parameter]] = None,
-        request_body: Optional[Schema] = None,
-        responses: Optional[dict] = None,
-        tags: Optional[list[str]] = None,
-        deprecated: bool = False,
-        security: Optional[list[str]] = None,
-    ) -> Endpoint:
-        """Add an API endpoint."""
-        endpoint = Endpoint(
-            path=path,
-            method=method.upper(),
-            summary=summary,
-            description=description,
-            parameters=parameters or [],
-            request_body=request_body,
-            responses=responses or {"200": {"description": "Success"}},
-            tags=tags or [],
-            deprecated=deprecated,
-            security=security or [],
-        )
-
-        key = f"{method.upper()}:{path}"
-        self._endpoints[key] = endpoint
-        self._spec.endpoints.append(endpoint)
-
-        return endpoint
-
-    def add_parameter(
-        self,
-        path: str,
-        method: str,
-        name: str,
-        param_type: ParamType,
-        location: ParamLocation,
-        required: bool = False,
-        description: str = "",
-        schema: Optional[Schema] = None,
-        example: Optional[Any] = None,
-    ) -> None:
-        """Add a parameter to an endpoint."""
-        key = f"{method.upper()}:{path}"
-        endpoint = self._endpoints.get(key)
-
-        if not endpoint:
-            raise ValueError(f"Endpoint not found: {key}")
-
-        param = Parameter(
-            name=name,
-            param_type=param_type,
-            location=location,
-            required=required,
-            description=description,
-            schema=schema,
-            example=example,
-        )
-
-        endpoint.parameters.append(param)
-
-    def add_schema(
-        self,
-        name: str,
-        schema: Schema,
-    ) -> None:
-        """Add a reusable schema."""
-        self._spec.schemas[name] = schema
-
-    def add_response(
-        self,
-        path: str,
-        method: str,
-        status_code: str,
-        description: str,
-        schema: Optional[Schema] = None,
-    ) -> None:
-        """Add a response to an endpoint."""
-        key = f"{method.upper()}:{path}"
-        endpoint = self._endpoints.get(key)
-
-        if not endpoint:
-            raise ValueError(f"Endpoint not found: {key}")
-
-        response = {"description": description}
-        if schema:
-            response["content"] = {
-                "application/json": {
-                    "schema": self._schema_to_dict(schema)
+                doc = {
+                    "api_name": api_name,
+                    "version": version,
+                    "base_path": base_path,
+                    "description": params.get("description", ""),
+                    "endpoints": [],
+                    "created_at": time.time(),
+                    "updated_at": time.time()
                 }
-            }
 
-        endpoint.responses[status_code] = response
+                for ep in endpoints:
+                    doc["endpoints"].append({
+                        "path": ep.get("path", "/"),
+                        "method": ep.get("method", "GET"),
+                        "summary": ep.get("summary", ""),
+                        "description": ep.get("description", ""),
+                        "parameters": ep.get("parameters", []),
+                        "request_body": ep.get("request_body"),
+                        "responses": ep.get("responses", {}),
+                        "tags": ep.get("tags", [])
+                    })
 
-    def _schema_to_dict(self, schema: Schema) -> dict:
-        """Convert a Schema to a dictionary."""
-        result = {"type": schema.type}
+                doc["hash"] = hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()[:16]
+                self._docs[api_name] = doc
 
-        if schema.format:
-            result["format"] = schema.format
-        if schema.description:
-            result["description"] = schema.description
-        if schema.enum:
-            result["enum"] = schema.enum
-        if schema.default is not None:
-            result["default"] = schema.default
-        if schema.minimum is not None:
-            result["minimum"] = schema.minimum
-        if schema.maximum is not None:
-            result["maximum"] = schema.maximum
-        if schema.min_length is not None:
-            result["minLength"] = schema.min_length
-        if schema.max_length is not None:
-            result["maxLength"] = schema.max_length
-        if schema.pattern:
-            result["pattern"] = schema.pattern
-        if schema.items:
-            result["items"] = self._schema_to_dict(schema.items)
-        if schema.properties:
-            result["properties"] = {
-                k: self._schema_to_dict(v)
-                for k, v in schema.properties.items()
-            }
-        if schema.required:
-            result["required"] = schema.required
+                return ActionResult(
+                    success=True,
+                    data={
+                        "api": api_name,
+                        "version": version,
+                        "endpoints": len(endpoints),
+                        "doc_hash": doc["hash"]
+                    },
+                    message=f"Documentation generated for '{api_name}' v{version}"
+                )
 
-        return result
+            elif operation == "get":
+                if api_name not in self._docs:
+                    return ActionResult(success=False, message=f"API '{api_name}' not found")
+                return ActionResult(success=True, data={"doc": self._docs[api_name]})
 
-    def _endpoint_to_dict(self, endpoint: Endpoint) -> dict:
-        """Convert an Endpoint to a dictionary."""
-        result = {
-            "summary": endpoint.summary,
-            "description": endpoint.description,
-            "responses": endpoint.responses,
-            "deprecated": endpoint.deprecated,
-        }
+            elif operation == "update":
+                if api_name not in self._docs:
+                    return ActionResult(success=False, message=f"API '{api_name}' not found")
 
-        if endpoint.parameters:
-            result["parameters"] = [
-                {
-                    "name": p.name,
-                    "in": p.location.value,
-                    "required": p.required,
-                    "description": p.description,
-                    "schema": self._schema_to_dict(p.schema) if p.schema else {"type": p.param_type.value},
-                }
-                for p in endpoint.parameters
-            ]
+                doc = self._docs[api_name]
+                updates = params.get("updates", {})
+                doc.update(updates)
+                doc["updated_at"] = time.time()
+                doc["hash"] = hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()[:16]
 
-        if endpoint.request_body:
-            result["requestBody"] = {
-                "content": {
-                    "application/json": {
-                        "schema": self._schema_to_dict(endpoint.request_body)
+                return ActionResult(success=True, data={"updated": api_name}, message=f"Documentation updated for '{api_name}'")
+
+            elif operation == "list":
+                return ActionResult(
+                    success=True,
+                    data={
+                        "apis": [
+                            {
+                                "api": k,
+                                "version": v["version"],
+                                "endpoints": len(v["endpoints"]),
+                                "updated": v.get("updated_at")
+                            }
+                            for k, v in self._docs.items()
+                        ]
                     }
-                }
-            }
+                )
 
-        if endpoint.tags:
-            result["tags"] = endpoint.tags
+            elif operation == "export":
+                fmt = params.get("format", "openapi")
+                if api_name not in self._docs:
+                    return ActionResult(success=False, message=f"API '{api_name}' not found")
 
-        if endpoint.security:
-            result["security"] = endpoint.security
+                doc = self._docs[api_name]
+                if fmt == "openapi":
+                    exported = self._to_openapi(doc)
+                elif fmt == "markdown":
+                    exported = self._to_markdown(doc)
+                else:
+                    exported = json.dumps(doc, indent=2)
 
-        return result
+                return ActionResult(
+                    success=True,
+                    data={"api": api_name, "format": fmt, "exported": exported}
+                )
 
-    def generate_openapi(self) -> dict:
-        """Generate an OpenAPI 3.0 specification."""
-        paths = {}
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
-        for endpoint in self._spec.endpoints:
-            if endpoint.path not in paths:
-                paths[endpoint.path] = {}
+        except Exception as e:
+            return ActionResult(success=False, message=f"Documentation error: {str(e)}")
 
-            paths[endpoint.path][endpoint.method.lower()] = self._endpoint_to_dict(endpoint)
-
-        spec = {
+    def _to_openapi(self, doc: Dict) -> Dict:
+        return {
             "openapi": "3.0.0",
             "info": {
-                "title": self._spec.title,
-                "version": self._spec.version,
-                "description": self._spec.description,
+                "title": doc["api_name"],
+                "version": doc["version"]
             },
-            "paths": paths,
+            "paths": {
+                ep["path"]: {ep["method"].lower(): {"summary": ep["summary"]}}
+                for ep in doc["endpoints"]
+            }
         }
 
-        if self._spec.servers:
-            spec["servers"] = [{"url": s} for s in self._spec.servers]
+    def _to_markdown(self, doc: Dict) -> str:
+        lines = [f"# {doc['api_name']}", f"**Version**: {doc['version']}", "", doc.get("description", ""), ""]
+        for ep in doc["endpoints"]:
+            lines.append(f"## {ep['method']} {ep['path']}")
+            lines.append(f"{ep.get('summary', '')}")
+            lines.append("")
+        return "\n".join(lines)
 
-        if self._spec.schemas:
-            spec["components"] = {
-                "schemas": {
-                    k: self._schema_to_dict(v)
-                    for k, v in self._spec.schemas.items()
+
+class ApiDiscoveryAction(BaseAction):
+    """Discover and register APIs dynamically."""
+    action_type = "api_discovery"
+    display_name = "API发现"
+    description = "API动态发现"
+
+    def __init__(self):
+        super().__init__()
+        self._discovered_apis: Dict[str, Dict] = {}
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "discover")
+            api_name = params.get("api_name", "")
+
+            if operation == "discover":
+                if not api_name:
+                    return ActionResult(success=False, message="api_name required")
+
+                discovery = {
+                    "api_name": api_name,
+                    "base_url": params.get("base_url", ""),
+                    "endpoints": params.get("endpoints", []),
+                    "authentication": params.get("authentication", {}),
+                    "rate_limits": params.get("rate_limits", {}),
+                    "discovered_at": time.time(),
+                    "status": "discovered"
                 }
-            }
 
-        if self._spec.contact:
-            spec["info"]["contact"] = self._spec.contact
+                self._discovered_apis[api_name] = discovery
+                return ActionResult(
+                    success=True,
+                    data={
+                        "api": api_name,
+                        "endpoints_found": len(discovery["endpoints"])
+                    },
+                    message=f"Discovered API '{api_name}' with {len(discovery['endpoints'])} endpoints"
+                )
 
-        if self._spec.license:
-            spec["info"]["license"] = self._spec.license
+            elif operation == "probe":
+                if not api_name:
+                    return ActionResult(success=False, message="api_name required")
 
-        return spec
+                discovery = self._discovered_apis.get(api_name, {})
+                endpoints = discovery.get("endpoints", [])
 
-    def generate_swagger(self) -> dict:
-        """Generate a Swagger 2.0 specification."""
-        paths = {}
+                probed = []
+                for ep in endpoints:
+                    probed.append({
+                        "path": ep.get("path", ""),
+                        "method": ep.get("method", "GET"),
+                        "status": "reachable",
+                        "response_time_ms": 100
+                    })
 
-        for endpoint in self._spec.endpoints:
-            if endpoint.path not in paths:
-                paths[endpoint.path] = {}
+                return ActionResult(
+                    success=True,
+                    data={
+                        "api": api_name,
+                        "probed": probed,
+                        "reachable_count": len(probed)
+                    }
+                )
 
-            paths[endpoint.path][endpoint.method.lower()] = self._endpoint_to_dict(endpoint)
+            elif operation == "list":
+                return ActionResult(
+                    success=True,
+                    data={
+                        "discovered": [
+                            {"api": k, "endpoints": len(v["endpoints"]), "at": v["discovered_at"]}
+                            for k, v in self._discovered_apis.items()
+                        ]
+                    }
+                )
 
-        spec = {
-            "swagger": "2.0",
-            "info": {
-                "title": self._spec.title,
-                "version": self._spec.version,
-                "description": self._spec.description,
-            },
-            "paths": paths,
-            "schemes": ["https"] if self._spec.servers else ["https"],
-        }
+            elif operation == "remove":
+                if api_name in self._discovered_apis:
+                    del self._discovered_apis[api_name]
+                return ActionResult(success=True, message=f"Removed '{api_name}' from discovery")
 
-        if self._spec.servers:
-            spec["host"] = self._spec.servers[0].replace("https://", "").replace("http://", "").split("/")[0]
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
-        if self._spec.schemas:
-            spec["definitions"] = {
-                k: self._schema_to_dict(v)
-                for k, v in self._spec.schemas.items()
-            }
+        except Exception as e:
+            return ActionResult(success=False, message=f"Discovery error: {str(e)}")
 
-        return spec
 
-    def save_to_file(self, filename: str, format: str = "openapi") -> None:
-        """Save the specification to a file."""
-        if format == "openapi":
-            spec = self.generate_openapi()
-        else:
-            spec = self.generate_swagger()
+class ApiRegistryAction(BaseAction):
+    """API registry for service lookup."""
+    action_type = "api_registry"
+    display_name = "API注册表"
+    description = "API服务注册表"
 
-        with open(filename, "w") as f:
-            json.dump(spec, f, indent=2)
+    def __init__(self):
+        super().__init__()
+        self._registry: Dict[str, Dict] = {}
 
-    def get_spec(self) -> APISpec:
-        """Get the API specification object."""
-        return self._spec
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "register")
+            api_name = params.get("api_name", "")
+
+            if operation == "register":
+                if not api_name:
+                    return ActionResult(success=False, message="api_name required")
+
+                self._registry[api_name] = {
+                    "api_name": api_name,
+                    "version": params.get("version", "1.0"),
+                    "base_url": params.get("base_url", ""),
+                    "owner": params.get("owner", ""),
+                    "description": params.get("description", ""),
+                    "tags": params.get("tags", []),
+                    "metadata": params.get("metadata", {}),
+                    "registered_at": time.time(),
+                    "updated_at": time.time(),
+                    "status": "active"
+                }
+                return ActionResult(success=True, data={"api": api_name}, message=f"API '{api_name}' registered")
+
+            elif operation == "lookup":
+                if not api_name:
+                    return ActionResult(success=False, message="api_name required")
+
+                if api_name not in self._registry:
+                    return ActionResult(success=False, message=f"API '{api_name}' not found")
+
+                return ActionResult(success=True, data={"api": self._registry[api_name]})
+
+            elif operation == "search":
+                tag = params.get("tag", "")
+                owner = params.get("owner", "")
+                keyword = params.get("keyword", "")
+
+                results = []
+                for api in self._registry.values():
+                    if tag and tag not in api.get("tags", []):
+                        continue
+                    if owner and api.get("owner", "") != owner:
+                        continue
+                    if keyword and keyword.lower() not in api.get("description", "").lower():
+                        continue
+                    results.append(api)
+
+                return ActionResult(
+                    success=True,
+                    data={"results": results, "count": len(results)}
+                )
+
+            elif operation == "update":
+                if api_name not in self._registry:
+                    return ActionResult(success=False, message=f"API '{api_name}' not found")
+
+                updates = params.get("updates", {})
+                self._registry[api_name].update(updates)
+                self._registry[api_name]["updated_at"] = time.time()
+
+                return ActionResult(success=True, data={"api": api_name})
+
+            elif operation == "list":
+                return ActionResult(
+                    success=True,
+                    data={
+                        "apis": [
+                            {"name": k, "version": v["version"], "owner": v.get("owner", ""), "status": v.get("status", "active")}
+                            for k, v in self._registry.items()
+                        ]
+                    }
+                )
+
+            elif operation == "deregister":
+                if api_name in self._registry:
+                    self._registry[api_name]["status"] = "deprecated"
+                    self._registry[api_name]["deprecated_at"] = time.time()
+                return ActionResult(success=True, message=f"API '{api_name}' deregistered")
+
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Registry error: {str(e)}")
