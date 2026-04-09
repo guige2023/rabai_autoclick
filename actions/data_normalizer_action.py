@@ -1,329 +1,225 @@
-"""
-Data Normalizer Action Module.
+"""Data normalization and standardization action."""
 
-Data normalization with type coercion, schema validation,
-deduplication, and transformation pipelines.
-"""
+from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Callable, Generic, TypeVar, Optional
-from enum import Enum
 import re
-import logging
-
-logger = logging.getLogger(__name__)
-T = TypeVar("T")
-
-
-class DataType(Enum):
-    """Supported data types for normalization."""
-    STRING = "string"
-    INTEGER = "integer"
-    FLOAT = "float"
-    BOOLEAN = "boolean"
-    EMAIL = "email"
-    URL = "url"
-    PHONE = "phone"
-    DATE = "date"
-    DATETIME = "datetime"
-    JSON = "json"
-    UUID = "uuid"
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional, Sequence
 
 
 @dataclass
-class FieldSchema:
-    """
-    Schema definition for a field.
+class NormalizationConfig:
+    """Configuration for normalization."""
 
-    Attributes:
-        name: Field name.
-        data_type: Expected data type.
-        required: Whether field is required.
-        default: Default value if missing.
-        validator: Optional validation function.
-        transformer: Optional transformation function.
-        unique: Whether values must be unique.
-    """
-    name: str
-    data_type: DataType
-    required: bool = False
-    default: Any = None
-    validator: Optional[Callable[[Any], bool]] = None
-    transformer: Optional[Callable[[Any], Any]] = None
-    unique: bool = False
+    input_field: str
+    output_field: str
+    operation: str  # lowercase, uppercase, trim, strip_html, remove_special, normalize_whitespace, etc.
+    custom_func: Optional[Callable[[str], str]] = None
 
 
 @dataclass
 class NormalizationResult:
-    """Result of data normalization."""
-    success: bool
-    normalized_data: Optional[dict]
-    errors: list[str]
-    warnings: list[str]
-    deduplicated: bool = False
+    """Result of normalization."""
+
+    total_records: int
+    success_count: int
+    error_count: int
+    transformed_count: int
+    unchanged_count: int
 
 
-@dataclass
-class ValidationError:
-    """Validation error details."""
-    field: str
-    value: Any
-    error: str
-
-
-class DataNormalizerAction(Generic[T]):
-    """
-    Normalizes and validates data against schemas.
-
-    Example:
-        normalizer = DataNormalizerAction[dict]()
-        normalizer.add_field("email", DataType.EMAIL, required=True)
-        normalizer.add_field("age", DataType.INTEGER)
-        result = normalizer.normalize(raw_data)
-    """
+class DataNormalizerAction:
+    """Normalizes and standardizes data values."""
 
     def __init__(self):
-        """Initialize data normalizer action."""
-        self.schemas: dict[str, FieldSchema] = {}
-        self._seen_values: dict[str, set] = {}
+        """Initialize normalizer."""
+        self._transformations: dict[str, Callable[[str], str]] = {
+            "lowercase": lambda s: s.lower() if s else "",
+            "uppercase": lambda s: s.upper() if s else "",
+            "titlecase": lambda s: s.title() if s else "",
+            "trim": lambda s: s.strip() if s else "",
+            "strip_html": self._strip_html,
+            "remove_special": self._remove_special_chars,
+            "normalize_whitespace": lambda s: " ".join(s.split()) if s else "",
+            "remove_digits": lambda s: re.sub(r"\d", "", s) if s else "",
+            "remove_alpha": lambda s: re.sub(r"[a-zA-Z]", "", s) if s else "",
+            "slugify": self._slugify,
+            "camel_to_snake": self._camel_to_snake,
+            "snake_to_camel": self._snake_to_camel,
+            "remove_punctuation": lambda s: re.sub(r"[^\w\s]", "", s) if s else "",
+            "remove_urls": lambda s: re.sub(r"https?://\S+", "", s) if s else "",
+            "remove_emails": lambda s: re.sub(r"\S+@\S+", "", s) if s else "",
+        }
 
-    def add_field(
+    def _strip_html(self, s: str) -> str:
+        """Remove HTML tags from string."""
+        return re.sub(r"<[^>]+>", "", s)
+
+    def _remove_special_chars(self, s: str) -> str:
+        """Remove special characters."""
+        return re.sub(r"[^a-zA-Z0-9\s]", "", s)
+
+    def _slugify(self, s: str) -> str:
+        """Convert string to URL-friendly slug."""
+        s = s.lower()
+        s = re.sub(r"[^\w\s-]", "", s)
+        s = re.sub(r"[-\s]+", "-", s)
+        return s.strip("-")
+
+    def _camel_to_snake(self, s: str) -> str:
+        """Convert camelCase to snake_case."""
+        s = re.sub("(.)([A-Z][a-z]+)", r"\1_\2", s)
+        return re.sub("([a-z0-9])([A-Z])", r"\1_\2", s).lower()
+
+    def _snake_to_camel(self, s: str) -> str:
+        """Convert snake_case to camelCase."""
+        components = s.split("_")
+        return components[0] + "".join(x.title() for x in components[1:])
+
+    def normalize_string(
         self,
-        name: str,
-        data_type: DataType,
-        required: bool = False,
-        default: Any = None,
-        validator: Optional[Callable] = None,
-        transformer: Optional[Callable] = None,
-        unique: bool = False
-    ) -> "DataNormalizerAction":
-        """
-        Add field schema.
+        value: str,
+        operation: str,
+        custom_func: Optional[Callable[[str], str]] = None,
+    ) -> str:
+        """Normalize a single string.
 
         Args:
-            name: Field name.
-            data_type: Expected data type.
-            required: Whether field is required.
-            default: Default value if missing.
-            validator: Custom validation function.
-            transformer: Custom transformation function.
-            unique: Enforce uniqueness.
+            value: Input string.
+            operation: Normalization operation name.
+            custom_func: Optional custom transformation function.
 
         Returns:
-            Self for method chaining.
+            Normalized string.
         """
-        schema = FieldSchema(
-            name=name,
-            data_type=data_type,
-            required=required,
-            default=default,
-            validator=validator,
-            transformer=transformer,
-            unique=unique
-        )
+        if value is None:
+            return ""
 
-        self.schemas[name] = schema
-        if unique:
-            self._seen_values[name] = set()
+        value = str(value)
 
-        return self
+        if custom_func:
+            return custom_func(value)
 
-    def normalize(self, data: T) -> NormalizationResult:
-        """
-        Normalize data against defined schemas.
-
-        Args:
-            data: Input data to normalize.
-
-        Returns:
-            NormalizationResult with normalized data and errors.
-        """
-        errors: list[str] = []
-        warnings: list[str] = []
-        normalized: dict = {}
-
-        if data is None:
-            return NormalizationResult(
-                success=False,
-                normalized_data=None,
-                errors=["Input data is None"],
-                warnings=[]
-            )
-
-        if isinstance(data, dict):
-            source = data
-        elif hasattr(data, "__dict__"):
-            source = vars(data)
-        else:
-            return NormalizationResult(
-                success=False,
-                normalized_data=None,
-                errors=[f"Unsupported data type: {type(data)}"],
-                warnings=[]
-            )
-
-        for field_name, schema in self.schemas.items():
-            value = source.get(field_name)
-
-            if value is None:
-                if schema.required:
-                    errors.append(f"Required field '{field_name}' is missing")
-                    continue
-                else:
-                    normalized[field_name] = schema.default
-                    continue
-
-            try:
-                normalized_value = self._transform_value(value, schema)
-                validation_passed = self._validate_value(normalized_value, schema)
-
-                if not validation_passed:
-                    errors.append(f"Field '{field_name}' validation failed: {normalized_value}")
-                    continue
-
-                if schema.unique:
-                    if normalized_value in self._seen_values[field_name]:
-                        warnings.append(f"Duplicate value for '{field_name}': {normalized_value}")
-                        continue
-                    self._seen_values[field_name].add(normalized_value)
-
-                normalized[field_name] = normalized_value
-
-            except Exception as e:
-                errors.append(f"Field '{field_name}' transformation error: {e}")
-
-        return NormalizationResult(
-            success=len(errors) == 0,
-            normalized_data=normalized if len(errors) == 0 else None,
-            errors=errors,
-            warnings=warnings
-        )
-
-    def _transform_value(self, value: Any, schema: FieldSchema) -> Any:
-        """Transform value to target data type."""
-        if schema.transformer:
-            return schema.transformer(value)
-
-        if schema.data_type == DataType.STRING:
-            return str(value).strip() if value is not None else ""
-
-        elif schema.data_type == DataType.INTEGER:
-            if isinstance(value, str):
-                value = re.sub(r"[^\d-]", "", value)
-            return int(float(value))
-
-        elif schema.data_type == DataType.FLOAT:
-            if isinstance(value, str):
-                value = re.sub(r"[^\d.-]", "", value)
-            return float(value)
-
-        elif schema.data_type == DataType.BOOLEAN:
-            if isinstance(value, str):
-                return value.lower() in ("true", "1", "yes", "on")
-            return bool(value)
-
-        elif schema.data_type == DataType.EMAIL:
-            email = str(value).lower().strip()
-            if not re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", email):
-                raise ValueError(f"Invalid email format: {email}")
-            return email
-
-        elif schema.data_type == DataType.URL:
-            url = str(value).strip()
-            if not re.match(r"^https?://", url):
-                url = f"https://{url}"
-            if not re.match(r"^https?://[\w\.-]+\.\w+", url):
-                raise ValueError(f"Invalid URL format: {url}")
-            return url
-
-        elif schema.data_type == DataType.PHONE:
-            phone = re.sub(r"[^\d+]", "", str(value))
-            if len(phone) < 7:
-                raise ValueError(f"Invalid phone number: {phone}")
-            return phone
-
-        elif schema.data_type == DataType.UUID:
-            uuid_str = str(value).strip()
-            pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-            if not re.match(pattern, uuid_str.lower()):
-                raise ValueError(f"Invalid UUID: {uuid_str}")
-            return uuid_str
+        transform = self._transformations.get(operation)
+        if transform:
+            return transform(value)
 
         return value
 
-    def _validate_value(self, value: Any, schema: FieldSchema) -> bool:
-        """Validate transformed value."""
-        if schema.validator:
-            return schema.validator(value)
-        return True
+    def normalize_phone(self, phone: str) -> str:
+        """Normalize phone number to digits only."""
+        if not phone:
+            return ""
+        return re.sub(r"\D", "", phone)
 
-    def deduplicate(
+    def normalize_email(self, email: str) -> str:
+        """Normalize email to lowercase and trim."""
+        if not email:
+            return ""
+        return email.lower().strip()
+
+    def normalize_url(self, url: str) -> str:
+        """Normalize URL."""
+        if not url:
+            return ""
+        url = url.strip()
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+        return url
+
+    def normalize_record(
         self,
-        data: list[T],
-        key_fields: list[str]
-    ) -> list[T]:
-        """
-        Deduplicate data based on key fields.
+        record: dict[str, Any],
+        config: NormalizationConfig,
+    ) -> tuple[dict[str, Any], bool]:
+        """Normalize a single record.
 
         Args:
-            data: List of records.
-            key_fields: Fields to use for deduplication.
+            record: Input record.
+            config: Normalization configuration.
 
         Returns:
-            Deduplicated list of records.
+            Tuple of (normalized_record, was_changed).
         """
-        seen: set = set()
-        result = []
+        try:
+            value = record.get(config.input_field, "")
+            original = str(value) if value is not None else ""
 
-        for record in data:
-            if isinstance(record, dict):
-                key = tuple(record.get(f) for f in key_fields)
+            if config.custom_func:
+                normalized = config.custom_func(original)
             else:
-                key = tuple(getattr(record, f, None) for f in key_fields)
+                normalized = self.normalize_string(original, config.operation)
 
-            if key not in seen:
-                seen.add(key)
-                result.append(record)
+            result = record.copy()
+            result[config.output_field] = normalized
 
-        logger.info(f"Deduplicated {len(data)} -> {len(result)} records")
-        return result
+            return result, normalized != original
 
-    def merge(
+        except Exception:
+            return record, False
+
+    def normalize_batch(
         self,
-        data1: T,
-        data2: T,
-        strategy: str = "prefer_second"
-    ) -> T:
-        """
-        Merge two records.
+        records: Sequence[dict[str, Any]],
+        configs: list[NormalizationConfig],
+    ) -> NormalizationResult:
+        """Normalize a batch of records.
 
         Args:
-            data1: First record.
-            data2: Second record.
-            strategy: Merge strategy (prefer_first, prefer_second, combine).
+            records: Input records.
+            configs: List of normalization configurations.
 
         Returns:
-            Merged record.
+            NormalizationResult with statistics.
         """
-        if not isinstance(data1, dict) or not isinstance(data2, dict):
-            return data2 if strategy == "prefer_second" else data1
+        success_count = 0
+        error_count = 0
+        transformed_count = 0
+        unchanged_count = 0
 
-        result = data1.copy()
+        for record in records:
+            try:
+                was_changed = False
+                for config in configs:
+                    record, changed = self.normalize_record(record, config)
+                    if changed:
+                        was_changed = True
 
-        for key, value in data2.items():
-            if key not in result:
-                result[key] = value
-            elif strategy == "combine":
-                if isinstance(result[key], list) and isinstance(value, list):
-                    result[key] = result[key] + value
-                elif result[key] != value:
-                    result[key] = [result[key], value]
-            elif strategy == "prefer_second":
-                result[key] = value
+                if was_changed:
+                    transformed_count += 1
+                else:
+                    unchanged_count += 1
+                success_count += 1
 
-        return result
+            except Exception:
+                error_count += 1
 
-    def clear(self) -> None:
-        """Clear all schemas and cached values."""
-        self.schemas.clear()
-        self._seen_values.clear()
+        return NormalizationResult(
+            total_records=len(records),
+            success_count=success_count,
+            error_count=error_count,
+            transformed_count=transformed_count,
+            unchanged_count=unchanged_count,
+        )
+
+    def chain_normalizations(
+        self,
+        operations: list[str],
+    ) -> Callable[[str], str]:
+        """Create a chain of normalization operations.
+
+        Args:
+            operations: List of operation names.
+
+        Returns:
+            Composed transformation function.
+        """
+        transforms = [self._transformations[op] for op in operations if op in self._transformations]
+
+        def chain(value: str) -> str:
+            result = str(value) if value else ""
+            for transform in transforms:
+                result = transform(result)
+            return result
+
+        return chain
