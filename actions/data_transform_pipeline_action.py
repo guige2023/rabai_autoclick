@@ -1,133 +1,182 @@
+"""Data transform pipeline action for chained data processing.
+
+Provides a fluent pipeline API for applying sequential
+transformations to data with error handling and validation.
 """
-Data Transform Pipeline Action Module.
 
-Pipeline for chained data transformations,
-supports mapping, filtering, aggregation, and custom transforms.
-"""
-
-from __future__ import annotations
-
-from typing import Any, Callable, Optional, Union
-from dataclasses import dataclass, field
 import logging
+from dataclasses import dataclass
+from typing import Any, Callable, Generic, TypeVar, Optional
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar("T")
+R = TypeVar("R")
+
 
 @dataclass
-class TransformStage:
-    """Single transformation stage."""
+class PipelineStep:
+    """Represents a single step in the pipeline."""
     name: str
-    func: Callable[[Any], Any]
-    skip_on_error: bool = False
+    transform: Callable[[Any], Any]
+    error_handler: Optional[Callable[[Exception, Any], Any]] = None
 
 
-class DataTransformPipelineAction:
-    """
-    Data transformation pipeline with composable stages.
+@dataclass
+class PipelineStats:
+    """Statistics for pipeline execution."""
+    steps_executed: int = 0
+    steps_failed: int = 0
+    total_time_ms: float = 0.0
 
-    Chains together map, filter, reduce, and custom
-    transformations for batch data processing.
+
+class DataTransformPipelineAction(Generic[T]):
+    """Chain multiple data transformations in a pipeline.
+
+    Args:
+        name: Optional name for this pipeline.
 
     Example:
-        pipeline = DataTransformPipelineAction()
-        pipeline.map(normalize_fields)
-        pipeline.filter(drop_nulls)
-        pipeline.aggregate(compute_stats)
-        result = pipeline.run(raw_data)
+        >>> pipeline = DataTransformPipelineAction()
+        >>> result = (
+        ...     pipeline
+        ...     .add_step("normalize", normalize)
+        ...     .add_step("filter", filter_nulls)
+        ...     .execute(data)
+        ... )
     """
 
-    def __init__(self, name: str = "transform") -> None:
+    def __init__(self, name: str = "default") -> None:
         self.name = name
-        self._stages: list[TransformStage] = []
+        self._steps: list[PipelineStep] = []
+        self._stats = PipelineStats()
 
-    def map(
+    def add_step(
         self,
-        func: Callable[[dict], dict],
-        name: Optional[str] = None,
-        skip_on_error: bool = False,
-    ) -> "DataTransformPipelineAction":
-        """Add a map transformation stage."""
-        stage_name = name or f"map_{len(self._stages)}"
-        self._stages.append(TransformStage(
-            name=stage_name,
-            func=func,
-            skip_on_error=skip_on_error,
-        ))
+        name: str,
+        transform: Callable[[T], R],
+        error_handler: Optional[Callable[[Exception, Any], Any]] = None,
+    ) -> "DataTransformPipelineAction[T]":
+        """Add a transformation step to the pipeline.
+
+        Args:
+            name: Human-readable name for this step.
+            transform: Function to apply to the data.
+            error_handler: Optional error handler for this step.
+
+        Returns:
+            Self for method chaining.
+        """
+        self._steps.append(PipelineStep(name, transform, error_handler))
         return self
 
-    def filter(
+    def add_validation(
         self,
-        predicate: Callable[[dict], bool],
-        name: Optional[str] = None,
-    ) -> "DataTransformPipelineAction":
-        """Add a filter stage."""
-        def filter_func(data: list) -> list:
-            return [item for item in data if predicate(item)]
+        validator: Callable[[T], bool],
+        error_msg: str = "Validation failed",
+    ) -> "DataTransformPipelineAction[T]":
+        """Add a validation step.
 
-        stage_name = name or f"filter_{len(self._stages)}"
-        self._stages.append(TransformStage(
-            name=stage_name,
-            func=filter_func,
-        ))
-        return self
+        Args:
+            validator: Function that returns True if data is valid.
+            error_msg: Error message if validation fails.
 
-    def aggregate(
-        self,
-        func: Callable[[list], Any],
-        name: Optional[str] = None,
-    ) -> "DataTransformPipelineAction":
-        """Add an aggregation stage."""
-        stage_name = name or f"aggregate_{len(self._stages)}"
-        self._stages.append(TransformStage(
-            name=stage_name,
-            func=func,
-        ))
-        return self
+        Returns:
+            Self for method chaining.
+        """
+        def validate(data: T) -> T:
+            if not validator(data):
+                raise ValueError(error_msg)
+            return data
+        return self.add_step(f"validate_{name(self)}", validate)
 
-    def run(
-        self,
-        data: Any,
-        stop_on_error: bool = True,
-    ) -> Any:
-        """Execute the pipeline on data."""
-        current = data
+    def execute(self, data: T, stop_on_error: bool = True) -> Any:
+        """Execute the pipeline on input data.
 
-        for stage in self._stages:
+        Args:
+            data: Input data to process.
+            stop_on_error: If True, stop pipeline on first error.
+
+        Returns:
+            Transformed data after all steps.
+
+        Raises:
+            Exception: If a step fails and stop_on_error is True.
+        """
+        import time
+        start_time = time.time()
+        current_data: Any = data
+
+        for step in self._steps:
             try:
-                current = stage.func(current)
+                logger.debug(f"Executing step: {step.name}")
+                current_data = step.transform(current_data)
+                self._stats.steps_executed += 1
             except Exception as e:
-                if stop_on_error and not stage.skip_on_error:
-                    logger.error("Pipeline stage '%s' failed: %s", stage.name, e)
+                self._stats.steps_failed += 1
+                logger.error(f"Step {step.name} failed: {e}")
+
+                if step.error_handler:
+                    current_data = step.error_handler(e, current_data)
+                    self._stats.steps_executed += 1
+                elif stop_on_error:
                     raise
+
+        self._stats.total_time_ms = (time.time() - start_time) * 1000
+        return current_data
+
+    async def execute_async(self, data: T, stop_on_error: bool = True) -> Any:
+        """Execute the pipeline asynchronously.
+
+        Args:
+            data: Input data to process.
+            stop_on_error: If True, stop pipeline on first error.
+
+        Returns:
+            Transformed data after all steps.
+        """
+        import asyncio
+        start_time = asyncio.get_event_loop().time()
+        current_data: Any = data
+
+        for step in self._steps:
+            try:
+                logger.debug(f"Executing step: {step.name}")
+                if asyncio.iscoroutinefunction(step.transform):
+                    current_data = await step.transform(current_data)
                 else:
-                    logger.warning("Pipeline stage '%s' failed, skipping: %s", stage.name, e)
-
-        return current
-
-    def run_batch(
-        self,
-        items: list,
-        stop_on_error: bool = True,
-    ) -> list:
-        """Run pipeline on each item in a batch."""
-        results = []
-
-        for item in items:
-            try:
-                result = self.run(item, stop_on_error=stop_on_error)
-                results.append(result)
+                    current_data = step.transform(current_data)
+                self._stats.steps_executed += 1
             except Exception as e:
-                if stop_on_error:
-                    raise
-                logger.warning("Batch item failed: %s", e)
+                self._stats.steps_failed += 1
+                logger.error(f"Step {step.name} failed: {e}")
 
-        return results
+                if step.error_handler:
+                    current_data = step.error_handler(e, current_data)
+                    self._stats.steps_executed += 1
+                elif stop_on_error:
+                    raise
+
+        self._stats.total_time_ms = (asyncio.get_event_loop().time() - start_time) * 1000
+        return current_data
+
+    def get_stats(self) -> PipelineStats:
+        """Get pipeline execution statistics.
+
+        Returns:
+            Current pipeline statistics.
+        """
+        return self._stats
 
     def clear(self) -> None:
-        """Remove all stages."""
-        self._stages.clear()
+        """Clear all steps from the pipeline."""
+        self._steps.clear()
+        self._stats = PipelineStats()
 
-    def get_stage_names(self) -> list[str]:
-        """Get names of all stages in order."""
-        return [s.name for s in self._stages]
+    def __len__(self) -> int:
+        """Get number of steps in pipeline."""
+        return len(self._steps)
+
+    def __repr__(self) -> str:
+        step_names = [s.name for s in self._steps]
+        return f"DataTransformPipelineAction({self.name}, steps={step_names})"
