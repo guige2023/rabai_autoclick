@@ -1,181 +1,336 @@
 """
-UI change detector utilities.
+UI change detection utilities for automation monitoring.
 
-Detect and track UI changes for automation reliability.
+This module provides utilities for detecting and responding to
+changes in UI elements and application state.
 """
 
 from __future__ import annotations
 
 import time
+import hashlib
 from dataclasses import dataclass, field
-from typing import Optional, Callable, Any
+from typing import Callable, Dict, List, Optional, Any, Set
 from enum import Enum, auto
 
 
 class ChangeType(Enum):
     """Types of UI changes."""
-    ELEMENT_ADDED = auto()
-    ELEMENT_REMOVED = auto()
-    ELEMENT_UPDATED = auto()
-    ELEMENT_MOVED = auto()
-    ELEMENT_VISIBLE = auto()
-    ELEMENT_HIDDEN = auto()
-    PROPERTY_CHANGED = auto()
+    APPEARED = auto()
+    DISAPPEARED = auto()
+    MODIFIED = auto()
+    MOVED = auto()
+    RESIZED = auto()
+    STYLE_CHANGED = auto()
+    STATE_CHANGED = auto()
 
 
 @dataclass
 class UIChange:
-    """Represents a detected UI change."""
+    """
+    Represents a detected UI change.
+
+    Attributes:
+        change_type: Type of change.
+        element_id: ID of affected element.
+        path: Path to element in UI tree.
+        old_value: Previous value/state.
+        new_value: New value/state.
+        timestamp: When change was detected.
+    """
     change_type: ChangeType
     element_id: str
-    timestamp: float
-    details: dict = field(default_factory=dict)
+    path: str
+    old_value: Any = None
+    new_value: Any = None
+    timestamp: float = field(default_factory=time.time)
 
 
 @dataclass
 class ElementSnapshot:
-    """Snapshot of an element at a point in time."""
+    """
+    Snapshot of an element's state at a point in time.
+
+    Attributes:
+        element_id: Unique identifier.
+        role: Accessibility role.
+        title: Element title.
+        value: Current value.
+        bounds: Element bounds.
+        enabled: Enabled state.
+        focused: Focused state.
+        attributes: Additional attributes.
+        checksum: Hash of element state.
+    """
     element_id: str
-    bounds: tuple[int, int, int, int]
-    is_visible: bool
-    properties: dict
-    timestamp: float
+    role: str = ""
+    title: str = ""
+    value: str = ""
+    bounds: Optional[tuple] = None
+    enabled: bool = True
+    focused: bool = False
+    attributes: Dict[str, Any] = field(default_factory=dict)
+    checksum: str = ""
 
+    @classmethod
+    def from_element(cls, element: Dict[str, Any]) -> ElementSnapshot:
+        """Create snapshot from element dictionary."""
+        content = str(element.get("role", "")) + str(element.get("title", "")) + str(element.get("value", ""))
+        checksum = hashlib.md5(content.encode()).hexdigest()
 
-class UIChangeDetector:
-    """Detect changes in UI state."""
-    
-    def __init__(self):
-        self._snapshots: dict[str, ElementSnapshot] = {}
-        self._change_callbacks: list[Callable[[UIChange], None]] = []
-        self._change_history: list[UIChange] = []
-        self._max_history = 500
-    
-    def capture_element(
-        self,
-        element_id: str,
-        bounds: tuple[int, int, int, int],
-        is_visible: bool,
-        properties: Optional[dict] = None
-    ) -> Optional[UIChange]:
-        """Capture element state and detect changes."""
-        previous = self._snapshots.get(element_id)
-        
-        current = ElementSnapshot(
-            element_id=element_id,
-            bounds=bounds,
-            is_visible=is_visible,
-            properties=properties or {},
-            timestamp=time.time()
+        return cls(
+            element_id=element.get("elementId", element.get("identifier", "")),
+            role=element.get("role", ""),
+            title=element.get("title", ""),
+            value=str(element.get("value", "")),
+            bounds=element.get("bounds"),
+            enabled=element.get("enabled", True),
+            focused=element.get("focused", False),
+            attributes=element.get("attributes", {}),
+            checksum=checksum,
         )
-        
-        change = None
-        
-        if previous is None:
+
+    def has_changed(self, other: ElementSnapshot) -> bool:
+        """Check if this snapshot differs from another."""
+        return self.checksum != other.checksum
+
+
+class ChangeDetector:
+    """
+    Detects changes in UI elements by comparing snapshots.
+
+    Maintains state history and emits change events
+    when differences are detected.
+    """
+
+    def __init__(self) -> None:
+        self._snapshots: Dict[str, ElementSnapshot] = {}
+        self._change_handlers: List[Callable[[UIChange], None]] = []
+        self._change_history: List[UIChange] = []
+
+    def add_change_handler(self, handler: Callable[[UIChange], None]) -> ChangeDetector:
+        """Add a handler for change events."""
+        self._change_handlers.append(handler)
+        return self
+
+    def update_snapshot(self, element: Dict[str, Any]) -> List[UIChange]:
+        """
+        Update snapshot for an element and detect changes.
+
+        Returns list of detected changes.
+        """
+        snapshot = ElementSnapshot.from_element(element)
+        element_id = snapshot.element_id
+
+        changes: List[UIChange] = []
+
+        if element_id not in self._snapshots:
+            # New element
             change = UIChange(
-                change_type=ChangeType.ELEMENT_ADDED,
+                change_type=ChangeType.APPEARED,
                 element_id=element_id,
-                timestamp=current.timestamp
+                path=element.get("path", ""),
+                new_value=snapshot,
             )
-        elif not is_visible and previous.is_visible:
-            change = UIChange(
-                change_type=ChangeType.ELEMENT_HIDDEN,
-                element_id=element_id,
-                timestamp=current.timestamp
-            )
-        elif is_visible and not previous.is_visible:
-            change = UIChange(
-                change_type=ChangeType.ELEMENT_VISIBLE,
-                element_id=element_id,
-                timestamp=current.timestamp
-            )
-        elif bounds != previous.bounds:
-            change = UIChange(
-                change_type=ChangeType.ELEMENT_MOVED,
-                element_id=element_id,
-                timestamp=current.timestamp,
-                details={
-                    "old_bounds": previous.bounds,
-                    "new_bounds": bounds
-                }
-            )
-        elif properties != previous.properties:
-            diff = self._diff_properties(previous.properties, properties)
-            if diff:
+            changes.append(change)
+
+        else:
+            old_snapshot = self._snapshots[element_id]
+
+            if snapshot.has_changed(old_snapshot):
+                # Determine change type
+                change_type = ChangeType.MODIFIED
+
+                if old_snapshot.bounds != snapshot.bounds:
+                    if old_snapshot.role != snapshot.role:
+                        change_type = ChangeType.MOVED
+                    else:
+                        change_type = ChangeType.RESIZED
+
+                elif old_snapshot.enabled != snapshot.enabled:
+                    change_type = ChangeType.STATE_CHANGED
+
                 change = UIChange(
-                    change_type=ChangeType.PROPERTY_CHANGED,
+                    change_type=change_type,
                     element_id=element_id,
-                    timestamp=current.timestamp,
-                    details=diff
+                    path=element.get("path", ""),
+                    old_value=old_snapshot,
+                    new_value=snapshot,
                 )
-        
-        self._snapshots[element_id] = current
-        
-        if change:
-            self._record_change(change)
-        
-        return change
-    
+                changes.append(change)
+
+        # Update stored snapshot
+        self._snapshots[element_id] = snapshot
+
+        # Notify handlers
+        for change in changes:
+            self._change_history.append(change)
+            for handler in self._change_handlers:
+                handler(change)
+
+        return changes
+
     def remove_element(self, element_id: str) -> Optional[UIChange]:
         """Mark an element as removed."""
         if element_id in self._snapshots:
+            old_snapshot = self._snapshots.pop(element_id)
             change = UIChange(
-                change_type=ChangeType.ELEMENT_REMOVED,
+                change_type=ChangeType.DISAPPEARED,
                 element_id=element_id,
-                timestamp=time.time()
+                path="",
+                old_value=old_snapshot,
             )
-            self._record_change(change)
-            del self._snapshots[element_id]
+            self._change_history.append(change)
+            for handler in self._change_handlers:
+                handler(change)
             return change
         return None
-    
-    def _diff_properties(self, old: dict, new: dict) -> dict:
-        """Diff two property dictionaries."""
-        diff = {}
-        
-        for key in set(old.keys()) | set(new.keys()):
-            if key not in old:
-                diff[key] = {"from": None, "to": new[key]}
-            elif key not in new:
-                diff[key] = {"from": old[key], "to": None}
-            elif old[key] != new[key]:
-                diff[key] = {"from": old[key], "to": new[key]}
-        
-        return diff
-    
-    def _record_change(self, change: UIChange) -> None:
-        """Record a detected change."""
-        self._change_history.append(change)
-        if len(self._change_history) > self._max_history:
-            self._change_history.pop(0)
-        
-        for callback in self._change_callbacks:
-            callback(change)
-    
-    def on_change(self, callback: Callable[[UIChange], None]) -> None:
-        """Register callback for change events."""
-        self._change_callbacks.append(callback)
-    
-    def get_change_history(
-        self,
-        element_id: Optional[str] = None,
-        since: Optional[float] = None
-    ) -> list[UIChange]:
-        """Get change history."""
-        changes = self._change_history
-        
-        if element_id:
-            changes = [c for c in changes if c.element_id == element_id]
-        
-        if since:
-            changes = [c for c in changes if c.timestamp >= since]
-        
-        return changes
-    
-    def get_snapshot(self, element_id: str) -> Optional[ElementSnapshot]:
-        """Get current snapshot of an element."""
+
+    def get_changes_since(self, timestamp: float) -> List[UIChange]:
+        """Get all changes after a specific time."""
+        return [c for c in self._change_history if c.timestamp >= timestamp]
+
+    def get_element_snapshot(self, element_id: str) -> Optional[ElementSnapshot]:
+        """Get current snapshot for an element."""
         return self._snapshots.get(element_id)
-    
+
     def clear_history(self) -> None:
         """Clear change history."""
         self._change_history.clear()
+
+
+class PeriodicChecker:
+    """
+    Periodically checks for UI changes.
+
+    Useful for monitoring an application for changes
+    over time without continuous polling.
+    """
+
+    def __init__(
+        self,
+        interval: float = 1.0,
+        detector: Optional[ChangeDetector] = None,
+    ) -> None:
+        self._interval = interval
+        self._detector = detector or ChangeDetector()
+        self._running: bool = False
+        self._snapshot_func: Optional[Callable[[], List[Dict[str, Any]]]] = None
+        self._handlers: List[Callable[[List[UIChange]], None]] = []
+
+    def set_snapshot_func(self, func: Callable[[], List[Dict[str, Any]]]) -> PeriodicChecker:
+        """Set function that returns current UI elements."""
+        self._snapshot_func = func
+        return self
+
+    def add_handler(self, handler: Callable[[List[UIChange]], None]) -> PeriodicChecker:
+        """Add handler for change batches."""
+        self._handlers.append(handler)
+        return self
+
+    def start(self) -> PeriodicChecker:
+        """Start periodic checking."""
+        self._running = True
+        return self
+
+    def stop(self) -> None:
+        """Stop periodic checking."""
+        self._running = False
+
+    def check(self) -> List[UIChange]:
+        """
+        Perform a single check for changes.
+
+        Returns list of detected changes.
+        """
+        if not self._snapshot_func:
+            return []
+
+        elements = self._snapshot_func()
+        all_changes: List[UIChange] = []
+
+        for element in elements:
+            changes = self._detector.update_snapshot(element)
+            all_changes.extend(changes)
+
+        if all_changes:
+            for handler in self._handlers:
+                handler(all_changes)
+
+        return all_changes
+
+
+class ChangeMonitor:
+    """
+    High-level monitor for UI changes.
+
+    Provides a simple interface for watching specific
+    elements or patterns.
+    """
+
+    def __init__(self) -> None:
+        self._detector = ChangeDetector()
+        self._watched_patterns: Dict[str, Callable[[UIChange], bool]] = {}
+        self._handlers: Dict[str, List[Callable[[UIChange], None]]] = {}
+
+    def watch(
+        self,
+        pattern: str,
+        handler: Callable[[UIChange], None],
+        filter_func: Optional[Callable[[UIChange], bool]] = None,
+    ) -> ChangeMonitor:
+        """
+        Watch for changes matching a pattern.
+
+        Args:
+            pattern: Identifier for this watch.
+            handler: Callback when matching change detected.
+            filter_func: Optional filter for specific changes.
+        """
+        self._watched_patterns[pattern] = filter_func or (lambda _: True)
+        self._handlers.setdefault(pattern, []).append(handler)
+        return self
+
+    def unwatch(self, pattern: str) -> bool:
+        """Stop watching a pattern."""
+        if pattern in self._handlers:
+            del self._handlers[pattern]
+            del self._watched_patterns[pattern]
+            return True
+        return False
+
+    def on_change(self, change: UIChange) -> None:
+        """Process a change and notify matching watchers."""
+        for pattern, filter_func in self._watched_patterns.items():
+            if filter_func(change):
+                for handler in self._handlers.get(pattern, []):
+                    handler(change)
+
+    def add_change(self, element: Dict[str, Any]) -> List[UIChange]:
+        """Add an element and detect changes."""
+        changes = self._detector.update_snapshot(element)
+        for change in changes:
+            self.on_change(change)
+        return changes
+
+
+def detect_element_changes(
+    old_elements: List[Dict[str, Any]],
+    new_elements: List[Dict[str, Any]],
+) -> List[UIChange]:
+    """
+    Compare two element lists and return changes.
+
+    Simple utility function for one-off comparisons.
+    """
+    detector = ChangeDetector()
+
+    for element in old_elements:
+        detector.update_snapshot(element)
+
+    changes: List[UIChange] = []
+    for element in new_elements:
+        elem_changes = detector.update_snapshot(element)
+        changes.extend(elem_changes)
+
+    return changes
