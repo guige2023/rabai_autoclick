@@ -1,26 +1,23 @@
-"""
-API Health Check Action Module.
+"""API Health Check Action Module.
 
-Monitors API health with configurable checks,
-status aggregation, and alerting hooks.
+Provides health check functionality for API endpoints and services,
+including dependency checking, status aggregation, and alerting.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional, Protocol
-from dataclasses import dataclass, field
-from enum import Enum
-import logging
-import time
 import asyncio
-import httpx
+import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
 
 class HealthStatus(Enum):
-    """Health status levels."""
+    """Health check status levels."""
     HEALTHY = "healthy"
     DEGRADED = "degraded"
     UNHEALTHY = "unhealthy"
@@ -30,193 +27,174 @@ class HealthStatus(Enum):
 @dataclass
 class HealthCheckResult:
     """Result of a single health check."""
-    name: str
+    component: str
     status: HealthStatus
-    latency_ms: float = 0.0
-    message: str = ""
+    latency_ms: Optional[float] = None
+    message: Optional[str] = None
+    error: Optional[str] = None
     timestamp: datetime = field(default_factory=datetime.now)
-    details: dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "component": self.component,
+            "status": self.status.value,
+            "latency_ms": self.latency_ms,
+            "message": self.message,
+            "error": self.error,
+            "timestamp": self.timestamp.isoformat(),
+            "metadata": self.metadata,
+        }
 
 
 @dataclass
-class HealthReport:
-    """Aggregated health report for all checks."""
-    overall_status: HealthStatus
-    checks: list[HealthCheckResult]
-    timestamp: datetime = field(default_factory=datetime.now)
-    duration_ms: float = 0.0
+class HealthCheckConfig:
+    """Configuration for health checks."""
+    timeout_seconds: float = 5.0
+    retry_count: int = 2
+    retry_delay_seconds: float = 1.0
+    healthy_threshold: int = 2
+    unhealthy_threshold: int = 3
+    enabled: bool = True
 
 
-class HealthCheckFunc(Protocol):
-    """Protocol for health check functions."""
-    def __call__(self) -> HealthCheckResult: ...
+class HealthCheckRegistry:
+    """Registry for health check functions."""
 
+    def __init__(self):
+        self._checks: Dict[str, Callable[[], Any]] = {}
+        self._configs: Dict[str, HealthCheckConfig] = {}
+        self._status_cache: Dict[str, HealthCheckResult] = {}
+        self._cache_ttl: timedelta = timedelta(seconds=30)
 
-class APIHealthCheckAction:
-    """
-    Multi-check health monitoring system.
-
-    Runs multiple health checks and aggregates results.
-    Supports thresholds, timeouts, and alerting callbacks.
-
-    Example:
-        checker = APIHealthCheckAction()
-        checker.register("auth", auth_health_check)
-        checker.register("database", db_health_check)
-        report = checker.run_all()
-        print(report.overall_status)
-    """
-
-    def __init__(
-        self,
-        timeout: float = 5.0,
-        degraded_threshold_ms: float = 1000.0,
-        unhealthy_threshold_ms: float = 3000.0,
-    ) -> None:
-        self.timeout = timeout
-        self.degraded_threshold_ms = degraded_threshold_ms
-        self.unhealthy_threshold_ms = unhealthy_threshold_ms
-        self._checks: dict[str, HealthCheckFunc] = {}
-        self._history: list[HealthReport] = []
-        self._max_history: int = 100
-
-    def register(self, name: str, check_func: HealthCheckFunc) -> None:
-        """Register a health check function."""
-        self._checks[name] = check_func
-
-    def register_http(
+    def register(
         self,
         name: str,
-        url: str,
-        method: str = "GET",
-        expected_status: int = 200,
+        check_fn: Callable[[], Any],
+        config: Optional[HealthCheckConfig] = None,
     ) -> None:
-        """Register an HTTP endpoint as a health check."""
-        async def http_check() -> HealthCheckResult:
-            start = time.perf_counter()
+        self._checks[name] = check_fn
+        self._configs[name] = config or HealthCheckConfig()
+
+    def unregister(self, name: str) -> None:
+        self._checks.pop(name, None)
+        self._configs.pop(name, None)
+        self._status_cache.pop(name, None)
+
+    async def check(self, name: str) -> HealthCheckResult:
+        if name not in self._checks:
+            return HealthCheckResult(
+                component=name,
+                status=HealthStatus.UNKNOWN,
+                error=f"Health check '{name}' not registered",
+            )
+
+        config = self._configs.get(name, HealthCheckConfig())
+        if not config.enabled:
+            return HealthCheckResult(
+                component=name,
+                status=HealthStatus.UNKNOWN,
+                message="Health check disabled",
+            )
+
+        cached = self._status_cache.get(name)
+        if cached and datetime.now() - cached.timestamp < self._cache_ttl:
+            return cached
+
+        for attempt in range(config.retry_count + 1):
             try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    response = await client.request(method, url)
-                    latency_ms = (time.perf_counter() - start) * 1000
+                start = datetime.now()
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(self._checks[name]),
+                    timeout=config.timeout_seconds,
+                )
+                latency = (datetime.now() - start).total_seconds() * 1000
 
-                    if response.status_code == expected_status:
-                        status = HealthStatus.HEALTHY
-                        message = "OK"
-                    else:
-                        status = HealthStatus.UNHEALTHY
-                        message = f"Status {response.status_code}"
+                if isinstance(result, HealthCheckResult):
+                    return result
 
-                    return HealthCheckResult(
-                        name=name,
-                        status=status,
-                        latency_ms=latency_ms,
-                        message=message,
-                        details={"status_code": response.status_code},
-                    )
-            except Exception as e:
-                latency_ms = (time.perf_counter() - start) * 1000
-                return HealthCheckResult(
-                    name=name,
+                status = HealthStatus.HEALTHY if result else HealthStatus.DEGRADED
+                health_result = HealthCheckResult(
+                    component=name,
+                    status=status,
+                    latency_ms=latency,
+                    message=str(result) if result else None,
+                )
+                self._status_cache[name] = health_result
+                return health_result
+
+            except asyncio.TimeoutError:
+                health_result = HealthCheckResult(
+                    component=name,
                     status=HealthStatus.UNHEALTHY,
-                    latency_ms=latency_ms,
-                    message=str(e),
+                    error=f"Timeout after {config.timeout_seconds}s",
                 )
-
-        self._checks[name] = http_check  # type: ignore
-
-    def run_all(self) -> HealthReport:
-        """Run all registered health checks synchronously."""
-        start = time.perf_counter()
-        results: list[HealthCheckResult] = []
-
-        for name, check in self._checks.items():
-            try:
-                if asyncio.iscoroutinefunction(check):
-                    result = asyncio.run(check())
-                else:
-                    result = check()
             except Exception as e:
-                logger.error("Health check '%s' failed: %s", name, e)
-                result = HealthCheckResult(
-                    name=name,
-                    status=HealthStatus.UNKNOWN,
-                    message=str(e),
-                )
-            results.append(result)
-
-        duration_ms = (time.perf_counter() - start) * 1000
-        overall = self._aggregate_status(results)
-
-        report = HealthReport(
-            overall_status=overall,
-            checks=results,
-            duration_ms=duration_ms,
-        )
-        self._add_to_history(report)
-        return report
-
-    async def run_all_async(self) -> HealthReport:
-        """Run all health checks concurrently."""
-        start = time.perf_counter()
-
-        async def run_check(name: str, check: HealthCheckFunc) -> HealthCheckResult:
-            try:
-                if asyncio.iscoroutinefunction(check):
-                    return await check()
-                return check()
-            except Exception as e:
-                logger.error("Health check '%s' failed: %s", name, e)
-                return HealthCheckResult(
-                    name=name,
-                    status=HealthStatus.UNKNOWN,
-                    message=str(e),
+                health_result = HealthCheckResult(
+                    component=name,
+                    status=HealthStatus.UNHEALTHY,
+                    error=str(e),
                 )
 
-        tasks = [run_check(name, check) for name, check in self._checks.items()]
-        results = await asyncio.gather(*tasks)
+            if attempt < config.retry_count:
+                await asyncio.sleep(config.retry_delay_seconds)
 
-        duration_ms = (time.perf_counter() - start) * 1000
-        overall = self._aggregate_status(list(results))
+        self._status_cache[name] = health_result
+        return health_result
 
-        report = HealthReport(
-            overall_status=overall,
-            checks=list(results),
-            duration_ms=duration_ms,
-        )
-        self._add_to_history(report)
-        return report
+    async def check_all(self) -> Dict[str, HealthCheckResult]:
+        tasks = [self.check(name) for name in self._checks]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return dict(zip(self._checks.keys(), results))
 
-    def _aggregate_status(self, results: list[HealthCheckResult]) -> HealthStatus:
-        """Determine overall status from individual check results."""
-        if not results:
+    def get_overall_status(self, results: Dict[str, HealthCheckResult]) -> HealthStatus:
+        statuses = [r.status for r in results.values() if isinstance(r, HealthCheckResult)]
+        if not statuses:
             return HealthStatus.UNKNOWN
-
-        statuses = [r.status for r in results]
-
-        if HealthStatus.UNHEALTHY in statuses:
+        if any(s == HealthStatus.UNHEALTHY for s in statuses):
             return HealthStatus.UNHEALTHY
-        if HealthStatus.DEGRADED in statuses or HealthStatus.UNKNOWN in statuses:
+        if any(s == HealthStatus.DEGRADED for s in statuses):
             return HealthStatus.DEGRADED
-        if all(s == HealthStatus.HEALTHY for s in statuses):
-            return HealthStatus.HEALTHY
+        return HealthStatus.HEALTHY
 
-        return HealthStatus.DEGRADED
 
-    def _add_to_history(self, report: HealthReport) -> None:
-        """Add report to history, maintaining max size."""
-        self._history.append(report)
-        if len(self._history) > self._max_history:
-            self._history = self._history[-self._max_history:]
+_global_registry: Optional[HealthCheckRegistry] = None
 
-    def get_history(
-        self,
-        since: Optional[datetime] = None,
-    ) -> list[HealthReport]:
-        """Get historical reports, optionally filtered by time."""
-        if since is None:
-            return list(self._history)
-        return [r for r in self._history if r.timestamp >= since]
 
-    def get_trend(self, check_name: str) -> list[HealthCheckResult]:
-        """Get trend for a specific check."""
-        return [r for r in self._history for r in r.checks if r.name == check_name]
+def get_health_registry() -> HealthCheckRegistry:
+    global _global_registry
+    if _global_registry is None:
+        _global_registry = HealthCheckRegistry()
+    return _global_registry
+
+
+def register_health_check(
+    name: str,
+    config: Optional[HealthCheckConfig] = None,
+) -> Callable:
+    def decorator(fn: Callable[[], Any]) -> Callable:
+        get_health_registry().register(name, fn, config)
+        return fn
+    return decorator
+
+
+async def check_api_health(endpoints: List[str]) -> Dict[str, HealthCheckResult]:
+    results = {}
+    for endpoint in endpoints:
+        parts = endpoint.split("://", 1)
+        scheme = parts[0] if len(parts) > 1 else "http"
+        host = parts[1] if len(parts) > 1 else parts[0]
+
+        async def check_endpoint() -> bool:
+            try:
+                import aiohttp
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(f"{scheme}://{host}", timeout=5) as resp:
+                        return resp.status < 500
+            except Exception:
+                return False
+
+        registry = get_health_registry()
+        registry.register(endpoint, check_endpoint)
+        results[endpoint] = await registry.check(endpoint)
+    return results
