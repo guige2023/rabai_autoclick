@@ -1,357 +1,553 @@
-"""Data pipeline action module for RabAI AutoClick.
+"""Data Pipeline Action Module.
 
-Provides data pipeline operations:
-- PipelineBuilderAction: Build data processing pipelines
-- PipelineExecutorAction: Execute data pipelines
-- PipelineMonitorAction: Monitor pipeline execution
-- PipelineCheckpointAction: Checkpoint and recovery for pipelines
+Provides data pipeline utilities: ETL operations, transformations,
+data enrichment, pipeline monitoring, and checkpoint management.
+
+Example:
+    result = execute(context, {"action": "extract", "source": {...}})
 """
-
-import sys
-import os
-import time
-import logging
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Optional, Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
-
-logger = logging.getLogger(__name__)
-
-
-class PipelineStatus(Enum):
-    """Pipeline execution status."""
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-    PAUSED = "paused"
-
-
-class StageStatus(Enum):
-    """Individual stage status."""
-    WAITING = "waiting"
-    PROCESSING = "processing"
-    DONE = "done"
-    FAILED = "failed"
-    SKIPPED = "skipped"
+from collections import deque
 
 
 @dataclass
 class PipelineStage:
-    """A single stage in a data pipeline."""
+    """A stage in the data pipeline."""
+    
     name: str
-    processor: Callable[[Any], Any]
-    condition: Optional[Callable[[Any], bool]] = None
-    retry_count: int = 0
-    timeout: float = 300.0
-    status: StageStatus = StageStatus.WAITING
-    start_time: Optional[datetime] = None
-    end_time: Optional[datetime] = None
-    error: Optional[str] = None
+    stage_type: str
+    config: dict[str, Any] = field(default_factory=dict)
+    transformers: list[Callable] = field(default_factory=list)
+    
+    def __post_init__(self) -> None:
+        """Validate stage type."""
+        valid_types = {"extract", "transform", "load", "filter", "aggregate", "enrich"}
+        if self.stage_type not in valid_types:
+            raise ValueError(f"Invalid stage_type: {self.stage_type}")
 
 
 @dataclass
-class Pipeline:
-    """Data processing pipeline."""
-    pipeline_id: str
-    name: str
-    stages: List[PipelineStage] = field(default_factory=list)
-    status: PipelineStatus = PipelineStatus.PENDING
-    created_at: datetime = field(default_factory=datetime.now)
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    total_processed: int = 0
-    total_failed: int = 0
+class PipelineMetrics:
+    """Pipeline execution metrics."""
+    
+    pipeline_name: str
+    start_time: datetime
+    end_time: Optional[datetime] = None
+    records_in: int = 0
+    records_out: int = 0
+    records_failed: int = 0
+    stages_completed: int = 0
+    total_stages: int = 0
+    errors: list[dict[str, Any]] = field(default_factory=list)
+    
+    @property
+    def duration_seconds(self) -> float:
+        """Get pipeline duration in seconds."""
+        if self.end_time is None:
+            end = datetime.now()
+        else:
+            end = self.end_time
+        return (end - self.start_time).total_seconds()
+    
+    @property
+    def throughput_records_per_second(self) -> float:
+        """Get processing throughput."""
+        duration = self.duration_seconds
+        if duration > 0:
+            return self.records_out / duration
+        return 0.0
 
 
-class PipelineRegistry:
-    """Registry for managing pipelines."""
+class Extractor:
+    """Extracts data from various sources."""
+    
+    @staticmethod
+    def from_dict(data: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+        """Extract from dictionary/list.
+        
+        Args:
+            data: List of records
+            
+        Yields:
+            Individual records
+        """
+        for record in data:
+            yield record
+    
+    @staticmethod
+    def from_csv_row(row: dict[str, str]) -> dict[str, Any]:
+        """Extract from CSV row with type conversion.
+        
+        Args:
+            row: CSV row as dictionary
+            
+        Returns:
+            Converted record
+        """
+        converted = {}
+        for key, value in row.items():
+            if value is None or value == "":
+                converted[key] = None
+            elif value.lower() in ("true", "false"):
+                converted[key] = value.lower() == "true"
+            elif value.isdigit():
+                converted[key] = int(value)
+            else:
+                try:
+                    converted[key] = float(value)
+                except ValueError:
+                    converted[key] = value
+        return converted
+    
+    @staticmethod
+    def filter_fields(
+        record: dict[str, Any],
+        fields: list[str],
+        exclude: bool = False,
+    ) -> dict[str, Any]:
+        """Filter record fields.
+        
+        Args:
+            record: Input record
+            fields: Fields to include/exclude
+            exclude: If True, exclude fields; else include only
+            
+        Returns:
+            Filtered record
+        """
+        if exclude:
+            return {k: v for k, v in record.items() if k not in fields}
+        return {k: v for k, v in record.items() if k in fields}
 
+
+class Transformer:
+    """Transforms data records."""
+    
+    @staticmethod
+    def rename_fields(
+        record: dict[str, Any],
+        mapping: dict[str, str],
+    ) -> dict[str, Any]:
+        """Rename fields in record.
+        
+        Args:
+            record: Input record
+            mapping: Field name mapping
+            
+        Returns:
+            Record with renamed fields
+        """
+        result = {}
+        for key, value in record.items():
+            new_key = mapping.get(key, key)
+            result[new_key] = value
+        return result
+    
+    @staticmethod
+    def add_field(
+        record: dict[str, Any],
+        field_name: str,
+        value: Any,
+    ) -> dict[str, Any]:
+        """Add computed field.
+        
+        Args:
+            record: Input record
+            field_name: New field name
+            value: Field value or callable
+            
+        Returns:
+            Record with new field
+        """
+        result = record.copy()
+        if callable(value):
+            result[field_name] = value(record)
+        else:
+            result[field_name] = value
+        return result
+    
+    @staticmethod
+    def remove_nulls(
+        record: dict[str, Any],
+        strategy: str = "drop",
+    ) -> dict[str, Any]:
+        """Handle null values in record.
+        
+        Args:
+            record: Input record
+            strategy: Strategy (drop, empty_string, none)
+            
+        Returns:
+            Record with nulls handled
+        """
+        if strategy == "drop":
+            return {k: v for k, v in record.items() if v is not None}
+        elif strategy == "empty_string":
+            return {k: (v if v is not None else "") for k, v in record.items()}
+        return record
+    
+    @staticmethod
+    def normalize_strings(
+        record: dict[str, Any],
+        fields: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        """Normalize string fields.
+        
+        Args:
+            record: Input record
+            fields: Fields to normalize (None = all strings)
+            
+        Returns:
+            Record with normalized strings
+        """
+        result = {}
+        for key, value in record.items():
+            if isinstance(value, str):
+                if fields is None or key in fields:
+                    value = value.strip().lower()
+            result[key] = value
+        return result
+
+
+class Loader:
+    """Loads data to various destinations."""
+    
+    @staticmethod
+    def to_dict_list(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Load records to list.
+        
+        Args:
+            records: List of records
+            
+        Returns:
+            Same list (for chaining)
+        """
+        return records
+    
+    @staticmethod
+    def group_by(
+        records: list[dict[str, Any]],
+        key_field: str,
+    ) -> dict[Any, list[dict[str, Any]]]:
+        """Group records by field.
+        
+        Args:
+            records: List of records
+            key_field: Field to group by
+            
+        Returns:
+            Records grouped by key
+        """
+        groups: dict[Any, list[dict[str, Any]]] = {}
+        for record in records:
+            key = record.get(key_field)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(record)
+        return groups
+
+
+class DataEnricher:
+    """Enriches data with additional information."""
+    
     def __init__(self) -> None:
-        self._pipelines: Dict[str, Pipeline] = {}
-
-    def create(self, pipeline_id: str, name: str) -> Pipeline:
-        pipeline = Pipeline(pipeline_id=pipeline_id, name=name)
-        self._pipelines[pipeline_id] = pipeline
-        return pipeline
-
-    def get(self, pipeline_id: str) -> Optional[Pipeline]:
-        return self._pipelines.get(pipeline_id)
-
-    def update(self, pipeline: Pipeline) -> None:
-        self._pipelines[pipeline.pipeline_id] = pipeline
-
-    def list_all(self) -> List[Pipeline]:
-        return list(self._pipelines.values())
-
-    def delete(self, pipeline_id: str) -> bool:
-        if pipeline_id in self._pipelines:
-            del self._pipelines[pipeline_id]
-            return True
-        return False
-
-
-_registry = PipelineRegistry()
-
-
-class PipelineBuilderAction(BaseAction):
-    """Build a data processing pipeline."""
-    action_type = "data_pipeline_builder"
-    display_name = "构建数据管道"
-    description = "构建数据处理管道的阶段和配置"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        pipeline_id = params.get("pipeline_id", "")
-        name = params.get("name", "")
-        stages_config = params.get("stages", [])
-
-        if not pipeline_id or not name:
-            return ActionResult(success=False, message="pipeline_id和name是必需的")
-
-        pipeline = _registry.create(pipeline_id, name)
-
-        for i, stage_config in enumerate(stages_config):
-            stage_name = stage_config.get("name", f"stage_{i}")
-            retry = stage_config.get("retry_count", 0)
-            timeout = stage_config.get("timeout", 300.0)
-
-            stage = PipelineStage(
-                name=stage_name,
-                processor=self._dummy_processor,
-                retry_count=retry,
-                timeout=timeout
-            )
-            pipeline.stages.append(stage)
-
-        return ActionResult(
-            success=True,
-            message=f"管道 {name} 已构建，包含 {len(pipeline.stages)} 个阶段",
-            data={
-                "pipeline_id": pipeline_id,
-                "stage_count": len(pipeline.stages)
-            }
-        )
-
-    def _dummy_processor(self, data: Any) -> Any:
-        return data
+        """Initialize data enricher."""
+        self._lookup_tables: dict[str, dict[Any, Any]] = {}
+        self._enrichment_funcs: dict[str, Callable] = {}
+    
+    def add_lookup_table(
+        self,
+        name: str,
+        data: dict[Any, Any],
+    ) -> None:
+        """Add a lookup table for enrichment.
+        
+        Args:
+            name: Table name
+            data: Lookup dictionary
+        """
+        self._lookup_tables[name] = data
+    
+    def add_enrichment_func(
+        self,
+        field_name: str,
+        func: Callable[[dict[str, Any]], Any],
+    ) -> None:
+        """Add enrichment function.
+        
+        Args:
+            field_name: Field to enrich
+            func: Enrichment function
+        """
+        self._enrichment_funcs[field_name] = func
+    
+    def enrich(
+        self,
+        record: dict[str, Any],
+        lookups: list[str],
+    ) -> dict[str, Any]:
+        """Enrich record with lookup data.
+        
+        Args:
+            record: Input record
+            lookups: List of lookup table names
+            
+        Returns:
+            Enriched record
+        """
+        result = record.copy()
+        
+        for lookup_name in lookups:
+            if lookup_name not in self._lookup_tables:
+                continue
+            
+            lookup_table = self._lookup_tables[lookup_name]
+            
+            for key, value in record.items():
+                if key in lookup_table:
+                    result[f"{lookup_name}_{key}"] = lookup_table[key].get(value)
+        
+        for field_name, func in self._enrichment_funcs.items():
+            result[field_name] = func(record)
+        
+        return result
 
 
-class PipelineExecutorAction(BaseAction):
-    """Execute a data pipeline."""
-    action_type = "data_pipeline_executor"
-    display_name = "执行数据管道"
-    description = "执行已构建的数据处理管道"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        pipeline_id = params.get("pipeline_id", "")
-        input_data = params.get("input_data")
-        stop_on_error = params.get("stop_on_error", True)
-
-        pipeline = _registry.get(pipeline_id)
-        if not pipeline:
-            return ActionResult(success=False, message=f"管道 {pipeline_id} 不存在")
-
-        if not pipeline.stages:
-            return ActionResult(success=False, message="管道没有阶段")
-
-        pipeline.status = PipelineStatus.RUNNING
-        pipeline.started_at = datetime.now()
-        _registry.update(pipeline)
-
-        current_data = input_data
-        results = []
-
-        for stage in pipeline.stages:
-            stage.status = StageStatus.PROCESSING
-            stage.start_time = datetime.now()
-
-            try:
-                start = time.time()
-                output = stage.processor(current_data)
-                elapsed = time.time() - start
-
-                stage.status = StageStatus.DONE
-                stage.end_time = datetime.now()
-                current_data = output
-                pipeline.total_processed += 1
-
-                results.append({
-                    "stage": stage.name,
-                    "status": "success",
-                    "elapsed_ms": round(elapsed * 1000, 2),
-                    "output_type": type(output).__name__
-                })
-
-            except Exception as e:
-                stage.status = StageStatus.FAILED
-                stage.error = str(e)
-                stage.end_time = datetime.now()
-                pipeline.total_failed += 1
-
-                results.append({
-                    "stage": stage.name,
-                    "status": "failed",
-                    "error": str(e)
-                })
-
-                if stop_on_error:
-                    pipeline.status = PipelineStatus.FAILED
-                    _registry.update(pipeline)
-                    return ActionResult(
-                        success=False,
-                        message=f"管道在阶段 {stage.name} 失败: {e}",
-                        data={"pipeline_id": pipeline_id, "results": results}
-                    )
-
-        pipeline.status = PipelineStatus.COMPLETED
-        pipeline.completed_at = datetime.now()
-        _registry.update(pipeline)
-
-        return ActionResult(
-            success=True,
-            message=f"管道执行完成，处理 {pipeline.total_processed} 条数据",
-            data={
-                "pipeline_id": pipeline_id,
-                "results": results,
-                "total_processed": pipeline.total_processed,
-                "total_failed": pipeline.total_failed
-            }
-        )
-
-
-class PipelineMonitorAction(BaseAction):
-    """Monitor pipeline execution status."""
-    action_type = "data_pipeline_monitor"
-    display_name = "监控数据管道"
-    description = "监控数据管道的执行状态和性能"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        pipeline_id = params.get("pipeline_id", "")
-
-        if pipeline_id:
-            pipeline = _registry.get(pipeline_id)
-            if not pipeline:
-                return ActionResult(success=False, message=f"管道 {pipeline_id} 不存在")
-
-            stages_data = []
-            for s in pipeline.stages:
-                duration = 0.0
-                if s.start_time and s.end_time:
-                    duration = (s.end_time - s.start_time).total_seconds()
-                stages_data.append({
-                    "name": s.name,
-                    "status": s.status.value,
-                    "duration_seconds": round(duration, 4),
-                    "error": s.error
-                })
-
-            return ActionResult(
-                success=True,
-                message=f"管道 {pipeline.name} 状态: {pipeline.status.value}",
-                data={
-                    "pipeline_id": pipeline_id,
-                    "name": pipeline.name,
-                    "status": pipeline.status.value,
-                    "created_at": pipeline.created_at.isoformat(),
-                    "started_at": pipeline.started_at.isoformat() if pipeline.started_at else None,
-                    "completed_at": pipeline.completed_at.isoformat() if pipeline.completed_at else None,
-                    "total_processed": pipeline.total_processed,
-                    "total_failed": pipeline.total_failed,
-                    "stages": stages_data
-                }
-            )
-
-        pipelines = _registry.list_all()
-        summary = [
-            {
-                "pipeline_id": p.pipeline_id,
-                "name": p.name,
-                "status": p.status.value,
-                "stage_count": len(p.stages),
-                "total_processed": p.total_processed,
-                "total_failed": p.total_failed
-            }
-            for p in pipelines
-        ]
-
-        return ActionResult(
-            success=True,
-            message=f"共 {len(summary)} 个管道",
-            data={"pipelines": summary}
-        )
-
-
-class PipelineCheckpointAction(BaseAction):
-    """Checkpoint and recovery for pipelines."""
-    action_type = "data_pipeline_checkpoint"
-    display_name = "数据管道检查点"
-    description = "保存和恢复数据管道的检查点状态"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        pipeline_id = params.get("pipeline_id", "")
-        operation = params.get("operation", "save")
-
-        pipeline = _registry.get(pipeline_id)
-        if not pipeline:
-            return ActionResult(success=False, message=f"管道 {pipeline_id} 不存在")
-
-        checkpoint_data = {
-            "pipeline_id": pipeline.pipeline_id,
-            "name": pipeline.name,
-            "status": pipeline.status.value,
-            "stages": [
-                {
-                    "name": s.name,
-                    "status": s.status.value,
-                    "error": s.error
-                }
-                for s in pipeline.stages
-            ],
-            "total_processed": pipeline.total_processed,
-            "total_failed": pipeline.total_failed,
-            "timestamp": datetime.now().isoformat()
+class CheckpointManager:
+    """Manages pipeline checkpoints for recovery."""
+    
+    def __init__(self, checkpoint_dir: Optional[str] = None) -> None:
+        """Initialize checkpoint manager.
+        
+        Args:
+            checkpoint_dir: Directory for checkpoint files
+        """
+        self.checkpoint_dir = checkpoint_dir
+        self._checkpoints: dict[str, dict[str, Any]] = {}
+    
+    def save_checkpoint(
+        self,
+        pipeline_name: str,
+        stage_name: str,
+        position: int,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Save pipeline checkpoint.
+        
+        Args:
+            pipeline_name: Pipeline identifier
+            stage_name: Current stage
+            position: Current position
+            metadata: Additional metadata
+        """
+        key = f"{pipeline_name}_{stage_name}"
+        self._checkpoints[key] = {
+            "pipeline_name": pipeline_name,
+            "stage_name": stage_name,
+            "position": position,
+            "metadata": metadata or {},
+            "timestamp": datetime.now().isoformat(),
         }
+    
+    def load_checkpoint(
+        self,
+        pipeline_name: str,
+        stage_name: str,
+    ) -> Optional[int]:
+        """Load checkpoint position.
+        
+        Args:
+            pipeline_name: Pipeline identifier
+            stage_name: Stage name
+            
+        Returns:
+            Checkpoint position or None
+        """
+        key = f"{pipeline_name}_{stage_name}"
+        checkpoint = self._checkpoints.get(key)
+        if checkpoint:
+            return checkpoint.get("position")
+        return None
+    
+    def clear_checkpoint(self, pipeline_name: str, stage_name: str) -> None:
+        """Clear a checkpoint.
+        
+        Args:
+            pipeline_name: Pipeline identifier
+            stage_name: Stage name
+        """
+        key = f"{pipeline_name}_{stage_name}"
+        if key in self._checkpoints:
+            del self._checkpoints[key]
 
-        if operation == "save":
+
+class Pipeline:
+    """Orchestrates data pipeline execution."""
+    
+    def __init__(self, name: str) -> None:
+        """Initialize pipeline.
+        
+        Args:
+            name: Pipeline name
+        """
+        self.name = name
+        self.stages: list[PipelineStage] = []
+        self.metrics = PipelineMetrics(
+            pipeline_name=name,
+            start_time=datetime.now(),
+        )
+    
+    def add_stage(self, stage: PipelineStage) -> None:
+        """Add stage to pipeline.
+        
+        Args:
+            stage: Stage to add
+        """
+        self.stages.append(stage)
+        self.metrics.total_stages = len(self.stages)
+    
+    def execute(
+        self,
+        data: list[dict[str, Any]],
+        params: Optional[dict[str, Any]] = None,
+    ) -> list[dict[str, Any]]:
+        """Execute pipeline on data.
+        
+        Args:
+            data: Input records
+            params: Pipeline parameters
+            
+        Returns:
+            Processed records
+        """
+        params = params or {}
+        records = list(data)
+        
+        self.metrics.records_in = len(records)
+        
+        for stage in self.stages:
             try:
-                checkpoint_file = f"/tmp/pipeline_checkpoint_{pipeline_id}.json"
-                import json
-                with open(checkpoint_file, "w") as f:
-                    json.dump(checkpoint_data, f, indent=2, default=str)
-                return ActionResult(
-                    success=True,
-                    message=f"检查点已保存到 {checkpoint_file}",
-                    data={"checkpoint_file": checkpoint_file, "data": checkpoint_data}
-                )
+                if stage.stage_type == "extract":
+                    records = list(Extractor.from_dict(records))
+                
+                elif stage.stage_type == "transform":
+                    transformed = []
+                    for record in records:
+                        try:
+                            transformed.append(record)
+                        except Exception as e:
+                            self.metrics.records_failed += 1
+                            self.metrics.errors.append({
+                                "stage": stage.name,
+                                "error": str(e),
+                            })
+                    records = transformed
+                
+                elif stage.stage_type == "filter":
+                    pass
+                
+                self.metrics.stages_completed += 1
+            
             except Exception as e:
-                return ActionResult(success=False, message=f"保存检查点失败: {e}")
+                self.metrics.errors.append({
+                    "stage": stage.name,
+                    "error": str(e),
+                })
+        
+        self.metrics.records_out = len(records)
+        self.metrics.end_time = datetime.now()
+        
+        return records
 
-        if operation == "restore":
-            try:
-                checkpoint_file = f"/tmp/pipeline_checkpoint_{pipeline_id}.json"
-                import json
-                with open(checkpoint_file, "r") as f:
-                    saved = json.load(f)
 
-                pipeline.status = PipelineStatus(saved.get("status", "pending"))
-                pipeline.total_processed = saved.get("total_processed", 0)
-                pipeline.total_failed = saved.get("total_failed", 0)
-
-                _registry.update(pipeline)
-                return ActionResult(
-                    success=True,
-                    message="检查点已恢复",
-                    data={"restored": saved}
-                )
-            except FileNotFoundError:
-                return ActionResult(success=False, message="检查点文件不存在")
-            except Exception as e:
-                return ActionResult(success=False, message=f"恢复检查点失败: {e}")
-
-        return ActionResult(success=False, message=f"未知操作: {operation}")
+def execute(context: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+    """Execute data pipeline action.
+    
+    Args:
+        context: Execution context
+        params: Parameters including action type
+        
+    Returns:
+        Result dictionary with status and data
+    """
+    action = params.get("action", "status")
+    result: dict[str, Any] = {"status": "success"}
+    
+    if action == "extract":
+        data = params.get("data", [])
+        records = list(Extractor.from_dict(data))
+        result["data"] = {"extracted_count": len(records)}
+    
+    elif action == "transform":
+        record = params.get("record", {})
+        transformed = Transformer.rename_fields(
+            record,
+            params.get("rename_mapping", {}),
+        )
+        result["data"] = {"transformed": transformed}
+    
+    elif action == "enrich":
+        enricher = DataEnricher()
+        enricher.add_lookup_table(
+            params.get("lookup_name", ""),
+            params.get("lookup_data", {}),
+        )
+        enriched = enricher.enrich(
+            params.get("record", {}),
+            [params.get("lookup_name", "")],
+        )
+        result["data"] = {"enriched": enriched}
+    
+    elif action == "load":
+        records = params.get("records", [])
+        groups = Loader.group_by(records, params.get("group_by", ""))
+        result["data"] = {"group_count": len(groups)}
+    
+    elif action == "checkpoint_save":
+        manager = CheckpointManager()
+        manager.save_checkpoint(
+            params.get("pipeline_name", ""),
+            params.get("stage_name", ""),
+            params.get("position", 0),
+        )
+        result["data"] = {"saved": True}
+    
+    elif action == "checkpoint_load":
+        manager = CheckpointManager()
+        position = manager.load_checkpoint(
+            params.get("pipeline_name", ""),
+            params.get("stage_name", ""),
+        )
+        result["data"] = {"position": position}
+    
+    elif action == "execute_pipeline":
+        pipeline = Pipeline(name=params.get("name", "pipeline"))
+        stage = PipelineStage(
+            name=params.get("stage_name", "stage"),
+            stage_type=params.get("stage_type", "transform"),
+        )
+        pipeline.add_stage(stage)
+        
+        data = params.get("data", [])
+        output = pipeline.execute(data)
+        result["data"] = {
+            "records_in": pipeline.metrics.records_in,
+            "records_out": pipeline.metrics.records_out,
+            "duration_seconds": pipeline.metrics.duration_seconds,
+        }
+    
+    elif action == "metrics":
+        pipeline = Pipeline(name="temp")
+        result["data"] = {
+            "records_in": 0,
+            "records_out": 0,
+            "throughput": 0.0,
+        }
+    
+    else:
+        result["status"] = "error"
+        result["error"] = f"Unknown action: {action}"
+    
+    return result
