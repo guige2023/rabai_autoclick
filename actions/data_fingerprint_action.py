@@ -1,309 +1,291 @@
-"""
-Data Fingerprint Action Module.
+"""Data Fingerprint Action module.
 
-Data fingerprinting and deduplication with multiple
-hashing algorithms, similarity detection, and chunking.
+Generates fingerprints/hashes for data integrity verification,
+change detection, and deduplication.
 """
+
+from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, Optional
-import logging
+from datetime import datetime
+from typing import Any, Optional
 
-logger = logging.getLogger(__name__)
-
-
-class HashAlgorithm(Enum):
-    """Supported hashing algorithms."""
-    MD5 = "md5"
-    SHA1 = "sha1"
-    SHA256 = "sha256"
-    SHA512 = "sha512"
-    xxHASH = "xxhash"
+try:
+    import xxhash
+    HAS_XXHASH = True
+except ImportError:
+    HAS_XXHASH = False
 
 
 @dataclass
 class Fingerprint:
-    """
-    Data fingerprint.
+    """A data fingerprint."""
 
-    Attributes:
-        hash_value: Hash of the data.
-        algorithm: Hash algorithm used.
-        chunk_count: Number of chunks (for chunked fingerprinting).
-        size_bytes: Original data size.
-    """
-    hash_value: str
-    algorithm: HashAlgorithm
-    chunk_count: int = 1
-    size_bytes: int = 0
+    value: str
+    algorithm: str
+    size_bytes: int
+    created_at: datetime = field(default_factory=datetime.now)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __str__(self) -> str:
+        return self.value
+
+    def __len__(self) -> int:
+        return len(self.value)
+
+
+class FingerprintGenerator:
+    """Generates fingerprints for various data types."""
+
+    def __init__(self, default_algorithm: str = "xxhash64"):
+        self.default_algorithm = default_algorithm
+
+    def fingerprint_bytes(
+        self,
+        data: bytes,
+        algorithm: Optional[str] = None,
+    ) -> Fingerprint:
+        """Generate fingerprint for bytes.
+
+        Args:
+            data: Bytes to fingerprint
+            algorithm: Hash algorithm to use
+
+        Returns:
+            Fingerprint
+        """
+        algo = algorithm or self.default_algorithm
+
+        if algo == "xxhash64":
+            if not HAS_XXHASH:
+                algo = "md5"
+            return self._xxhash64(data)
+        elif algo == "xxhash128":
+            if not HAS_XXHASH:
+                algo = "sha256"
+            return self._xxhash128(data)
+        elif algo == "md5":
+            return self._md5(data)
+        elif algo == "sha1":
+            return self._sha1(data)
+        elif algo == "sha256":
+            return self._sha256(data)
+        else:
+            return self._sha256(data)
+
+    def _xxhash64(self, data: bytes) -> Fingerprint:
+        """Generate xxhash64 fingerprint."""
+        h = xxhash.xxh64(data)
+        return Fingerprint(
+            value=h.hexdigest(),
+            algorithm="xxhash64",
+            size_bytes=len(data),
+        )
+
+    def _xxhash128(self, data: bytes) -> Fingerprint:
+        """Generate xxhash128 fingerprint."""
+        h = xxhash.xxh128(data)
+        return Fingerprint(
+            value=h.hexdigest(),
+            algorithm="xxhash128",
+            size_bytes=len(data),
+        )
+
+    def _md5(self, data: bytes) -> Fingerprint:
+        """Generate MD5 fingerprint."""
+        return Fingerprint(
+            value=hashlib.md5(data).hexdigest(),
+            algorithm="md5",
+            size_bytes=len(data),
+        )
+
+    def _sha1(self, data: bytes) -> Fingerprint:
+        """Generate SHA1 fingerprint."""
+        return Fingerprint(
+            value=hashlib.sha1(data).hexdigest(),
+            algorithm="sha1",
+            size_bytes=len(data),
+        )
+
+    def _sha256(self, data: bytes) -> Fingerprint:
+        """Generate SHA256 fingerprint."""
+        return Fingerprint(
+            value=hashlib.sha256(data).hexdigest(),
+            algorithm="sha256",
+            size_bytes=len(data),
+        )
+
+    def fingerprint_string(
+        self,
+        text: str,
+        algorithm: Optional[str] = None,
+    ) -> Fingerprint:
+        """Generate fingerprint for string."""
+        return self.fingerprint_bytes(text.encode("utf-8"), algorithm)
+
+    def fingerprint_dict(
+        self,
+        data: dict[str, Any],
+        algorithm: Optional[str] = None,
+        sort_keys: bool = True,
+    ) -> Fingerprint:
+        """Generate fingerprint for dictionary."""
+        json_str = json.dumps(data, sort_keys=sort_keys, default=str)
+        return self.fingerprint_string(json_str, algorithm)
+
+    def fingerprint_list(
+        self,
+        data: list[Any],
+        algorithm: Optional[str] = None,
+    ) -> Fingerprint:
+        """Generate fingerprint for list."""
+        json_str = json.dumps(data, sort_keys=True, default=str)
+        return self.fingerprint_string(json_str, algorithm)
 
 
 @dataclass
-class SimilarityMatch:
-    """Similarity match result."""
-    fingerprint1: str
-    fingerprint2: str
-    similarity_score: float
-    match_type: str
+class RollingHash:
+    """Rolling hash for streaming/chunked fingerprinting."""
+
+    window_size: int = 64
+    prime: int = 1000000007
+    base: int = 31
+
+    _hash: int = 0
+    _power: int = 0
+    _buffer: list[int] = field(default_factory=list)
+
+    def __post_init__(self):
+        self._power = pow(self.base, self.window_size - 1, self.prime)
+
+    def update(self, byte_value: int) -> None:
+        """Update hash with a new byte."""
+        self._hash = (self._hash * self.base + byte_value) % self.prime
+        self._buffer.append(byte_value)
+
+        if len(self._buffer) > self.window_size:
+            removed = self._buffer.pop(0)
+            self._hash = (self._hash - removed * self._power) % self.prime
+            if self._hash < 0:
+                self._hash += self.prime
+
+    def value(self) -> int:
+        """Get current hash value."""
+        return self._hash
+
+    def reset(self) -> None:
+        """Reset the hash."""
+        self._hash = 0
+        self._buffer.clear()
 
 
-class DataFingerprintAction:
+@dataclass
+class ContentDefinedChunker:
+    """Content-defined chunking for deduplication.
+
+    Splits data into variable-sized chunks based on content
+    rather than fixed offsets.
     """
-    Data fingerprinting and deduplication.
 
-    Example:
-        fingerprinter = DataFingerprintAction()
-        fp = fingerprinter.fingerprint(data, algorithm=HashAlgorithm.SHA256)
-        fingerprinter.is_duplicate(fp)
-    """
+    chunk_min_size: int = 512
+    chunk_max_size: int = 8192
+    average_size: int = 4096
+    mask: int = 0xFFF
 
-    def __init__(self):
-        """Initialize data fingerprint action."""
-        self._fingerprints: dict[str, Fingerprint] = {}
-        self._seen_hashes: set = set()
-
-    def fingerprint(
-        self,
-        data: Any,
-        algorithm: HashAlgorithm = HashAlgorithm.SHA256,
-        chunk_size: Optional[int] = None
-    ) -> Fingerprint:
-        """
-        Generate fingerprint for data.
+    def chunk_bytes(self, data: bytes) -> list[bytes]:
+        """Split data into chunks.
 
         Args:
-            data: Data to fingerprint.
-            algorithm: Hash algorithm to use.
-            chunk_size: Chunk size for large data (None for single hash).
+            data: Data to chunk
 
         Returns:
-            Fingerprint object.
-        """
-        if isinstance(data, str):
-            data_bytes = data.encode("utf-8")
-        elif isinstance(data, bytes):
-            data_bytes = data
-        else:
-            data_bytes = str(data).encode("utf-8")
-
-        size_bytes = len(data_bytes)
-
-        if chunk_size and size_bytes > chunk_size:
-            hash_value, chunk_count = self._chunked_hash(data_bytes, algorithm, chunk_size)
-        else:
-            hash_value = self._hash_bytes(data_bytes, algorithm)
-            chunk_count = 1
-
-        fp = Fingerprint(
-            hash_value=hash_value,
-            algorithm=algorithm,
-            chunk_count=chunk_count,
-            size_bytes=size_bytes
-        )
-
-        self._fingerprints[hash_value] = fp
-        self._seen_hashes.add(hash_value)
-
-        return fp
-
-    def _hash_bytes(
-        self,
-        data: bytes,
-        algorithm: HashAlgorithm
-    ) -> str:
-        """Hash bytes with specified algorithm."""
-        if algorithm == HashAlgorithm.MD5:
-            return hashlib.md5(data).hexdigest()
-        elif algorithm == HashAlgorithm.SHA1:
-            return hashlib.sha1(data).hexdigest()
-        elif algorithm == HashAlgorithm.SHA256:
-            return hashlib.sha256(data).hexdigest()
-        elif algorithm == HashAlgorithm.SHA512:
-            return hashlib.sha512(data).hexdigest()
-        elif algorithm == HashAlgorithm.xxHASH:
-            try:
-                import xxhash
-                return xxhash.xxh64(data).hexdigest()
-            except ImportError:
-                return hashlib.sha256(data).hexdigest()
-
-        return hashlib.sha256(data).hexdigest()
-
-    def _chunked_hash(
-        self,
-        data: bytes,
-        algorithm: HashAlgorithm,
-        chunk_size: int
-    ) -> tuple[str, int]:
-        """Hash data in chunks (for large data)."""
-        chunk_hashes = []
-
-        for i in range(0, len(data), chunk_size):
-            chunk = data[i:i + chunk_size]
-            chunk_hash = self._hash_bytes(chunk, algorithm)
-            chunk_hashes.append(chunk_hash)
-
-        combined = "".join(chunk_hashes).encode()
-        total_hash = self._hash_bytes(combined, HashAlgorithm.SHA256)
-
-        return total_hash, len(chunk_hashes)
-
-    def is_duplicate(
-        self,
-        fingerprint: Fingerprint,
-        check_similar: bool = False
-    ) -> tuple[bool, Optional[str]]:
-        """
-        Check if fingerprint is duplicate.
-
-        Args:
-            fingerprint: Fingerprint to check.
-            check_similar: Also check for similar fingerprints.
-
-        Returns:
-            Tuple of (is_duplicate, original_hash).
-        """
-        if fingerprint.hash_value in self._seen_hashes:
-            for hash_val, fp in self._fingerprints.items():
-                if fp.hash_value == fingerprint.hash_value and hash_val != fingerprint.hash_value:
-                    return True, hash_val
-
-        return False, None
-
-    def find_similar(
-        self,
-        fingerprint: Fingerprint,
-        threshold: float = 0.9
-    ) -> list[SimilarityMatch]:
-        """
-        Find similar fingerprints.
-
-        Args:
-            fingerprint: Fingerprint to compare.
-            threshold: Similarity threshold (0-1).
-
-        Returns:
-            List of SimilarityMatch objects.
-        """
-        matches = []
-
-        for hash_val, fp in self._fingerprints.items():
-            if hash_val == fingerprint.hash_value:
-                continue
-
-            score = self._calculate_similarity(fingerprint, fp)
-
-            if score >= threshold:
-                matches.append(SimilarityMatch(
-                    fingerprint1=fingerprint.hash_value,
-                    fingerprint2=hash_val,
-                    similarity_score=score,
-                    match_type="partial" if score < 1.0 else "exact"
-                ))
-
-        return matches
-
-    def _calculate_similarity(
-        self,
-        fp1: Fingerprint,
-        fp2: Fingerprint
-    ) -> float:
-        """Calculate similarity between two fingerprints."""
-        if fp1.size_bytes == 0 or fp2.size_bytes == 0:
-            return 0.0
-
-        size_ratio = min(fp1.size_bytes, fp2.size_bytes) / max(fp1.size_bytes, fp2.size_bytes)
-
-        hash_distance = self._hamming_distance(fp1.hash_value, fp2.hash_value)
-        max_distance = len(fp1.hash_value) * 4
-
-        hash_similarity = 1.0 - (hash_distance / max_distance)
-
-        return (size_ratio + hash_similarity) / 2.0
-
-    def _hamming_distance(self, hash1: str, hash2: str) -> int:
-        """Calculate Hamming distance between two hashes."""
-        if len(hash1) != len(hash2):
-            return abs(len(hash1) - len(hash2)) * 4
-
-        distance = 0
-        for c1, c2 in zip(hash1, hash2):
-            if c1 != c2:
-                distance += 1
-
-        return distance
-
-    def dedupe_list(
-        self,
-        items: list,
-        key_func: Optional[Callable[[Any], Any]] = None
-    ) -> list:
-        """
-        Deduplicate list while preserving order.
-
-        Args:
-            items: List of items.
-            key_func: Optional function to extract comparison key.
-
-        Returns:
-            Deduplicated list.
-        """
-        seen = set()
-        result = []
-
-        for item in items:
-            key = key_func(item) if key_func else item
-
-            if key not in seen:
-                seen.add(key)
-                result.append(item)
-
-        logger.info(f"Deduplicated {len(items)} -> {len(result)} items")
-        return result
-
-    def content_define_chunking(
-        self,
-        data: bytes,
-        chunk_min: int = 512,
-        chunk_max: int = 4096
-    ) -> list[tuple[int, bytes]]:
-        """
-        Content-defined chunking (CDC) for deduplication.
-
-        Args:
-            data: Data to chunk.
-            chunk_min: Minimum chunk size.
-            chunk_max: Maximum chunk size.
-
-        Returns:
-            List of (offset, chunk_data) tuples.
+            List of chunk bytes
         """
         chunks = []
         i = 0
+        n = len(data)
 
-        while i < len(data):
-            chunk_end = min(i + chunk_max, len(data))
+        while i < n:
+            window_end = min(i + self.chunk_max_size, n)
 
-            if chunk_end - i < chunk_min:
-                chunk_end = min(i + chunk_min, len(data))
+            if window_end - i < self.chunk_min_size:
+                chunk_end = min(i + self.average_size, n)
+            else:
+                chunk_end = self._find_chunk_end(data, i, window_end)
 
-            chunk = data[i:chunk_end]
-            chunks.append((i, chunk))
-
+            chunks.append(data[i:chunk_end])
             i = chunk_end
 
         return chunks
 
-    def get_stats(self) -> dict:
-        """Get fingerprint statistics."""
-        return {
-            "total_fingerprints": len(self._fingerprints),
-            "unique_hashes": len(self._seen_hashes)
-        }
+    def _find_chunk_end(self, data: bytes, start: int, end: int) -> int:
+        """Find chunk boundary using rolling hash."""
+        for i in range(start + self.chunk_min_size, end):
+            if i + 1 >= end:
+                return end
 
-    def clear(self) -> None:
-        """Clear all fingerprints."""
-        self._fingerprints.clear()
-        self._seen_hashes.clear()
+            window = data[i - self.chunk_min_size + 1:i + 1]
+            if len(window) < self.chunk_min_size:
+                continue
+
+            rolling = RollingHash(window_size=self.chunk_min_size)
+            for b in window:
+                rolling.update(b)
+
+            if rolling.value() & self.mask == 0:
+                return i + 1
+
+        return end
+
+
+@dataclass
+class SimilarityFingerprint:
+    """Simhash-style similarity fingerprint."""
+
+    value: int
+    dimensions: int = 64
+
+    def hamming_distance(self, other: "SimilarityFingerprint") -> int:
+        """Calculate Hamming distance to another fingerprint."""
+        xor = self.value ^ other.value
+        distance = 0
+        while xor:
+            distance += 1
+            xor &= xor - 1
+        return distance
+
+    def is_similar(
+        self,
+        other: "SimilarityFingerprint",
+        threshold: int = 3,
+    ) -> bool:
+        """Check if fingerprints are similar."""
+        return self.hamming_distance(other) <= threshold
+
+
+def generate_simhash(data: list[int]) -> SimilarityFingerprint:
+    """Generate simhash from feature vector.
+
+    Args:
+        data: List of feature hashes
+
+    Returns:
+        SimilarityFingerprint
+    """
+    v = [0] * 64
+
+    for feature_hash in data:
+        for i in range(64):
+            if feature_hash & (1 << i):
+                v[i] += 1
+            else:
+                v[i] -= 1
+
+    fingerprint = 0
+    for i in range(64):
+        if v[i] > 0:
+            fingerprint |= 1 << i
+
+    return SimilarityFingerprint(value=fingerprint)
