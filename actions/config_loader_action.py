@@ -1,153 +1,201 @@
-"""Config Loader Action Module.
+"""
+Configuration Loader Action Module.
 
-Load and manage configuration from multiple sources with hot reload.
+Loads and manages configuration for automation workflows,
+supporting JSON, YAML, and environment variable sources.
 """
 
-from __future__ import annotations
-
-import asyncio
 import json
 import os
-from dataclasses import dataclass, field
-from enum import Enum
-from pathlib import Path
-from typing import Any, Callable
-import yaml
+from typing import Any, Callable, Optional
 
 
-class ConfigFormat(Enum):
-    """Supported config formats."""
-    JSON = "json"
-    YAML = "yaml"
-    ENV = "env"
-    INI = "ini"
+class ConfigLoader:
+    """Loads and manages configuration from various sources."""
 
+    def __init__(self):
+        """Initialize configuration loader."""
+        self._config: dict[str, Any] = {}
+        self._env_prefix = ""
+        self._env_transform: Optional[Callable[[str], str]] = None
 
-@dataclass
-class ConfigSource:
-    """Configuration source."""
-    path: str
-    format: ConfigFormat
-    priority: int = 0
-    required: bool = False
-    reload_interval: float | None = None
+    def load_json(
+        self,
+        filepath: str,
+        merge: bool = False,
+    ) -> bool:
+        """
+        Load configuration from JSON file.
 
+        Args:
+            filepath: Path to JSON file.
+            merge: If True, merge with existing config.
 
-@dataclass
-class ConfigValue:
-    """Configuration value with metadata."""
-    value: Any
-    source: str
-    modified_at: float
-
-
-class ConfigLoadError(Exception):
-    """Configuration load error."""
-    pass
-
-
-class ConfigManager:
-    """Configuration manager with multi-source loading."""
-
-    def __init__(self) -> None:
-        self._sources: dict[str, ConfigSource] = {}
-        self._config: dict[str, ConfigValue] = {}
-        self._watchers: list[Callable[[str, Any], None]] = []
-        self._lock = asyncio.Lock()
-        self._reload_tasks: dict[str, asyncio.Task] = {}
-
-    def add_source(self, source: ConfigSource) -> None:
-        """Add a configuration source."""
-        self._sources[source.path] = source
-        if source.reload_interval:
-            task = asyncio.create_task(self._watch_source(source))
-            self._reload_tasks[source.path] = task
-
-    async def load(self) -> dict[str, Any]:
-        """Load all configuration sources."""
-        await self._lock.acquire()
+        Returns:
+            True if loaded successfully.
+        """
         try:
-            all_configs = {}
-            sorted_sources = sorted(self._sources.values(), key=lambda s: s.priority)
-            for source in sorted_sources:
-                if source.format == ConfigFormat.JSON:
-                    data = await self._load_json(source.path, source.required)
-                elif source.format == ConfigFormat.YAML:
-                    data = await self._load_yaml(source.path, source.required)
-                elif source.format == ConfigFormat.ENV:
-                    data = await self._load_env(source.path)
-                else:
-                    data = {}
-                self._merge_config(all_configs, data, source.path)
-            return all_configs
-        finally:
-            self._lock.release()
+            with open(filepath, "r") as f:
+                data = json.load(f)
 
-    async def get(self, key: str, default: Any = None) -> Any:
-        """Get configuration value."""
-        await self._lock.acquire()
+            if merge:
+                self._deep_merge(self._config, data)
+            else:
+                self._config = data
+
+            return True
+        except (FileNotFoundError, json.JSONDecodeError):
+            return False
+
+    def load_yaml(
+        self,
+        filepath: str,
+        merge: bool = False,
+    ) -> bool:
+        """
+        Load configuration from YAML file.
+
+        Args:
+            filepath: Path to YAML file.
+            merge: If True, merge with existing config.
+
+        Returns:
+            True if loaded successfully.
+        """
         try:
-            return self._config.get(key, ConfigValue(default, "", 0)).value
-        finally:
-            self._lock.release()
+            import yaml
+            with open(filepath, "r") as f:
+                data = yaml.safe_load(f)
 
-    async def set(self, key: str, value: Any, source: str = "memory") -> None:
-        """Set configuration value in memory."""
-        await self._lock.acquire()
-        try:
-            self._config[key] = ConfigValue(value, source, asyncio.get_event_loop().time())
-        finally:
-            self._lock.release()
+            if data is None:
+                data = {}
 
-    def on_change(self, callback: Callable[[str, Any], None]) -> None:
-        """Register change callback."""
-        self._watchers.append(callback)
+            if merge:
+                self._deep_merge(self._config, data)
+            else:
+                self._config = data
 
-    async def _load_json(self, path: str, required: bool) -> dict:
-        """Load JSON configuration."""
-        if not os.path.exists(path):
-            if required:
-                raise ConfigLoadError(f"Required config file not found: {path}")
-            return {}
-        with open(path) as f:
-            return json.load(f)
+            return True
+        except ImportError:
+            return False
+        except (FileNotFoundError, yaml.YAMLError):
+            return False
 
-    async def _load_yaml(self, path: str, required: bool) -> dict:
-        """Load YAML configuration."""
-        if not os.path.exists(path):
-            if required:
-                raise ConfigLoadError(f"Required config file not found: {path}")
-            return {}
-        with open(path) as f:
-            return yaml.safe_load(f) or {}
+    def load_env(
+        self,
+        prefix: str = "",
+        transform: Optional[Callable[[str], str]] = None,
+    ) -> None:
+        """
+        Load configuration from environment variables.
 
-    async def _load_env(self, prefix: str) -> dict:
-        """Load environment variables with prefix."""
-        result = {}
+        Args:
+            prefix: Only load vars with this prefix.
+            transform: Optional function to transform env var names.
+        """
+        self._env_prefix = prefix
+        self._env_transform = transform
+
         for key, value in os.environ.items():
-            if key.startswith(prefix):
+            if prefix and not key.startswith(prefix):
+                continue
+
+            config_key = key
+            if transform:
+                config_key = transform(key)
+            elif prefix:
                 config_key = key[len(prefix):].lower()
-                result[config_key] = value
-        return result
 
-    def _merge_config(self, target: dict, source: dict, source_name: str) -> None:
-        """Merge source config into target."""
-        import time
+            self._config[config_key] = self._parse_value(value)
+
+    def get(
+        self,
+        key: str,
+        default: Any = None,
+    ) -> Any:
+        """
+        Get a configuration value.
+
+        Args:
+            key: Dot-separated key path (e.g., 'database.host').
+            default: Default value if key not found.
+
+        Returns:
+            Configuration value or default.
+        """
+        parts = key.split(".")
+        current = self._config
+
+        for part in parts:
+            if not isinstance(current, dict):
+                return default
+            current = current.get(part)
+            if current is None:
+                return default
+
+        return current
+
+    def set(
+        self,
+        key: str,
+        value: Any,
+    ) -> None:
+        """
+        Set a configuration value.
+
+        Args:
+            key: Dot-separated key path.
+            value: Value to set.
+        """
+        parts = key.split(".")
+        current = self._config
+
+        for part in parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            current = current[part]
+
+        current[parts[-1]] = value
+
+    def get_all(self) -> dict[str, Any]:
+        """
+        Get entire configuration dictionary.
+
+        Returns:
+            Full configuration.
+        """
+        return dict(self._config)
+
+    def _deep_merge(
+        self,
+        target: dict,
+        source: dict,
+    ) -> None:
+        """Deep merge source into target."""
         for key, value in source.items():
-            target[key] = value
-            self._config[key] = ConfigValue(value, source_name, time.time())
+            if key in target and isinstance(target[key], dict) and isinstance(value, dict):
+                self._deep_merge(target[key], value)
+            else:
+                target[key] = value
 
-    async def _watch_source(self, source: ConfigSource) -> None:
-        """Watch source for changes."""
-        if not source.reload_interval:
-            return
-        mtime = os.path.getmtime(source.path) if os.path.exists(source.path) else 0
-        while True:
-            await asyncio.sleep(source.reload_interval)
-            if os.path.exists(source.path):
-                new_mtime = os.path.getmtime(source.path)
-                if new_mtime != mtime:
-                    mtime = new_mtime
-                    await self.load()
-                    for watcher in self._watchers:
-                        watcher(source.path, None)
+    @staticmethod
+    def _parse_value(value: str) -> Any:
+        """Parse string value to appropriate type."""
+        if value.lower() == "true":
+            return True
+        if value.lower() == "false":
+            return False
+        if value.lower() == "null" or value.lower() == "none":
+            return None
+
+        try:
+            return int(value)
+        except ValueError:
+            pass
+
+        try:
+            return float(value)
+        except ValueError:
+            pass
+
+        return value
