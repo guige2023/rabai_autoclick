@@ -1,246 +1,174 @@
-"""Data Quota Action Module.
-
-Provides quota management with usage tracking,
-thresholds, and notification hooks.
 """
+Data Quota Action Module.
+
+Implements per-client data quotas and fair usage tracking.
+"""
+
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
 from collections import defaultdict
-import logging
-
-logger = logging.getLogger(__name__)
-
-
-class QuotaScope(Enum):
-    """Quota scope."""
-    DAILY = "daily"
-    HOURLY = "hourly"
-    MONTHLY = "monthly"
-    TOTAL = "total"
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional
 
 
 @dataclass
 class QuotaLimit:
-    """Quota limit configuration."""
-    name: str
-    limit: int
-    scope: QuotaScope = QuotaScope.TOTAL
-    window_start: Optional[float] = None
+    """Defines a quota limit."""
+    max_bytes: int
+    window_seconds: int
+    burst_bytes: Optional[int] = None
 
 
 @dataclass
 class QuotaUsage:
-    """Quota usage tracking."""
-    name: str
-    used: int
-    limit: int
-    window_start: float
-    window_end: float
-    percentage: float
+    """Tracks quota usage for a client."""
+    client_id: str
+    total_bytes: int = 0
+    window_start: float = field(default_factory=time.time)
+    request_count: int = 0
+    blocked_count: int = 0
 
 
 class DataQuotaAction:
-    """Quota management with usage tracking.
+    """
+    Enforces data quotas per client with sliding window.
 
-    Example:
-        quota = DataQuotaAction()
-
-        quota.set_limit(QuotaLimit(
-            name="api_calls",
-            limit=1000,
-            scope=QuotaScope.DAILY
-        ))
-
-        if quota.check("api_calls"):
-            quota.increment("api_calls")
-        else:
-            print("Quota exceeded")
+    Tracks usage and blocks requests when limits exceeded.
     """
 
-    def __init__(self) -> None:
-        self._limits: Dict[str, QuotaLimit] = {}
-        self._usage: Dict[str, List[float]] = defaultdict(list)
-        self._hooks: Dict[str, List[Callable]] = {
-            "warning": [],
-            "exceeded": [],
-            "reset": [],
+    def __init(
+        self,
+        default_limit: QuotaLimit,
+        per_client_limits: Optional[Dict[str, QuotaLimit]] = None,
+    ) -> None:
+        self.default_limit = default_limit
+        self.per_client_limits = per_client_limits or {}
+        self._usage: Dict[str, QuotaUsage] = {}
+        self._burst_tokens: Dict[str, float] = defaultdict(float)
+
+    def check(self, client_id: str, data_bytes: int) -> tuple[bool, Dict[str, Any]]:
+        """
+        Check if request is within quota.
+
+        Args:
+            client_id: Client identifier
+            data_bytes: Size of data request
+
+        Returns:
+            Tuple of (allowed, info_dict)
+        """
+        limit = self.per_client_limits.get(client_id, self.default_limit)
+        usage = self._get_or_create_usage(client_id)
+
+        self._cleanup_window(client_id, limit)
+
+        remaining_bytes = limit.max_bytes - usage.total_bytes
+        allowed = usage.total_bytes + data_bytes <= limit.max_bytes
+
+        info = {
+            "allowed": allowed,
+            "client_id": client_id,
+            "limit_bytes": limit.max_bytes,
+            "used_bytes": usage.total_bytes,
+            "remaining_bytes": max(0, remaining_bytes),
+            "window_seconds": limit.window_seconds,
+            "blocked": not allowed,
         }
 
-    def set_limit(self, limit: QuotaLimit) -> None:
-        """Set quota limit.
+        return allowed, info
 
-        Args:
-            limit: QuotaLimit configuration
+    def record(self, client_id: str, data_bytes: int) -> bool:
         """
-        self._limits[limit.name] = limit
-
-        if limit.scope != QuotaScope.TOTAL:
-            self._usage[limit.name] = []
-
-    def check(self, name: str, amount: int = 1) -> bool:
-        """Check if quota allows the request.
+        Record data usage for a client.
 
         Args:
-            name: Quota name
-            amount: Amount to check
+            client_id: Client identifier
+            data_bytes: Size of data transferred
 
         Returns:
-            True if within quota
+            True if recorded, False if would exceed quota
         """
-        if name not in self._limits:
+        allowed, _ = self.check(client_id, data_bytes)
+
+        if allowed:
+            usage = self._get_or_create_usage(client_id)
+            usage.total_bytes += data_bytes
+            usage.request_count += 1
             return True
 
-        limit = self._limits[name]
-        current_usage = self._get_current_usage(name)
+        usage = self._get_or_create_usage(client_id)
+        usage.blocked_count += 1
+        return False
 
-        return current_usage + amount <= limit.limit
+    def _get_or_create_usage(self, client_id: str) -> QuotaUsage:
+        """Get or create usage record for client."""
+        if client_id not in self._usage:
+            self._usage[client_id] = QuotaUsage(client_id=client_id)
+        return self._usage[client_id]
 
-    def increment(self, name: str, amount: int = 1) -> None:
-        """Increment quota usage.
+    def _cleanup_window(self, client_id: str, limit: QuotaLimit) -> None:
+        """Reset window if expired."""
+        usage = self._get_or_create_usage(client_id)
+        elapsed = time.time() - usage.window_start
 
-        Args:
-            name: Quota name
-            amount: Amount to increment
-        """
-        limit = self._limits.get(name)
-        if not limit:
-            return
+        if elapsed >= limit.window_seconds:
+            usage.total_bytes = 0
+            usage.window_start = time.time()
+            usage.request_count = 0
 
-        if limit.scope != QuotaScope.TOTAL:
-            now = time.time()
-            self._prune_usage(name, limit)
-            self._usage[name].append(now)
+    def get_usage(self, client_id: str) -> Dict[str, Any]:
+        """Get current usage for a client."""
+        limit = self.per_client_limits.get(client_id, self.default_limit)
+        usage = self._get_or_create_usage(client_id)
 
-        self._check_hooks(name)
+        self._cleanup_window(client_id, limit)
 
-    def _prune_usage(self, name: str, limit: QuotaLimit) -> None:
-        """Prune expired usage entries."""
-        now = time.time()
-        window_start = self._get_window_start(limit.scope, now)
-        self._usage[name] = [
-            t for t in self._usage[name]
-            if t >= window_start
-        ]
+        return {
+            "client_id": client_id,
+            "limit_bytes": limit.max_bytes,
+            "used_bytes": usage.total_bytes,
+            "remaining_bytes": limit.max_bytes - usage.total_bytes,
+            "request_count": usage.request_count,
+            "blocked_count": usage.blocked_count,
+            "window_seconds": limit.window_seconds,
+        }
 
-    def _get_current_usage(self, name: str) -> int:
-        """Get current usage count."""
-        limit = self._limits.get(name)
-        if not limit:
-            return 0
+    def reset(self, client_id: str) -> bool:
+        """Reset quota for a client."""
+        if client_id in self._usage:
+            self._usage[client_id].total_bytes = 0
+            self._usage[client_id].window_start = time.time()
+            self._usage[client_id].request_count = 0
+            self._usage[client_id].blocked_count = 0
+            return True
+        return False
 
-        if limit.scope == QuotaScope.TOTAL:
-            return len(self._usage[name])
+    def reset_all(self) -> int:
+        """Reset all quotas."""
+        count = len(self._usage)
+        for usage in self._usage.values():
+            usage.total_bytes = 0
+            usage.window_start = time.time()
+            usage.request_count = 0
+            usage.blocked_count = 0
+        return count
 
-        self._prune_usage(name, limit)
-        return len(self._usage[name])
+    def get_all_usage(self) -> Dict[str, Dict[str, Any]]:
+        """Get usage for all clients."""
+        return {cid: self.get_usage(cid) for cid in self._usage}
 
-    def _get_window_start(self, scope: QuotaScope, now: float) -> float:
-        """Get window start time."""
-        if scope == QuotaScope.HOURLY:
-            return now - 3600
-        elif scope == QuotaScope.DAILY:
-            return now - 86400
-        elif scope == QuotaScope.MONTHLY:
-            return now - 2592000
-        return 0
-
-    def _check_hooks(self, name: str) -> None:
-        """Check and trigger hooks."""
-        limit = self._limits.get(name)
-        if not limit:
-            return
-
-        usage = self._get_current_usage(name)
-        percentage = (usage / limit.limit * 100) if limit.limit > 0 else 0
-
-        if percentage >= 100:
-            for hook in self._hooks["exceeded"]:
-                try:
-                    hook(name, usage, limit.limit)
-                except Exception as e:
-                    logger.error(f"Hook error: {e}")
-
-        elif percentage >= 80:
-            for hook in self._hooks["warning"]:
-                try:
-                    hook(name, usage, limit.limit)
-                except Exception as e:
-                    logger.error(f"Hook error: {e}")
-
-    def add_hook(
+    def set_limit(
         self,
-        event: str,
-        hook: Callable,
-    ) -> "DataQuotaAction":
-        """Add quota hook.
+        client_id: str,
+        limit: QuotaLimit,
+    ) -> None:
+        """Set custom limit for a client."""
+        self.per_client_limits[client_id] = limit
 
-        Returns self for chaining.
-        """
-        if event in self._hooks:
-            self._hooks[event].append(hook)
-        return self
-
-    def get_usage(self, name: str) -> Optional[QuotaUsage]:
-        """Get current quota usage.
-
-        Returns:
-            QuotaUsage or None if quota not found
-        """
-        if name not in self._limits:
-            return None
-
-        limit = self._limits[name]
-        now = time.time()
-        used = self._get_current_usage(name)
-        window_start = self._get_window_start(limit.scope, now)
-
-        window_end = now
-        if limit.scope == QuotaScope.HOURLY:
-            window_end = window_start + 3600
-        elif limit.scope == QuotaScope.DAILY:
-            window_end = window_start + 86400
-        elif limit.scope == QuotaScope.MONTHLY:
-            window_end = window_start + 2592000
-
-        percentage = (used / limit.limit * 100) if limit.limit > 0 else 0
-
-        return QuotaUsage(
-            name=name,
-            used=used,
-            limit=limit.limit,
-            window_start=window_start,
-            window_end=window_end,
-            percentage=percentage,
-        )
-
-    def get_all_usage(self) -> List[QuotaUsage]:
-        """Get usage for all quotas."""
-        return [
-            usage for name, usage in [
-                (name, self.get_usage(name)) for name in self._limits
-            ] if usage is not None
-        ]
-
-    def reset(self, name: str) -> None:
-        """Reset quota usage.
-
-        Args:
-            name: Quota name
-        """
-        if name in self._usage:
-            self._usage[name].clear()
-
-        for hook in self._hooks["reset"]:
-            try:
-                hook(name)
-            except Exception as e:
-                logger.error(f"Hook error: {e}")
-
-    def reset_all(self) -> None:
-        """Reset all quota usage."""
-        for name in self._limits:
-            self.reset(name)
+    def remove_limit(self, client_id: str) -> bool:
+        """Remove custom limit, revert to default."""
+        if client_id in self.per_client_limits:
+            del self.per_client_limits[client_id]
+            return True
+        return False
