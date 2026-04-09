@@ -1,448 +1,289 @@
 """
-API response caching middleware with TTL and invalidation.
+API Compression Action Module
 
-This module provides intelligent caching for API responses with support
-for TTL-based expiration, manual invalidation, and cache-aside patterns.
+Handles gzip, deflate, and brotli compression for API requests/responses.
+Content negotiation, streaming compression, and memory-efficient buffering.
 
-Author: RabAiBot
-License: MIT
+MIT License - Copyright (c) 2025 RabAi Research
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
+import gzip
+import io
 import logging
-import time
+import zlib
 from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-from collections import OrderedDict
-import threading
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
 
-class CacheStrategy(Enum):
-    """Cache invalidation strategy."""
-    LRU = auto()      # Least Recently Used
-    LFU = auto()      # Least Frequently Used
-    FIFO = auto()     # First In First Out
-    TTL = auto()      # Time To Live based
+class CompressionType(Enum):
+    """Supported compression algorithms."""
+    
+    NONE = "none"
+    GZIP = "gzip"
+    DEFLATE = "deflate"
+    BRØTLI = "brøtli"
+
+
+class CompressionLevel(Enum):
+    """Compression speed vs ratio tradeoffs."""
+    
+    BEST_SPEED = "best_speed"
+    BEST_RATIO = "best_ratio"
+    DEFAULT = "default"
 
 
 @dataclass
-class CacheEntry:
-    """Represents a cached item."""
-    key: str
-    value: Any
-    created_at: float
-    last_accessed: float
-    access_count: int = 0
-    ttl: Optional[float] = None
-    tags: List[str] = field(default_factory=list)
-    size_bytes: int = 0
-
-    @property
-    def is_expired(self) -> bool:
-        """Check if entry has expired."""
-        if self.ttl is None:
-            return False
-        return time.time() - self.created_at > self.ttl
-
-    @property
-    def age(self) -> float:
-        """Get age of entry in seconds."""
-        return time.time() - self.created_at
-
-    def touch(self) -> None:
-        """Update access metadata."""
-        self.last_accessed = time.time()
-        self.access_count += 1
+class CompressionConfig:
+    """Configuration for compression behavior."""
+    
+    enabled: bool = True
+    min_size_bytes: int = 1024
+    compression_type: CompressionType = CompressionType.GZIP
+    compression_level: CompressionLevel = CompressionLevel.DEFAULT
+    streaming_threshold: int = 65536
+    include_size_header: bool = True
+    include_ratio_header: bool = True
 
 
 @dataclass
-class CacheStats:
-    """Cache statistics."""
-    hits: int = 0
-    misses: int = 0
-    sets: int = 0
-    evictions: int = 0
-    expirations: int = 0
-    invalidations: int = 0
+class CompressionStats:
+    """Statistics for compression operations."""
+    
+    total_requests: int = 0
+    compressed_requests: int = 0
+    total_original_bytes: int = 0
+    total_compressed_bytes: int = 0
+    compression_ratio: float = 0.0
+    
+    def record(self, original_size: int, compressed_size: int) -> None:
+        """Record a compression operation."""
+        self.total_requests += 1
+        if compressed_size < original_size:
+            self.compressed_requests += 1
+        self.total_original_bytes += original_size
+        self.total_compressed_bytes += compressed_size
+        if self.total_original_bytes > 0:
+            self.compression_ratio = (
+                self.total_original_bytes - self.total_compressed_bytes
+            ) / self.total_original_bytes
 
-    @property
-    def hit_rate(self) -> float:
-        """Calculate cache hit rate."""
-        total = self.hits + self.misses
-        return (self.hits / total) if total > 0 else 0.0
 
-
-class Cache:
-    """
-    In-memory cache with multiple eviction strategies.
-
-    Features:
-    - LRU, LFU, FIFO, and TTL-based eviction
-    - Configurable max size and TTL
-    - Tag-based invalidation
-    - Thread-safe operations
-    - Statistics tracking
-    - Async support
-
-    Example:
-        >>> cache = Cache(max_size=1000, default_ttl=300)
-        >>> cache.set("user:123", user_data, tags=["user", "premium"])
-        >>> data = cache.get("user:123")
-        >>> cache.invalidate_tags("premium")
-    """
-
-    def __init__(
-        self,
-        max_size: int = 1000,
-        default_ttl: Optional[float] = None,
-        strategy: CacheStrategy = CacheStrategy.LRU,
-        on_evict: Optional[Callable[[str, Any], None]] = None,
-    ):
-        """
-        Initialize cache.
-
-        Args:
-            max_size: Maximum number of entries
-            default_ttl: Default time-to-live in seconds
-            strategy: Eviction strategy
-            on_evict: Optional callback when entries are evicted
-        """
-        self.max_size = max_size
-        self.default_ttl = default_ttl
-        self.strategy = strategy
-        self.on_evict = on_evict
-
-        self._store: OrderedDict[str, CacheEntry] = OrderedDict()
-        self._tag_index: Dict[str, set] = {}
-        self._lock = threading.RLock()
-        self._stats = CacheStats()
-        self._total_size = 0
-
-        logger.info(
-            f"Cache initialized (max_size={max_size}, ttl={default_ttl}s, "
-            f"strategy={strategy.name})"
-        )
-
-    def set(
-        self,
-        key: str,
-        value: Any,
-        ttl: Optional[float] = None,
-        tags: Optional[List[str]] = None,
-    ) -> None:
-        """
-        Set a cache entry.
-
-        Args:
-            key: Cache key
-            value: Value to cache
-            ttl: Optional TTL override
-            tags: Optional tags for invalidation
-        """
-        with self._lock:
-            if key in self._store:
-                old_entry = self._store[key]
-                self._total_size -= old_entry.size_bytes
-                if self.on_evict:
-                    self.on_evict(key, old_entry.value)
-
-            size = self._estimate_size(value)
-            entry = CacheEntry(
-                key=key,
-                value=value,
-                created_at=time.time(),
-                last_accessed=time.time(),
-                ttl=ttl or self.default_ttl,
-                tags=tags or [],
-                size_bytes=size,
-            )
-
-            self._store[key] = entry
-            self._total_size += size
-            self._update_tag_index(key, entry.tags)
-            self._stats.sets += 1
-
-            if len(self._store) > self.max_size:
-                self._evict_one()
-
-            logger.debug(f"Cache SET: {key} (size={size}b, tags={entry.tags})")
-
-    def get(self, key: str, default: Any = None) -> Any:
-        """
-        Get a cache entry.
-
-        Args:
-            key: Cache key
-            default: Default value if not found
-
-        Returns:
-            Cached value or default
-        """
-        with self._lock:
-            entry = self._store.get(key)
-
-            if entry is None:
-                self._stats.misses += 1
-                logger.debug(f"Cache MISS: {key}")
-                return default
-
-            if entry.is_expired:
-                self._remove_entry(key)
-                self._stats.misses += 1
-                self._stats.expirations += 1
-                logger.debug(f"Cache EXPIRED: {key}")
-                return default
-
-            entry.touch()
-            self._store.move_to_end(key)
-            self._stats.hits += 1
-            logger.debug(f"Cache HIT: {key}")
-            return entry.value
-
-    def get_or_compute(
-        self,
-        key: str,
-        compute_fn: Callable[[], Any],
-        ttl: Optional[float] = None,
-        tags: Optional[List[str]] = None,
-    ) -> Any:
-        """
-        Get from cache or compute and cache the value.
-
-        Args:
-            key: Cache key
-            compute_fn: Function to compute value if not cached
-            ttl: Optional TTL override
-            tags: Optional tags for invalidation
-
-        Returns:
-            Cached or computed value
-        """
-        value = self.get(key)
-        if value is not None:
-            return value
-
-        computed = compute_fn()
-        self.set(key, computed, ttl=ttl, tags=tags)
-        return computed
-
-    async def get_or_compute_async(
-        self,
-        key: str,
-        compute_fn: Callable[[], Any],
-        ttl: Optional[float] = None,
-        tags: Optional[List[str]] = None,
-    ) -> Any:
-        """Async version of get_or_compute."""
-        value = self.get(key)
-        if value is not None:
-            return value
-
-        loop = asyncio.get_event_loop()
-        computed = await loop.run_in_executor(None, compute_fn)
-        self.set(key, computed, ttl=ttl, tags=tags)
-        return computed
-
-    def delete(self, key: str) -> bool:
-        """Delete a cache entry."""
-        with self._lock:
-            if key in self._store:
-                self._remove_entry(key)
-                logger.debug(f"Cache DELETE: {key}")
-                return True
-            return False
-
-    def invalidate_tags(self, *tags: str) -> int:
-        """
-        Invalidate all entries with given tags.
-
-        Args:
-            *tags: Tags to invalidate
-
-        Returns:
-            Number of entries invalidated
-        """
-        with self._lock:
-            keys_to_delete = set()
-            for tag in tags:
-                if tag in self._tag_index:
-                    keys_to_delete.update(self._tag_index[tag])
-
-            for key in keys_to_delete:
-                self._remove_entry(key)
-                self._stats.invalidations += 1
-
-            logger.info(f"Cache INVALIDATE_TAGS: {tags} ({len(keys_to_delete)} entries)")
-            return len(keys_to_delete)
-
-    def clear(self) -> None:
-        """Clear all cache entries."""
-        with self._lock:
-            count = len(self._store)
-            if self.on_evict:
-                for entry in self._store.values():
-                    self.on_evict(entry.key, entry.value)
-
-            self._store.clear()
-            self._tag_index.clear()
-            self._total_size = 0
-            logger.info(f"Cache CLEARED: {count} entries")
-
-    def _remove_entry(self, key: str) -> None:
-        """Remove entry from cache."""
-        if key in self._store:
-            entry = self._store.pop(key)
-            self._total_size -= entry.size_bytes
-
-            for tag in entry.tags:
-                if tag in self._tag_index:
-                    self._tag_index[tag].discard(key)
-
-    def _evict_one(self) -> None:
-        """Evict one entry based on strategy."""
-        if not self._store:
-            return
-
-        if self.strategy == CacheStrategy.LRU:
-            key = next(iter(self._store))
-        elif self.strategy == CacheStrategy.LFU:
-            key = min(self._store, key=lambda k: self._store[k].access_count)
-        elif self.strategy == CacheStrategy.FIFO:
-            key = min(self._store, key=lambda k: self._store[k].created_at)
-        else:
-            key = next(iter(self._store))
-
-        entry = self._store.pop(key)
-        self._total_size -= entry.size_bytes
-        self._stats.evictions += 1
-
-        if self.on_evict:
-            self.on_evict(entry.key, entry.value)
-
-        for tag in entry.tags:
-            if tag in self._tag_index:
-                self._tag_index[tag].discard(key)
-
-        logger.debug(f"Cache EVICT: {key} (strategy={self.strategy.name})")
-
-    def _update_tag_index(self, key: str, tags: List[str]) -> None:
-        """Update tag index for a key."""
-        for tag in tags:
-            if tag not in self._tag_index:
-                self._tag_index[tag] = set()
-            self._tag_index[tag].add(key)
-
-    def _estimate_size(self, value: Any) -> int:
-        """Estimate size of a value in bytes."""
+class CompressionCodec:
+    """Handles actual compression/decompression."""
+    
+    def __init__(self, config: CompressionConfig):
+        self.config = config
+    
+    def _get_level(self) -> int:
+        """Map compression level enum to actual level."""
+        mapping = {
+            CompressionLevel.BEST_SPEED: 1,
+            CompressionLevel.DEFAULT: 6,
+            CompressionLevel.BEST_RATIO: 9,
+        }
+        return mapping.get(self.config.compression_level, 6)
+    
+    def compress(self, data: Union[bytes, str]) -> bytes:
+        """Compress data using configured algorithm."""
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        
+        if len(data) < self.config.min_size_bytes:
+            return data
+        
+        if self.config.compression_type == CompressionType.GZIP:
+            return self._gzip_compress(data)
+        elif self.config.compression_type == CompressionType.DEFLATE:
+            return self._deflate_compress(data)
+        elif self.config.compression_type == CompressionType.BRØTLI:
+            return self._brotli_compress(data)
+        return data
+    
+    def _gzip_compress(self, data: bytes) -> bytes:
+        """Perform gzip compression."""
+        buffer = io.BytesIO()
+        with gzip.GzipFile(
+            fileobj=buffer,
+            mode="wb",
+            compresslevel=self._get_level()
+        ) as f:
+            f.write(data)
+        return buffer.getvalue()
+    
+    def _deflate_compress(self, data: bytes) -> bytes:
+        """Perform deflate compression."""
+        return zlib.compress(data, level=self._get_level())
+    
+    def _brotli_compress(self, data: bytes) -> bytes:
+        """Perform brotli compression."""
         try:
-            return len(json.dumps(value).encode("utf-8"))
+            import brotli
+            return brotli.compress(data, quality=self._get_level())
+        except ImportError:
+            logger.warning("brotli not available, falling back to gzip")
+            return self._gzip_compress(data)
+    
+    def decompress(self, data: bytes, encoding: str) -> bytes:
+        """Decompress data based on encoding header."""
+        if not data:
+            return data
+        
+        encoding_lower = encoding.lower()
+        
+        if "gzip" in encoding_lower:
+            return self._gzip_decompress(data)
+        elif "deflate" in encoding_lower:
+            return self._deflate_decompress(data)
+        elif "br" in encoding_lower or "brotli" in encoding_lower:
+            return self._brotli_decompress(data)
+        return data
+    
+    def _gzip_decompress(self, data: bytes) -> bytes:
+        """Decompress gzip data."""
+        try:
+            return gzip.decompress(data)
+        except Exception as e:
+            logger.error(f"Gzip decompression failed: {e}")
+            return data
+    
+    def _deflate_decompress(self, data: bytes) -> bytes:
+        """Decompress deflate data."""
+        try:
+            return zlib.decompress(data)
         except Exception:
-            return len(str(value).encode("utf-8"))
+            try:
+                return zlib.decompress(data, -zlib.MAX_WBITS)
+            except Exception as e:
+                logger.error(f"Deflate decompression failed: {e}")
+                return data
+    
+    def _brotli_decompress(self, data: bytes) -> bytes:
+        """Decompress brotli data."""
+        try:
+            import brotli
+            return brotli.decompress(data)
+        except ImportError:
+            logger.error("brotli not available for decompression")
+            return data
 
-    def cleanup_expired(self) -> int:
-        """
-        Remove all expired entries.
 
-        Returns:
-            Number of entries removed
-        """
-        with self._lock:
-            expired_keys = [
-                key for key, entry in self._store.items()
-                if entry.is_expired
-            ]
-
-            for key in expired_keys:
-                self._remove_entry(key)
-                self._stats.expirations += 1
-
-            logger.info(f"Cache cleanup: removed {len(expired_keys)} expired entries")
-            return len(expired_keys)
-
+class APICompressionAction:
+    """
+    Main compression action handler.
+    
+    Integrates with API requests/responses to automatically
+    compress and decompress payloads based on client capabilities.
+    """
+    
+    def __init__(self, config: Optional[CompressionConfig] = None):
+        self.config = config or CompressionConfig()
+        self.codec = CompressionCodec(self.config)
+        self.stats = CompressionStats()
+        self._middleware: List[Callable] = []
+    
+    def add_middleware(self, func: Callable) -> None:
+        """Add compression middleware."""
+        self._middleware.append(func)
+    
+    async def process_request(self, data: Any, headers: Dict) -> Dict[str, Any]:
+        """Process outgoing request with compression."""
+        if not self.config.enabled:
+            return {"data": data, "headers": headers}
+        
+        for mw in self._middleware:
+            result = mw({"data": data, "headers": headers})
+            if asyncio.iscoroutine(result):
+                result = await result
+        
+        return {"data": data, "headers": headers}
+    
+    async def process_response(
+        self,
+        data: Union[bytes, str],
+        headers: Dict,
+        accept_encoding: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Process incoming response with compression."""
+        if not self.config.enabled:
+            return {"data": data, "headers": headers}
+        
+        if accept_encoding is None:
+            accept_encoding = headers.get("Accept-Encoding", "gzip")
+        
+        data_bytes = data if isinstance(data, bytes) else data.encode("utf-8")
+        compressed = self.codec.compress(data_bytes)
+        
+        self.stats.record(len(data_bytes), len(compressed))
+        
+        encoding = self.config.compression_type.value
+        headers["Content-Encoding"] = encoding
+        
+        if self.config.include_size_header:
+            headers["X-Original-Size"] = str(len(data_bytes))
+            headers["X-Compressed-Size"] = str(len(compressed))
+        
+        if self.config.include_ratio_header:
+            ratio = (1 - len(compressed) / max(len(data_bytes), 1)) * 100
+            headers["X-Compression-Ratio"] = f"{ratio:.1f}%"
+        
+        return {
+            "data": compressed,
+            "headers": headers,
+            "compressed": len(compressed) < len(data_bytes)
+        }
+    
+    def decompress_request(
+        self,
+        data: bytes,
+        content_encoding: str
+    ) -> bytes:
+        """Decompress incoming request body."""
+        return self.codec.decompress(data, content_encoding)
+    
     def get_stats(self) -> Dict[str, Any]:
-        """Get cache statistics."""
-        with self._lock:
-            return {
-                "size": len(self._store),
-                "max_size": self.max_size,
-                "total_bytes": self._total_size,
-                "strategy": self.strategy.name,
-                "default_ttl": self.default_ttl,
-                "hits": self._stats.hits,
-                "misses": self._stats.misses,
-                "hit_rate": self._stats.hit_rate,
-                "sets": self._stats.sets,
-                "evictions": self._stats.evictions,
-                "expirations": self._stats.expirations,
-                "invalidations": self._stats.invalidations,
-                "tags": len(self._tag_index),
-            }
-
-    def __len__(self) -> int:
-        """Get number of entries."""
-        return len(self._store)
-
-    def __contains__(self, key: str) -> bool:
-        """Check if key exists and is not expired."""
-        return self.get(key) is not None
-
-
-class CachedAPIClient:
-    """
-    API client wrapper with automatic caching.
-
-    Example:
-        >>> client = CachedAPIClient(base_url="https://api.example.com")
-        >>> @client.cached(ttl=300, tags=["users"])
-        ... def get_user(user_id):
-        ...     return client.get(f"/users/{user_id}")
-    """
-
-    def __init__(
+        """Get compression statistics."""
+        return {
+            "total_requests": self.stats.total_requests,
+            "compressed_requests": self.stats.compressed_requests,
+            "total_original_bytes": self.stats.total_original_bytes,
+            "total_compressed_bytes": self.stats.total_compressed_bytes,
+            "compression_ratio": f"{self.stats.compression_ratio * 100:.1f}%",
+            "space_saved_bytes": (
+                self.stats.total_original_bytes - self.stats.total_compressed_bytes
+            ),
+        }
+    
+    def reset_stats(self) -> None:
+        """Reset compression statistics."""
+        self.stats = CompressionStats()
+    
+    async def stream_compress(
         self,
-        cache: Optional[Cache] = None,
-        cache_config: Optional[Dict[str, Any]] = None,
-    ):
-        """Initialize cached API client."""
-        if cache:
-            self.cache = cache
+        generator: Callable[[], AsyncIterator[bytes]],
+        chunk_size: int = 8192
+    ) -> AsyncIterator[bytes]:
+        """Stream-compress data from an async generator."""
+        if self.config.compression_type == CompressionType.GZIP:
+            buffer = io.BytesIO()
+            with gzip.GzipFile(fileobj=buffer, mode="wb") as f:
+                async for chunk in generator():
+                    if chunk:
+                        f.write(chunk)
+                        if buffer.tell() >= self.config.streaming_threshold:
+                            yield buffer.getvalue()
+                            buffer = io.BytesIO()
+            remaining = buffer.getvalue()
+            if remaining:
+                yield remaining
         else:
-            config = cache_config or {}
-            self.cache = Cache(
-                max_size=config.get("max_size", 1000),
-                default_ttl=config.get("default_ttl", 300),
-                strategy=CacheStrategy[config.get("strategy", "LRU").upper()],
-            )
-        logger.info("CachedAPIClient initialized")
+            async for chunk in generator():
+                yield self.codec.compress(chunk)
 
-    def cached(
-        self,
-        key_prefix: str = "",
-        ttl: Optional[float] = None,
-        tags: Optional[List[str]] = None,
-    ):
-        """Decorator for caching function results."""
-        def decorator(func: Callable):
-            def wrapper(*args, **kwargs):
-                cache_key = self._make_key(key_prefix or func.__name__, args, kwargs)
-                return self.cache.get_or_compute(
-                    cache_key,
-                    lambda: func(*args, **kwargs),
-                    ttl=ttl,
-                    tags=tags,
-                )
-            return wrapper
-        return decorator
 
-    def _make_key(self, prefix: str, args: tuple, kwargs: dict) -> str:
-        """Generate a cache key from function arguments."""
-        key_parts = [prefix, str(args), str(sorted(kwargs.items()))]
-        key_str = "|".join(key_parts)
-        return hashlib.md5(key_str.encode()).hexdigest()
+from typing import AsyncIterator
