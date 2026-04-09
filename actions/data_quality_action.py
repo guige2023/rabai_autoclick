@@ -1,494 +1,409 @@
 """
 Data Quality Action Module.
 
-Provides comprehensive data quality assessment and validation capabilities
-including completeness checks, accuracy validation, consistency verification,
-and quality scoring for datasets and data streams.
+Provides data quality checks, profiling, and validation
+for ensuring data integrity across pipelines.
 
 Author: RabAi Team
 """
 
 from __future__ import annotations
 
-import json
 import re
-import statistics
-from collections import Counter
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    List,
-    Optional,
-    Protocol,
-    Set,
-    Tuple,
-    TypeVar,
-    Union,
-)
-
-import pandas as pd
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 
 class QualityLevel(Enum):
     """Data quality levels."""
     EXCELLENT = "excellent"
     GOOD = "good"
-    ACCEPTABLE = "acceptable"
+    FAIR = "fair"
     POOR = "poor"
-    CRITICAL = "critical"
-
-
-class CheckType(Enum):
-    """Types of quality checks."""
-    COMPLETENESS = "completeness"
-    ACCURACY = "accuracy"
-    CONSISTENCY = "consistency"
-    UNIQUENESS = "uniqueness"
-    TIMELINESS = "timeliness"
-    VALIDITY = "validity"
+    BAD = "bad"
 
 
 @dataclass
-class QualityThreshold:
-    """Thresholds for quality checks."""
-    min_completeness: float = 0.95
-    min_accuracy: float = 0.90
-    min_consistency: float = 0.90
-    min_uniqueness: float = 0.85
-    max_null_ratio: float = 0.05
-    max_duplicate_ratio: float = 0.10
-    max_age_days: float = 30.0
-
-
-@dataclass
-class QualityCheckResult:
-    """Result of a single quality check."""
-    check_type: CheckType
-    passed: bool
-    score: float
-    threshold: float
+class QualityIssue:
+    """A data quality issue."""
+    field: str
+    issue_type: str
+    severity: str  # "error", "warning", "info"
     message: str
-    affected_fields: List[str] = field(default_factory=list)
-    details: Dict[str, Any] = field(default_factory=dict)
-    timestamp: datetime = field(default_factory=datetime.now)
+    affected_count: int = 0
+    sample_values: List[Any] = field(default_factory=list)
 
 
 @dataclass
 class QualityReport:
-    """Comprehensive data quality report."""
-    overall_score: float
-    quality_level: QualityLevel
+    """Data quality report."""
+    dataset_name: str
     total_records: int
     total_fields: int
-    checks: List[QualityCheckResult]
-    thresholds: QualityThreshold
-    recommendations: List[str] = field(default_factory=list)
-    generated_at: datetime = field(default_factory=datetime.now)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    issues: List[QualityIssue] = field(default_factory=list)
+    field_profiles: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    overall_score: float = 0.0
+    quality_level: QualityLevel = QualityLevel.GOOD
+    timestamp: float = field(default_factory=datetime.now().timestamp)
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert report to dictionary."""
-        return {
-            "overall_score": self.overall_score,
-            "quality_level": self.quality_level.value,
-            "total_records": self.total_records,
-            "total_fields": self.total_fields,
-            "checks": [
-                {
-                    "check_type": c.check_type.value,
-                    "passed": c.passed,
-                    "score": c.score,
-                    "threshold": c.threshold,
-                    "message": c.message,
-                    "affected_fields": c.affected_fields,
-                    "details": c.details,
-                    "timestamp": c.timestamp.isoformat(),
-                }
-                for c in self.checks
-            ],
-            "recommendations": self.recommendations,
-            "generated_at": self.generated_at.isoformat(),
-            "metadata": self.metadata,
+
+class DataValidator:
+    """Data validation engine."""
+
+    def __init__(self) -> None:
+        self.rules: Dict[str, List[Callable]] = defaultdict(list)
+
+    def add_rule(
+        self,
+        field_name: str,
+        rule_func: Callable[[Any], Tuple[bool, Optional[str]]],
+    ) -> "DataValidator":
+        """Add validation rule for a field."""
+        self.rules[field_name].append(rule_func)
+        return self
+
+    def validate_record(
+        self,
+        record: Dict[str, Any],
+    ) -> List[Tuple[str, str]]:
+        """Validate a single record. Returns list of (field, error) tuples."""
+        errors = []
+
+        for field_name, rules in self.rules.items():
+            value = record.get(field_name)
+            for rule in rules:
+                is_valid, error_msg = rule(value)
+                if not is_valid:
+                    errors.append((field_name, error_msg or "Validation failed"))
+
+        return errors
+
+    def validate_batch(
+        self,
+        data: List[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Validate batch of records. Returns (valid, invalid) lists."""
+        valid = []
+        invalid = []
+
+        for record in data:
+            errors = self.validate_record(record)
+            if errors:
+                record["_validation_errors"] = errors
+                invalid.append(record)
+            else:
+                valid.append(record)
+
+        return valid, invalid
+
+
+class DataProfiler:
+    """Data profiling for understanding dataset characteristics."""
+
+    @staticmethod
+    def profile_field(values: List[Any]) -> Dict[str, Any]:
+        """Profile a single field."""
+        non_null = [v for v in values if v is not None]
+
+        profile = {
+            "total_count": len(values),
+            "null_count": len(values) - len(non_null),
+            "null_percentage": (len(values) - len(non_null)) / len(values) * 100 if values else 0,
+            "unique_count": len(set(str(v) for v in non_null)) if non_null else 0,
+            "unique_percentage": len(set(str(v) for v in non_null)) / len(non_null) * 100 if non_null else 0,
         }
 
-    def to_json(self) -> str:
-        """Serialize report to JSON."""
-        return json.dumps(self.to_dict(), indent=2, default=str)
+        if non_null:
+            # Type analysis
+            types = defaultdict(int)
+            for v in non_null:
+                types[type(v).__name__] += 1
+            profile["types"] = dict(types)
 
-    def get_failed_checks(self) -> List[QualityCheckResult]:
-        """Get all failed quality checks."""
-        return [c for c in self.checks if not c.passed]
+            # String-specific
+            str_values = [v for v in non_null if isinstance(v, str)]
+            if str_values:
+                profile["min_length"] = min(len(v) for v in str_values)
+                profile["max_length"] = max(len(v) for v in str_values)
+                profile["avg_length"] = sum(len(v) for v in str_values) / len(str_values)
 
-    def get_warnings(self) -> List[QualityCheckResult]:
-        """Get checks that passed but with marginal scores."""
-        return [c for c in self.checks if c.passed and c.score < c.threshold * 1.1]
+            # Numeric-specific
+            numeric_values = [v for v in non_null if isinstance(v, (int, float))]
+            if numeric_values:
+                profile["min"] = min(numeric_values)
+                profile["max"] = max(numeric_values)
+                profile["avg"] = sum(numeric_values) / len(numeric_values)
 
+        return profile
 
-class DataValidator(Protocol):
-    """Protocol for custom data validators."""
+    @classmethod
+    def profile_dataset(
+        cls,
+        data: List[Dict[str, Any]],
+        dataset_name: str = "dataset",
+    ) -> QualityReport:
+        """Profile entire dataset."""
+        if not data:
+            return QualityReport(
+                dataset_name=dataset_name,
+                total_records=0,
+                total_fields=0,
+                overall_score=0.0,
+            )
 
-    def validate(self, value: Any, context: Dict[str, Any]) -> Tuple[bool, str]:
-        """
-        Validate a value.
+        # Collect all fields
+        all_fields: Set[str] = set()
+        for record in data:
+            all_fields.update(record.keys())
 
-        Returns:
-            Tuple of (is_valid, message)
-        """
-        ...
-
-
-T = TypeVar("T")
-
-
-class RegexValidator:
-    """Validator using regular expressions."""
-
-    def __init__(self, pattern: str, flags: int = 0):
-        self.pattern = re.compile(pattern, flags)
-
-    def validate(self, value: Any, context: Dict[str, Any]) -> Tuple[bool, str]:
-        if not isinstance(value, str):
-            return False, f"Expected string, got {type(value).__name__}"
-        if self.pattern.match(value):
-            return True, "Valid"
-        return False, f"Value does not match pattern {self.pattern.pattern}"
-
-
-class RangeValidator:
-    """Validator for numeric ranges."""
-
-    def __init__(self, min_val: Optional[float] = None, max_val: Optional[float] = None):
-        self.min_val = min_val
-        self.max_val = max_val
-
-    def validate(self, value: Any, context: Dict[str, Any]) -> Tuple[bool, str]:
-        try:
-            num_val = float(value)
-        except (TypeError, ValueError):
-            return False, f"Cannot convert {value} to number"
-        if self.min_val is not None and num_val < self.min_val:
-            return False, f"Value {num_val} below minimum {self.min_val}"
-        if self.max_val is not None and num_val > self.max_val:
-            return False, f"Value {num_val} above maximum {self.max_val}"
-        return True, "Valid"
-
-
-class SetValidator:
-    """Validator for allowed values."""
-
-    def __init__(self, allowed_values: Set[Any]):
-        self.allowed_values = allowed_values
-
-    def validate(self, value: Any, context: Dict[str, Any]) -> Tuple[bool, str]:
-        if value in self.allowed_values:
-            return True, "Valid"
-        return False, f"Value {value} not in allowed set {self.allowed_values}"
-
-
-class DataQualityEngine:
-    """
-    Core data quality assessment engine.
-
-    Provides comprehensive quality checks for datasets including
-    completeness, accuracy, consistency, uniqueness, and validity.
-
-    Example:
-        >>> engine = DataQualityEngine()
-        >>> df = pd.DataFrame({"a": [1, 2, None], "b": ["x", "y", "z"]})
-        >>> report = engine.assess(df)
-        >>> print(report.overall_score)
-    """
-
-    def __init__(self, thresholds: Optional[QualityThreshold] = None):
-        self.thresholds = thresholds or QualityThreshold()
-        self.validators: Dict[str, DataValidator] = {}
-        self._custom_checks: List[Callable] = []
-
-    def register_validator(self, field: str, validator: DataValidator) -> None:
-        """Register a custom validator for a field."""
-        self.validators[field] = validator
-
-    def register_custom_check(self, check: Callable) -> None:
-        """Register a custom quality check function."""
-        self._custom_checks.append(check)
-
-    def assess(self, data: Union[pd.DataFrame, List[Dict], Dict]) -> QualityReport:
-        """
-        Perform comprehensive quality assessment on data.
-
-        Args:
-            data: Input data (DataFrame, list of dicts, or dict)
-
-        Returns:
-            QualityReport with detailed findings
-        """
-        df = self._to_dataframe(data)
-        checks = []
-
-        checks.append(self._check_completeness(df))
-        checks.append(self._check_uniqueness(df))
-        checks.append(self._check_validity(df))
-        checks.append(self._check_consistency(df))
-
-        if self._custom_checks:
-            for custom_check in self._custom_checks:
-                try:
-                    result = custom_check(df)
-                    if isinstance(result, QualityCheckResult):
-                        checks.append(result)
-                except Exception as e:
-                    checks.append(
-                        QualityCheckResult(
-                            check_type=CheckType.VALIDITY,
-                            passed=False,
-                            score=0.0,
-                            threshold=0.0,
-                            message=f"Custom check failed: {str(e)}",
-                        )
-                    )
-
-        overall_score = statistics.mean([c.score for c in checks]) if checks else 0.0
-        quality_level = self._score_to_level(overall_score)
-        recommendations = self._generate_recommendations(checks)
+        field_profiles = {}
+        for field_name in all_fields:
+            values = [record.get(field_name) for record in data]
+            field_profiles[field_name] = cls.profile_field(values)
 
         return QualityReport(
-            overall_score=overall_score,
-            quality_level=quality_level,
-            total_records=len(df),
-            total_fields=len(df.columns),
-            checks=checks,
-            thresholds=self.thresholds,
-            recommendations=recommendations,
+            dataset_name=dataset_name,
+            total_records=len(data),
+            total_fields=len(all_fields),
+            field_profiles=field_profiles,
         )
 
-    def _to_dataframe(self, data: Union[pd.DataFrame, List[Dict], Dict]) -> pd.DataFrame:
-        """Convert input to DataFrame."""
-        if isinstance(data, pd.DataFrame):
-            return data
-        if isinstance(data, list):
-            return pd.DataFrame(data)
-        if isinstance(data, dict):
-            return pd.DataFrame([data])
-        raise ValueError(f"Unsupported data type: {type(data).__name__}")
 
-    def _check_completeness(self, df: pd.DataFrame) -> QualityCheckResult:
-        """Check data completeness (null/missing values)."""
-        total_cells = df.size
-        null_cells = df.isnull().sum().sum()
-        null_ratio = null_cells / total_cells if total_cells > 0 else 0.0
-        completeness_score = 1.0 - null_ratio
+class DataQualityChecker:
+    """Main data quality checking system."""
 
-        null_by_column = df.isnull().sum()
-        affected_fields = null_by_column[null_by_column > 0].index.tolist()
+    def __init__(self) -> None:
+        self.validator = DataValidator()
+        self.issues: List[QualityIssue] = []
 
-        passed = completeness_score >= self.thresholds.min_completeness
+    def check_nulls(
+        self,
+        data: List[Dict[str, Any]],
+        fields: List[str],
+        threshold: float = 0.0,
+    ) -> List[QualityIssue]:
+        """Check for null values exceeding threshold."""
+        issues = []
 
-        return QualityCheckResult(
-            check_type=CheckType.COMPLETENESS,
-            passed=passed,
-            score=completeness_score,
-            threshold=self.thresholds.min_completeness,
-            message=f"Completeness: {(completeness_score * 100):.2f}%",
-            affected_fields=affected_fields,
-            details={
-                "null_count": int(null_cells),
-                "total_cells": int(total_cells),
-                "null_ratio": null_ratio,
-                "null_by_column": null_by_column.to_dict(),
-            },
-        )
+        for field_name in fields:
+            null_count = sum(1 for record in data if record.get(field_name) is None)
+            null_percentage = null_count / len(data) * 100 if data else 0
 
-    def _check_uniqueness(self, df: pd.DataFrame) -> QualityCheckResult:
-        """Check data uniqueness (duplicate records)."""
-        total_rows = len(df)
-        duplicate_rows = df.duplicated().sum()
-        duplicate_ratio = duplicate_rows / total_rows if total_rows > 0 else 0.0
-        uniqueness_score = 1.0 - duplicate_ratio
+            if null_percentage > threshold:
+                null_values = [
+                    record.get(field_name)
+                    for record in data[:100]
+                    if record.get(field_name) is None
+                ]
+                issues.append(QualityIssue(
+                    field=field_name,
+                    issue_type="null_excessive",
+                    severity="error" if null_percentage > 50 else "warning",
+                    message=f"Null values: {null_count} ({null_percentage:.1f}%)",
+                    affected_count=null_count,
+                    sample_values=null_values[:5],
+                ))
 
-        passed = uniqueness_score >= (1.0 - self.thresholds.max_duplicate_ratio)
+        return issues
 
-        duplicate_cols = []
-        for col in df.columns:
-            col_dupes = df[col].duplicated().sum()
-            if col_dupes > 0:
-                duplicate_cols.append({"column": col, "duplicates": int(col_dupes)})
+    def check_duplicates(
+        self,
+        data: List[Dict[str, Any]],
+        key_fields: List[str],
+    ) -> List[QualityIssue]:
+        """Check for duplicate records."""
+        seen: Set[Tuple] = set()
+        duplicate_count = 0
+        sample_duplicates = []
 
-        return QualityCheckResult(
-            check_type=CheckType.UNIQUENESS,
-            passed=passed,
-            score=uniqueness_score,
-            threshold=1.0 - self.thresholds.max_duplicate_ratio,
-            message=f"Uniqueness: {(uniqueness_score * 100):.2f}%",
-            details={
-                "duplicate_rows": int(duplicate_rows),
-                "total_rows": total_rows,
-                "duplicate_ratio": duplicate_ratio,
-                "duplicate_columns": duplicate_cols,
-            },
-        )
-
-    def _check_validity(self, df: pd.DataFrame) -> QualityCheckResult:
-        """Check data validity using registered validators."""
-        total_validations = 0
-        passed_validations = 0
-        invalid_fields: Dict[str, List[str]] = {}
-
-        for field, validator in self.validators.items():
-            if field not in df.columns:
-                continue
-            for idx, value in df[field].items():
-                if pd.isnull(value):
-                    continue
-                total_validations += 1
-                is_valid, _ = validator.validate(value, {"field": field, "index": idx})
-                if is_valid:
-                    passed_validations += 1
-                else:
-                    if field not in invalid_fields:
-                        invalid_fields[field] = []
-                    invalid_fields[field].append(str(value))
-
-        validity_score = (
-            passed_validations / total_validations if total_validations > 0 else 1.0
-        )
-        passed = validity_score >= self.thresholds.min_accuracy
-
-        return QualityCheckResult(
-            check_type=CheckType.VALIDITY,
-            passed=passed,
-            score=validity_score,
-            threshold=self.thresholds.min_accuracy,
-            message=f"Validity: {(validity_score * 100):.2f}%",
-            affected_fields=list(invalid_fields.keys()),
-            details={
-                "total_validations": total_validations,
-                "passed_validations": passed_validations,
-                "invalid_fields": invalid_fields,
-            },
-        )
-
-    def _check_consistency(self, df: pd.DataFrame) -> QualityCheckResult:
-        """Check data consistency across related fields."""
-        consistency_scores = []
-
-        for col in df.select_dtypes(include=["number"]).columns:
-            col_data = df[col].dropna()
-            if len(col_data) < 2:
-                continue
-            mean_val = col_data.mean()
-            std_val = col_data.std()
-            if std_val == 0:
-                consistency_scores.append(1.0)
+        for record in data:
+            key_values = tuple(record.get(f) for f in key_fields)
+            if key_values in seen:
+                duplicate_count += 1
+                if len(sample_duplicates) < 5:
+                    sample_duplicates.append(dict(zip(key_fields, key_values)))
             else:
-                z_scores = ((col_data - mean_val) / std_val).abs()
-                consistent_ratio = (z_scores < 3).mean()
-                consistency_scores.append(consistent_ratio)
+                seen.add(key_values)
 
-        for col in df.select_dtypes(include=["object"]).columns:
-            value_counts = df[col].value_counts(normalize=True)
-            top_freq = value_counts.iloc[0] if len(value_counts) > 0 else 1.0
-            consistency_scores.append(top_freq)
+        issues = []
+        if duplicate_count > 0:
+            issues.append(QualityIssue(
+                field=", ".join(key_fields),
+                issue_type="duplicates",
+                severity="warning",
+                message=f"Duplicate records: {duplicate_count}",
+                affected_count=duplicate_count,
+                sample_values=sample_duplicates,
+            ))
 
-        overall_consistency = statistics.mean(consistency_scores) if consistency_scores else 1.0
-        passed = overall_consistency >= self.thresholds.min_consistency
+        return issues
 
-        return QualityCheckResult(
-            check_type=CheckType.CONSISTENCY,
-            passed=passed,
-            score=overall_consistency,
-            threshold=self.thresholds.min_consistency,
-            message=f"Consistency: {(overall_consistency * 100):.2f}%",
-            details={
-                "consistency_scores": consistency_scores,
-                "num_columns_checked": len(consistency_scores),
-            },
-        )
+    def check_pattern(
+        self,
+        data: List[Dict[str, Any]],
+        field_name: str,
+        pattern: str,
+    ) -> List[QualityIssue]:
+        """Check field values match regex pattern."""
+        regex = re.compile(pattern)
+        non_matching = []
 
-    def _score_to_level(self, score: float) -> QualityLevel:
-        """Convert numeric score to quality level."""
-        if score >= 0.95:
-            return QualityLevel.EXCELLENT
-        elif score >= 0.85:
-            return QualityLevel.GOOD
-        elif score >= 0.70:
-            return QualityLevel.ACCEPTABLE
-        elif score >= 0.50:
-            return QualityLevel.POOR
+        for record in data:
+            value = record.get(field_name)
+            if value is not None and not regex.match(str(value)):
+                non_matching.append(value)
+
+        issues = []
+        if non_matching:
+            issues.append(QualityIssue(
+                field=field_name,
+                issue_type="pattern_mismatch",
+                severity="warning",
+                message=f"Values not matching pattern '{pattern}': {len(non_matching)}",
+                affected_count=len(non_matching),
+                sample_values=non_matching[:5],
+            ))
+
+        return issues
+
+    def check_range(
+        self,
+        data: List[Dict[str, Any]],
+        field_name: str,
+        min_value: Optional[float] = None,
+        max_value: Optional[float] = None,
+    ) -> List[QualityIssue]:
+        """Check numeric values are within range."""
+        out_of_range = []
+
+        for record in data:
+            value = record.get(field_name)
+            if value is not None and isinstance(value, (int, float)):
+                if (min_value is not None and value < min_value) or \
+                   (max_value is not None and value > max_value):
+                    out_of_range.append(value)
+
+        issues = []
+        if out_of_range:
+            issues.append(QualityIssue(
+                field=field_name,
+                issue_type="out_of_range",
+                severity="error",
+                message=f"Values out of range [{min_value}, {max_value}]: {len(out_of_range)}",
+                affected_count=len(out_of_range),
+                sample_values=out_of_range[:5],
+            ))
+
+        return issues
+
+    def check_uniqueness(
+        self,
+        data: List[Dict[str, Any]],
+        field_name: str,
+    ) -> List[QualityIssue]:
+        """Check field values are unique."""
+        seen: Set[Any] = set()
+        duplicates = []
+
+        for record in data:
+            value = record.get(field_name)
+            if value is not None:
+                if value in seen:
+                    duplicates.append(value)
+                else:
+                    seen.add(value)
+
+        issues = []
+        if duplicates:
+            issues.append(QualityIssue(
+                field=field_name,
+                issue_type="not_unique",
+                severity="error",
+                message=f"Non-unique values: {len(duplicates)} duplicates",
+                affected_count=len(duplicates),
+                sample_values=duplicates[:5],
+            ))
+
+        return issues
+
+    def calculate_score(
+        self,
+        report: QualityReport,
+    ) -> Tuple[float, QualityLevel]:
+        """Calculate overall quality score."""
+        if report.total_records == 0:
+            return 0.0, QualityLevel.BAD
+
+        base_score = 100.0
+
+        # Deduct for issues
+        for issue in report.issues:
+            if issue.severity == "error":
+                deduction = min(30, issue.affected_count / report.total_records * 100)
+            else:
+                deduction = min(10, issue.affected_count / report.total_records * 50)
+            base_score -= deduction
+
+        # Deduct for null percentages
+        for field_name, profile in report.field_profiles.items():
+            if profile["null_percentage"] > 50:
+                base_score -= 20
+            elif profile["null_percentage"] > 20:
+                base_score -= 10
+            elif profile["null_percentage"] > 5:
+                base_score -= 5
+
+        base_score = max(0.0, base_score)
+
+        # Determine quality level
+        if base_score >= 95:
+            level = QualityLevel.EXCELLENT
+        elif base_score >= 85:
+            level = QualityLevel.GOOD
+        elif base_score >= 70:
+            level = QualityLevel.FAIR
+        elif base_score >= 50:
+            level = QualityLevel.POOR
         else:
-            return QualityLevel.CRITICAL
+            level = QualityLevel.BAD
 
-    def _generate_recommendations(self, checks: List[QualityCheckResult]) -> List[str]:
-        """Generate actionable recommendations based on failed checks."""
-        recommendations = []
-        for check in checks:
-            if not check.passed:
-                if check.check_type == CheckType.COMPLETENESS:
-                    recommendations.append(
-                        f"Address missing values in fields: {', '.join(check.affected_fields)}"
-                    )
-                elif check.check_type == CheckType.UNIQUENESS:
-                    recommendations.append(
-                        "Review and remove duplicate records to improve data uniqueness"
-                    )
-                elif check.check_type == CheckType.VALIDITY:
-                    recommendations.append(
-                        f"Fix invalid values in fields: {', '.join(check.affected_fields)}"
-                    )
-                elif check.check_type == CheckType.CONSISTENCY:
-                    recommendations.append(
-                        "Standardize data formats and value ranges across related fields"
-                    )
-        return recommendations
+        return base_score, level
 
+    def generate_report(
+        self,
+        data: List[Dict[str, Any]],
+        dataset_name: str = "dataset",
+        checks: Optional[List[str]] = None,
+    ) -> QualityReport:
+        """Generate full quality report."""
+        checks = checks or ["nulls", "duplicates", "uniqueness"]
 
-def create_data_quality_action(config: Optional[Dict[str, Any]] = None) -> DataQualityEngine:
-    """
-    Factory function to create a configured data quality action.
+        profiler = DataProfiler()
+        profile = profiler.profile_dataset(data, dataset_name)
+        report = profile
 
-    Args:
-        config: Optional configuration dict with thresholds and validators
+        issues = []
 
-    Returns:
-        Configured DataQualityEngine instance
-    """
-    if config is None:
-        config = {}
+        if "nulls" in checks:
+            fields = list(set().union(*(r.keys() for r in data)))
+            issues.extend(self.check_nulls(data, fields))
 
-    thresholds_config = config.get("thresholds", {})
-    thresholds = QualityThreshold(
-        min_completeness=thresholds_config.get("min_completeness", 0.95),
-        min_accuracy=thresholds_config.get("min_accuracy", 0.90),
-        min_consistency=thresholds_config.get("min_consistency", 0.90),
-        min_uniqueness=thresholds_config.get("min_uniqueness", 0.85),
-        max_null_ratio=thresholds_config.get("max_null_ratio", 0.05),
-        max_duplicate_ratio=thresholds_config.get("max_duplicate_ratio", 0.10),
-        max_age_days=thresholds_config.get("max_age_days", 30.0),
-    )
+        if "duplicates" in checks:
+            if data:
+                fields = list(data[0].keys())
+                issues.extend(self.check_duplicates(data, [fields[0]]))
 
-    engine = DataQualityEngine(thresholds=thresholds)
+        if "uniqueness" in checks:
+            for field_name in list(data[0].keys()) if data else []:
+                issues.extend(self.check_uniqueness(data, field_name))
 
-    validators_config = config.get("validators", {})
-    for field, val_config in validators_config.items():
-        validator_type = val_config.get("type")
-        if validator_type == "regex":
-            engine.register_validator(
-                field, RegexValidator(val_config["pattern"])
-            )
-        elif validator_type == "range":
-            engine.register_validator(
-                field,
-                RangeValidator(
-                    min_val=val_config.get("min"),
-                    max_val=val_config.get("max"),
-                ),
-            )
-        elif validator_type == "set":
-            engine.register_validator(
-                field, SetValidator(set(val_config["values"]))
-            )
+        report.issues = issues
 
-    return engine
+        score, level = self.calculate_score(report)
+        report.overall_score = score
+        report.quality_level = level
+
+        return report
