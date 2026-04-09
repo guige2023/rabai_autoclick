@@ -1,239 +1,413 @@
-"""API request builder and middleware chain action."""
+"""API Request Builder Action Module.
+
+Provides comprehensive API request building with parameter handling,
+header management, authentication integration, and request templating.
+"""
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
+import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
-from urllib.parse import urlencode, urljoin
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
-RequestMiddleware = Callable[[dict[str, Any]], dict[str, Any]]
+logger = logging.getLogger(__name__)
+
+
+class HTTPMethod(Enum):
+    """HTTP methods supported."""
+    GET = "GET"
+    POST = "POST"
+    PUT = "PUT"
+    PATCH = "PATCH"
+    DELETE = "DELETE"
+    HEAD = "HEAD"
+    OPTIONS = "OPTIONS"
+
+
+class ContentType(Enum):
+    """Content types for request body."""
+    JSON = "application/json"
+    FORM_URLENCODED = "application/x-www-form-urlencoded"
+    MULTIPART = "multipart/form-data"
+    XML = "application/xml"
+    TEXT = "text/plain"
+    HTML = "text/html"
 
 
 @dataclass
-class RequestConfig:
-    """Configuration for an API request."""
+class QueryParam:
+    """A query parameter definition."""
+    name: str
+    value: Any
+    encoding: str = "url"  # url, raw, json
 
-    method: str = "GET"
-    url: str = ""
-    headers: dict[str, str] = field(default_factory=dict)
-    params: dict[str, Any] = field(default_factory=dict)
-    body: Optional[dict[str, Any]] = None
-    timeout_seconds: float = 30.0
-    verify_ssl: bool = True
-    allow_redirects: bool = True
-    metadata: dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class RequestHeader:
+    """A request header definition."""
+    name: str
+    value: Any
+    condition: Optional[str] = None  # Only add if condition is true
+
+
+@dataclass
+class RequestTemplate:
+    """A reusable request template."""
+    name: str
+    method: HTTPMethod
+    url: str
+    headers: List[RequestHeader] = field(default_factory=list)
+    query_params: List[QueryParam] = field(default_factory=list)
+    body: Optional[Any] = None
+    content_type: Optional[ContentType] = None
+    timeout: float = 30.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class BuiltRequest:
     """A fully built request ready for execution."""
-
     method: str
     url: str
-    headers: dict[str, str]
-    params: dict[str, Any]
-    body: Optional[dict[str, Any]]
-    timeout_seconds: float
-    verify_ssl: bool
-    allow_redirects: bool
-    middleware_applied: list[str] = field(default_factory=list)
+    headers: Dict[str, str]
+    query_params: Dict[str, str]
+    body: Optional[Union[bytes, str, Dict]]
+    content_type: Optional[str]
+    timeout: float
 
 
-class APIMiddleware:
-    """Base class for request middleware."""
+class APIRequestBuilderAction(BaseAction):
+    """API Request Builder Action for constructing API requests.
 
-    name: str = "base"
+    Provides flexible request building with templates, authentication,
+    dynamic parameters, and header management.
 
-    def process(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Process a request dict."""
-        return request
+    Examples:
+        >>> action = APIRequestBuilderAction()
+        >>> result = action.execute(ctx, {
+        ...     "method": "POST",
+        ...     "url": "https://api.example.com/users",
+        ...     "body": {"name": "Alice", "email": "alice@example.com"},
+        ...     "add_auth": True
+        ... })
+    """
 
-
-class AuthMiddleware(APIMiddleware):
-    """Add authentication headers."""
-
-    name = "auth"
-
-    def __init__(self, api_key: Optional[str] = None, token: Optional[str] = None):
-        self.api_key = api_key
-        self.token = token
-
-    def process(self, request: dict[str, Any]) -> dict[str, Any]:
-        headers = request.get("headers", {})
-        if self.api_key:
-            headers["X-API-Key"] = self.api_key
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        request["headers"] = headers
-        return request
-
-
-class ContentTypeMiddleware(APIMiddleware):
-    """Set content type header."""
-
-    name = "content_type"
-
-    def __init__(self, content_type: str = "application/json"):
-        self.content_type = content_type
-
-    def process(self, request: dict[str, Any]) -> dict[str, Any]:
-        headers = request.get("headers", {})
-        if request.get("body") and "Content-Type" not in headers:
-            headers["Content-Type"] = self.content_type
-        request["headers"] = headers
-        return request
-
-
-class UserAgentMiddleware(APIMiddleware):
-    """Set User-Agent header."""
-
-    name = "user_agent"
-
-    def __init__(self, user_agent: str = "RabAiBot/1.0"):
-        self.user_agent = user_agent
-
-    def process(self, request: dict[str, Any]) -> dict[str, Any]:
-        headers = request.get("headers", {})
-        headers["User-Agent"] = self.user_agent
-        request["headers"] = headers
-        return request
-
-
-class RequestIDMiddleware(APIMiddleware):
-    """Add unique request ID."""
-
-    name = "request_id"
-    _counter = 0
+    action_type = "api_request_builder"
+    display_name = "API请求构建"
+    description = "灵活的API请求构建器，支持模板、认证、动态参数"
 
     def __init__(self):
-        import time
+        super().__init__()
+        self._templates: Dict[str, RequestTemplate] = {}
 
-        self._prefix = f"req-{int(time.time() * 1000)}-"
+    def register_template(self, template: Union[RequestTemplate, Dict]) -> None:
+        """Register a request template."""
+        if isinstance(template, dict):
+            if "method" in template and isinstance(template["method"], str):
+                template["method"] = HTTPMethod(template["method"])
+            template = RequestTemplate(**template)
+        self._templates[template.name] = template
 
-    def process(self, request: dict[str, Any]) -> dict[str, Any]:
-        import threading
-
-        RequestIDMiddleware._counter += 1
-        request_id = f"{self._prefix}{RequestIDMiddleware._counter}"
-        headers = request.get("headers", {})
-        headers["X-Request-ID"] = request_id
-        request["headers"] = headers
-        request["metadata"] = request.get("metadata", {})
-        request["metadata"]["request_id"] = request_id
-        return request
-
-
-class APIRequestBuilderAction:
-    """Builds API requests with middleware chain support."""
-
-    def __init__(self, base_url: Optional[str] = None):
-        """Initialize request builder.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Build an API request.
 
         Args:
-            base_url: Base URL to join with relative paths.
-        """
-        self._base_url = base_url
-        self._middleware: list[APIMiddleware] = []
-        self._default_headers: dict[str, str] = {}
-
-    def add_middleware(self, middleware: APIMiddleware) -> "APIRequestBuilderAction":
-        """Add middleware to the chain."""
-        self._middleware.append(middleware)
-        return self
-
-    def set_default_headers(self, headers: dict[str, str]) -> "APIRequestBuilderAction":
-        """Set default headers for all requests."""
-        self._default_headers.update(headers)
-        return self
-
-    def build(self, config: RequestConfig) -> BuiltRequest:
-        """Build a request from configuration.
-
-        Args:
-            config: Request configuration.
+            context: Execution context.
+            params: Dict with keys:
+                - method: HTTP method
+                - url: Request URL
+                - template_name: Use a registered template
+                - headers: Additional headers
+                - query_params: Query parameters
+                - body: Request body
+                - content_type: Content-Type override
+                - add_auth: Add authentication headers
+                - auth_credentials: Auth credentials dict
+                - encode_params: Encode body as form
 
         Returns:
-            BuiltRequest ready for execution.
+            ActionResult with built request details.
         """
-        url = config.url
-        if self._base_url and not url.startswith(("http://", "https://")):
-            url = urljoin(self._base_url, url)
+        try:
+            # Get template if specified
+            template_name = params.get("template_name")
+            if template_name and template_name in self._templates:
+                template = self._templates[template_name]
+                method = template.method.value
+                url = template.url
+                headers = {h.name: h.value for h in template.headers}
+                query_params_list = [(p.name, p.value) for p in template.query_params]
+                body = template.body
+                content_type = template.content_type.value if template.content_type else None
+                timeout = template.timeout
+            else:
+                method = params.get("method", "GET").upper()
+                url = params.get("url", "")
+                headers = {}
+                query_params_list = []
+                body = params.get("body")
+                content_type = params.get("content_type")
+                timeout = params.get("timeout", 30.0)
 
-        if config.params:
-            query_string = urlencode(config.params)
+            # Resolve variables in URL
+            url = self._resolve_variables(url, params)
+
+            # Add dynamic headers
+            custom_headers = params.get("headers", {})
+            headers.update(custom_headers)
+
+            # Add auth if requested
+            if params.get("add_auth", False):
+                auth_headers = self._build_auth_headers(params.get("auth_credentials"))
+                headers.update(auth_headers)
+
+            # Build query parameters
+            query_params_dict: Dict[str, str] = {}
+            for name, value in query_params_list:
+                resolved_value = self._resolve_value(value, params)
+                query_params_dict[name] = str(resolved_value) if resolved_value is not None else ""
+
+            # Add custom query params
+            custom_query = params.get("query_params", {})
+            for name, value in custom_query.items():
+                query_params_dict[name] = str(value) if value is not None else ""
+
+            # Process body
+            processed_body = body
+            if body is not None:
+                if isinstance(body, dict) and params.get("encode_params", False):
+                    # Form encode
+                    from urllib.parse import urlencode
+                    processed_body = urlencode(body).encode()
+                    if content_type is None:
+                        content_type = ContentType.FORM_URLENCODED.value
+                elif isinstance(body, dict) and content_type is None:
+                    # Default to JSON
+                    processed_body = json.dumps(body).encode()
+                    content_type = ContentType.JSON.value
+                elif isinstance(body, str):
+                    processed_body = body.encode() if isinstance(body, str) else body
+                    if not content_type:
+                        content_type = ContentType.TEXT.value
+
+            # Add content type header
+            if content_type and "Content-Type" not in headers:
+                headers["Content-Type"] = content_type
+
+            # Add common headers
+            if "User-Agent" not in headers:
+                headers["User-Agent"] = "RabAi-AutoClick/1.0"
+            if "X-Request-Time" not in headers:
+                headers["X-Request-Time"] = str(int(time.time()))
+
+            built = BuiltRequest(
+                method=method,
+                url=url,
+                headers=headers,
+                query_params=query_params_dict,
+                body=processed_body,
+                content_type=content_type,
+                timeout=timeout,
+            )
+
+            return ActionResult(
+                success=True,
+                message=f"Built {method} request to {url}",
+                data={
+                    "method": built.method,
+                    "url": built.url,
+                    "headers": built.headers,
+                    "query_params": built.query_params,
+                    "body_preview": self._get_body_preview(built.body),
+                    "content_type": built.content_type,
+                    "timeout": built.timeout,
+                    "ready_to_execute": True,
+                }
+            )
+
+        except Exception as e:
+            logger.exception("Request builder failed")
+            return ActionResult(
+                success=False,
+                message=f"Request builder error: {str(e)}"
+            )
+
+    def execute_request(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Build and execute an API request in one step.
+
+        Args:
+            context: Execution context.
+            params: Same as execute() plus:
+                - verify_ssl: Verify SSL certificates (default: True)
+
+        Returns:
+            ActionResult with response data.
+        """
+        import urllib.request
+        import urllib.error
+        import urllib.parse
+
+        # First build the request
+        build_result = self.execute(context, params)
+        if not build_result.success:
+            return build_result
+
+        data = build_result.data
+        url = data["url"]
+        headers = data["headers"]
+        query_params = data.get("query_params", {})
+
+        # Add query params to URL
+        if query_params:
             separator = "&" if "?" in url else "?"
-            url = f"{url}{separator}{query_string}"
+            query_str = "&".join(f"{k}={urllib.parse.quote(str(v))}" for k, v in query_params.items())
+            url = url + separator + query_str
 
-        request_dict: dict[str, Any] = {
-            "method": config.method.upper(),
-            "url": url,
-            "headers": {**self._default_headers, **config.headers},
-            "params": config.params,
-            "body": config.body,
-            "timeout_seconds": config.timeout_seconds,
-            "verify_ssl": config.verify_ssl,
-            "allow_redirects": config.allow_redirects,
-            "metadata": config.metadata,
+        try:
+            method = data["method"]
+            req = urllib.request.Request(url, headers=headers, method=method)
+
+            body = data.get("body_preview")
+            if body and method in ("POST", "PUT", "PATCH"):
+                if isinstance(body, dict):
+                    req.data = json.dumps(body).encode()
+                else:
+                    req.data = str(body).encode()
+
+            verify_ssl = params.get("verify_ssl", True)
+
+            timeout = data.get("timeout", 30.0)
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                content = response.read()
+                resp_headers = dict(response.headers)
+
+                try:
+                    response_data = json.loads(content)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    response_data = content.decode(errors="replace")
+
+                return ActionResult(
+                    success=True,
+                    message=f"Request succeeded: {response.status}",
+                    data={
+                        "status_code": response.status,
+                        "headers": resp_headers,
+                        "data": response_data,
+                        "url": url,
+                    }
+                )
+
+        except urllib.error.HTTPError as e:
+            return ActionResult(
+                success=False,
+                message=f"HTTP error {e.code}: {e.reason}",
+                data={"status_code": e.code, "error": str(e)}
+            )
+        except Exception as e:
+            return ActionResult(
+                success=False,
+                message=f"Request failed: {str(e)}",
+                data={"error": str(e)}
+            )
+
+    def _resolve_variables(self, template: str, params: Dict[str, Any]) -> str:
+        """Resolve ${variable} placeholders in template."""
+        result = template
+        import re
+        for match in re.finditer(r'\$\{([^}]+)\}', template):
+            var_path = match.group(1)
+            value = self._get_nested_param(var_path, params)
+            if value is not None:
+                result = result.replace(match.group(0), str(value))
+        return result
+
+    def _get_nested_param(self, path: str, params: Dict[str, Any]) -> Any:
+        """Get nested parameter using dot notation."""
+        parts = path.split(".")
+        value = params
+        for part in parts:
+            if isinstance(value, dict):
+                value = value.get(part)
+            else:
+                return None
+        return value
+
+    def _resolve_value(self, value: Any, params: Dict[str, Any]) -> Any:
+        """Resolve a value that may contain variables."""
+        if isinstance(value, str):
+            return self._resolve_variables(value, params)
+        elif isinstance(value, dict):
+            return {k: self._resolve_value(v, params) for k, v in value.items()}
+        elif isinstance(value, list):
+            return [self._resolve_value(v, params) for v in value]
+        return value
+
+    def _build_auth_headers(self, credentials: Optional[Dict]) -> Dict[str, str]:
+        """Build authentication headers from credentials."""
+        headers = {}
+        if not credentials:
+            return headers
+
+        auth_type = credentials.get("type", "bearer")
+        if auth_type == "bearer":
+            token = credentials.get("token", "")
+            headers["Authorization"] = f"Bearer {token}"
+        elif auth_type == "api_key":
+            key_name = credentials.get("key_name", "X-API-Key")
+            key_value = credentials.get("key_value", "")
+            headers[key_name] = key_value
+        elif auth_type == "basic":
+            import base64
+            username = credentials.get("username", "")
+            password = credentials.get("password", "")
+            auth_str = base64.b64encode(f"{username}:{password}".encode()).decode()
+            headers["Authorization"] = f"Basic {auth_str}"
+
+        return headers
+
+    def _get_body_preview(self, body: Any) -> Any:
+        """Get a preview of the body for logging."""
+        if body is None:
+            return None
+        if isinstance(body, bytes):
+            try:
+                decoded = body.decode()
+                if len(decoded) > 200:
+                    return decoded[:200] + "..."
+                return decoded
+            except UnicodeDecodeError:
+                return f"<{len(body)} bytes binary data>"
+        if isinstance(body, dict):
+            preview = dict(body)
+            for key in preview:
+                if isinstance(preview[key], str) and len(preview[key]) > 100:
+                    preview[key] = preview[key][:100] + "..."
+            return preview
+        return body
+
+    def get_required_params(self) -> List[str]:
+        return ["url"]
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {
+            "method": "GET",
+            "template_name": None,
+            "headers": {},
+            "query_params": {},
+            "body": None,
+            "content_type": None,
+            "add_auth": False,
+            "auth_credentials": None,
+            "encode_params": False,
+            "timeout": 30.0,
         }
-
-        applied = []
-        for mw in self._middleware:
-            request_dict = mw.process(request_dict)
-            applied.append(mw.name)
-
-        return BuiltRequest(
-            method=request_dict["method"],
-            url=request_dict["url"],
-            headers=request_dict["headers"],
-            params=request_dict["params"],
-            body=request_dict["body"],
-            timeout_seconds=request_dict["timeout_seconds"],
-            verify_ssl=request_dict["verify_ssl"],
-            allow_redirects=request_dict["allow_redirects"],
-            middleware_applied=applied,
-        )
-
-    def build_get(
-        self,
-        url: str,
-        params: Optional[dict[str, Any]] = None,
-        **kwargs,
-    ) -> BuiltRequest:
-        """Build a GET request."""
-        return self.build(RequestConfig(method="GET", url=url, params=params or {}, **kwargs))
-
-    def build_post(
-        self,
-        url: str,
-        body: Optional[dict[str, Any]] = None,
-        **kwargs,
-    ) -> BuiltRequest:
-        """Build a POST request."""
-        return self.build(RequestConfig(method="POST", url=url, body=body, **kwargs))
-
-    def build_put(
-        self,
-        url: str,
-        body: Optional[dict[str, Any]] = None,
-        **kwargs,
-    ) -> BuiltRequest:
-        """Build a PUT request."""
-        return self.build(RequestConfig(method="PUT", url=url, body=body, **kwargs))
-
-    def build_delete(
-        self,
-        url: str,
-        **kwargs,
-    ) -> BuiltRequest:
-        """Build a DELETE request."""
-        return self.build(RequestConfig(method="DELETE", url=url, **kwargs))
-
-    def build_patch(
-        self,
-        url: str,
-        body: Optional[dict[str, Any]] = None,
-        **kwargs,
-    ) -> BuiltRequest:
-        """Build a PATCH request."""
-        return self.build(RequestConfig(method="PATCH", url=url, body=body, **kwargs))
