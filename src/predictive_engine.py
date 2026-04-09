@@ -4,8 +4,9 @@ P0级差异化功能 - 基于用户历史行为预测下一个可能需要的动
 """
 import json
 import time
+import os
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Callable
 from dataclasses import dataclass, field
 from collections import defaultdict, Counter
 import re
@@ -47,16 +48,23 @@ class ActionPattern:
 class PredictiveAutomationEngine:
     """预测性自动化引擎"""
     
-    def __init__(self, data_dir: str = "./data"):
+    def __init__(self, data_dir: str = "./data", flow_engine_callback: Optional[Callable] = None):
         self.data_dir = data_dir
         self.action_history: List[UserAction] = []
         self.patterns: List[ActionPattern] = []
-        self.time_patterns: Dict[str, List[str]] = defaultdict(list)  # 时间段 -> 动作序列
-        self.app_patterns: Dict[str, List[str]] = defaultdict(list)   # 应用 -> 后续动作
-        self.weekly_patterns: Dict[str, List[str]] = defaultdict(list) # 星期 -> 动作序列
+        self.time_patterns: Dict[str, List[str]] = defaultdict(list)
+        self.app_patterns: Dict[str, List[str]] = defaultdict(list)
+        self.weekly_patterns: Dict[str, List[str]] = defaultdict(list)
         self.prediction_cache: Dict[str, Prediction] = {}
         self.last_prediction_time: float = 0
+        # User correction learning
+        self.user_corrections: Dict[str, int] = defaultdict(int)  # action -> correction count
+        self.correction_history: List[Dict] = []
+        # FlowEngine callback integration
+        self.flow_engine_callback = flow_engine_callback
+        self._ensure_data_dir()
         self._load_history()
+        self._load_corrections()
         
     def _load_history(self) -> None:
         """加载历史数据"""
@@ -83,6 +91,132 @@ class PredictiveAutomationEngine:
         with open(f"{self.data_dir}/action_history.json", "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     
+    def _ensure_data_dir(self) -> None:
+        """确保数据目录存在"""
+        os.makedirs(self.data_dir, exist_ok=True)
+    
+    def _load_corrections(self) -> None:
+        """加载用户纠正数据"""
+        try:
+            with open(f"{self.data_dir}/user_corrections.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+                self.user_corrections = defaultdict(int, data.get("corrections", {}))
+                self.correction_history = data.get("history", [])
+        except FileNotFoundError:
+            pass
+    
+    def _save_corrections(self) -> None:
+        """保存用户纠正数据"""
+        data = {
+            "corrections": dict(self.user_corrections),
+            "history": self.correction_history[-1000:]
+        }
+        with open(f"{self.data_dir}/user_corrections.json", "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    
+    def record_user_correction(self, predicted_action: str, user_action: str, 
+                               context: Dict[str, Any] = None) -> None:
+        """记录用户纠正，学习用户偏好
+        
+        Args:
+            predicted_action: 系统预测的动作
+            user_action: 用户实际执行的动作
+            context: 上下文信息
+        """
+        if predicted_action != user_action:
+            self.user_corrections[user_action] += 1
+            self.correction_history.append({
+                "timestamp": time.time(),
+                "predicted": predicted_action,
+                "actual": user_action,
+                "context": context or {}
+            })
+            # 如果某个动作被多次纠正，降低其预测置信度
+            if len(self.correction_history) % 10 == 0:
+                self._save_corrections()
+    
+    def get_action_confidence(self, action: str) -> float:
+        """获取动作的置信度（基于用户纠正历史）
+        
+        Returns:
+            0.0-1.0 的置信度分数
+        """
+        total = sum(self.user_corrections.values())
+        if total == 0:
+            return 0.5  # 默认置信度
+        
+        # 被纠正次数越多的动作，置信度越低
+        correction_count = self.user_corrections.get(action, 0)
+        confidence = max(0.1, 1.0 - (correction_count / max(total, 1)) * 0.8)
+        return confidence
+    
+    def export_learned_patterns(self, filepath: str = None) -> str:
+        """导出学习到的模式
+        
+        Args:
+            filepath: 导出文件路径，默认为 data_dir/patterns_export.json
+            
+        Returns:
+            导出文件路径
+        """
+        if filepath is None:
+            filepath = os.path.join(self.data_dir, "patterns_export.json")
+        
+        export_data = {
+            "version": "1.0",
+            "export_time": time.time(),
+            "time_patterns": dict(self.time_patterns),
+            "app_patterns": dict(self.app_patterns),
+            "weekly_patterns": dict(self.weekly_patterns),
+            "user_corrections": dict(self.user_corrections),
+            "action_history_count": len(self.action_history)
+        }
+        
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(export_data, f, ensure_ascii=False, indent=2)
+        
+        return filepath
+    
+    def import_learned_patterns(self, filepath: str) -> bool:
+        """导入学习到的模式
+        
+        Args:
+            filepath: 导入文件路径
+            
+        Returns:
+            是否导入成功
+        """
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            self.time_patterns = defaultdict(list, data.get("time_patterns", {}))
+            self.app_patterns = defaultdict(list, data.get("app_patterns", {}))
+            self.weekly_patterns = defaultdict(list, data.get("weekly_patterns", {}))
+            self.user_corrections = defaultdict(int, data.get("user_corrections", {}))
+            
+            self._save_corrections()
+            return True
+        except Exception as e:
+            print(f"Import failed: {e}")
+            return False
+    
+    def set_flow_engine_callback(self, callback: Callable) -> None:
+        """设置 FlowEngine 回调函数
+        
+        Args:
+            callback: 回调函数，签名为 (event_type: str, data: Dict) -> None
+        """
+        self.flow_engine_callback = callback
+    
+    def _notify_flow_engine(self, event_type: str, data: Dict) -> None:
+        """通知 FlowEngine 事件"""
+        if self.flow_engine_callback:
+            try:
+                self.flow_engine_callback(event_type, data)
+            except Exception:
+                pass
+    
     def record_action(self, action_type: str, target: str, 
                      context: Dict[str, Any] = None, 
                      result: str = "success", 
@@ -104,6 +238,13 @@ class PredictiveAutomationEngine:
             
         # 更新模式
         self._update_patterns(action)
+        
+        # 通知 FlowEngine
+        self._notify_flow_engine("action_recorded", {
+            "action_type": action_type,
+            "target": target,
+            "result": result
+        })
     
     def _update_patterns(self, action: UserAction) -> None:
         """更新动作模式"""
@@ -240,11 +381,21 @@ class PredictiveAutomationEngine:
         if predictions:
             predictions.sort(key=lambda p: p.confidence, reverse=True)
             best = predictions[0]
+            
+            # 应用用户纠正学习的置信度调整
+            action_confidence = self.get_action_confidence(best.predicted_action)
+            best.confidence = best.confidence * 0.7 + action_confidence * 0.3
             best.alternatives = [p.predicted_action for p in predictions[1:3]]
             
             # 缓存结果
             self.prediction_cache = {best.predicted_action: best}
             self.last_prediction_time = time.time()
+            
+            # 通知 FlowEngine
+            self._notify_flow_engine("prediction_made", {
+                "predicted_action": best.predicted_action,
+                "confidence": best.confidence
+            })
             
             return best
             

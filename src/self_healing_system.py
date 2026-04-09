@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 自动化故障自愈系统 v21
 P0级差异化功能 - 工作流执行失败时AI自动分析原因并尝试修复
@@ -6,7 +8,7 @@ import json
 import time
 import traceback
 from datetime import datetime
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Any, Callable, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict, Counter
@@ -73,9 +75,49 @@ class FixSuggestion:
     requires_user_input: bool = False
 
 
+@dataclass
+class HealingAction:
+    """自愈动作记录"""
+    timestamp: float
+    workflow_name: str
+    step_name: str
+    step_index: int
+    error_type: ErrorType
+    error_message: str
+    strategy_used: RecoveryStrategy
+    success: bool
+    recovery_time: float
+    details: str
+
+
+@dataclass
+class SelfHealingMetrics:
+    """自愈系统指标"""
+    total_healing_attempts: int = 0
+    successful_healings: int = 0
+    failed_healings: int = 0
+    total_recovery_time: float = 0.0
+    last_healing_timestamp: Optional[float] = None
+    last_successful_healing_timestamp: Optional[float] = None
+
+    @property
+    def success_rate(self) -> float:
+        """计算恢复成功率"""
+        if self.total_healing_attempts == 0:
+            return 0.0
+        return self.successful_healings / self.total_healing_attempts
+
+    @property
+    def average_recovery_time(self) -> float:
+        """计算平均恢复时间"""
+        if self.successful_healings == 0:
+            return 0.0
+        return self.total_recovery_time / self.successful_healings
+
+
 class SelfHealingSystem:
     """自动化故障自愈系统"""
-    
+
     def __init__(self, data_dir: str = "./data"):
         self.data_dir = data_dir
         self.error_history: List[ErrorRecord] = []
@@ -83,7 +125,14 @@ class SelfHealingSystem:
         self.recovery_patterns: Dict[str, List[FixSuggestion]] = defaultdict(list)
         self.max_retry_per_step = 3
         self.enable_auto_recovery = True
+        # 自愈历史记录
+        self.healing_history: List[HealingAction] = []
+        # 自愈指标
+        self.metrics: SelfHealingMetrics = SelfHealingMetrics()
+        # FlowEngine 回调函数
+        self._flow_engine_callback: Optional[Callable[[HealingAction], None]] = None
         self._load_error_history()
+        self._load_healing_history()
         self._init_recovery_patterns()
         
     def _load_error_history(self) -> None:
@@ -204,7 +253,107 @@ class SelfHealingSystem:
                 implementation="使用离线数据"
             )
         ]
-    
+
+    def _load_healing_history(self) -> None:
+        """加载自愈历史"""
+        try:
+            with open(f"{self.data_dir}/healing_history.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for item in data:
+                    item["error_type"] = ErrorType(item["error_type"])
+                    item["strategy_used"] = RecoveryStrategy(item["strategy_used"])
+                    self.healing_history.append(HealingAction(**item))
+        except FileNotFoundError:
+            pass
+
+    def _save_healing_history(self) -> None:
+        """保存自愈历史"""
+        data = []
+        for action in self.healing_history[-1000:]:  # 保留最近1000条
+            data.append({
+                "timestamp": action.timestamp,
+                "workflow_name": action.workflow_name,
+                "step_name": action.step_name,
+                "step_index": action.step_index,
+                "error_type": action.error_type.value,
+                "error_message": action.error_message,
+                "strategy_used": action.strategy_used.value,
+                "success": action.success,
+                "recovery_time": action.recovery_time,
+                "details": action.details
+            })
+        with open(f"{self.data_dir}/healing_history.json", "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def register_flow_engine_callback(self, callback: Callable[[HealingAction], None]) -> None:
+        """注册 FlowEngine 回调函数，用于接收自愈事件通知"""
+        self._flow_engine_callback = callback
+
+    def health_score(self) -> float:
+        """计算系统健康分数 (0-100)"""
+        if not self.healing_history:
+            return 100.0  # 无历史记录，认为完全健康
+
+        recent = self.healing_history[-100:]
+
+        # 基础分数
+        score = 100.0
+
+        # 扣除失败恢复
+        failed_count = sum(1 for a in recent if not a.success)
+        score -= failed_count * 5
+
+        # 扣除频繁错误
+        error_rate = len(recent) / 100.0
+        if error_rate > 0.5:
+            score -= 20
+
+        # 考虑恢复时间（超时恢复降低分数）
+        avg_recovery_time = sum(a.recovery_time for a in recent if a.success) / max(1, sum(1 for a in recent if a.success))
+        if avg_recovery_time > 30:
+            score -= 10
+        elif avg_recovery_time > 60:
+            score -= 20
+
+        # 考虑错误类型分布
+        recent_error_types = [a.error_type for a in recent]
+        if ErrorType.APP_CRASHED in recent_error_types:
+            score -= 15
+        if ErrorType.UNKNOWN in recent_error_types:
+            score -= 5
+
+        return max(0.0, min(100.0, score))
+
+    def get_healing_metrics(self) -> Dict[str, Any]:
+        """获取自愈系统指标"""
+        return {
+            "total_healing_attempts": self.metrics.total_healing_attempts,
+            "successful_healings": self.metrics.successful_healings,
+            "failed_healings": self.metrics.failed_healings,
+            "success_rate": round(self.metrics.success_rate, 4),
+            "average_recovery_time": round(self.metrics.average_recovery_time, 2),
+            "last_healing_timestamp": self.metrics.last_healing_timestamp,
+            "last_successful_healing_timestamp": self.metrics.last_successful_healing_timestamp,
+            "health_score": round(self.health_score(), 2)
+        }
+
+    def get_healing_history(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """获取自愈历史记录"""
+        recent = self.healing_history[-limit:]
+        return [
+            {
+                "timestamp": a.timestamp,
+                "workflow_name": a.workflow_name,
+                "step_name": a.step_name,
+                "error_type": a.error_type.value,
+                "strategy_used": a.strategy_used.value,
+                "success": a.success,
+                "recovery_time": a.recovery_time,
+                "details": a.details
+            }
+            for a in recent
+        ]
+
     def analyze_error(self, error: Exception, workflow_name: str, 
                      step_name: str, step_index: int,
                      context: Dict[str, Any] = None) -> ErrorRecord:
@@ -284,10 +433,11 @@ class SelfHealingSystem:
                        execute_callback: Callable) -> RecoveryAttempt:
         """尝试恢复"""
         suggestions = self.get_fix_suggestions(error_record)
+        timestamp = time.time()
         
         if not suggestions:
             return RecoveryAttempt(
-                timestamp=time.time(),
+                timestamp=timestamp,
                 strategy=RecoveryStrategy.NOTIFY_USER,
                 action_taken="无恢复策略可用",
                 success=False,
@@ -310,18 +460,52 @@ class SelfHealingSystem:
         )
         
         time_taken = time.time() - start_time
+        success = recovery_result["success"]
         
         # 更新错误记录
         error_record.recovery_attempted = True
-        error_record.recovery_result = "success" if recovery_result["success"] else "failed"
+        error_record.recovery_result = "success" if success else "failed"
         error_record.recovery_details = recovery_result["details"]
         self._save_error_history()
         
+        # 记录自愈动作到历史
+        healing_action = HealingAction(
+            timestamp=timestamp,
+            workflow_name=error_record.workflow_name,
+            step_name=error_record.step_name,
+            step_index=error_record.step_index,
+            error_type=error_record.error_type,
+            error_message=error_record.error_message,
+            strategy_used=best_suggestion.strategy,
+            success=success,
+            recovery_time=time_taken,
+            details=recovery_result["details"]
+        )
+        self.healing_history.append(healing_action)
+        self._save_healing_history()
+        
+        # 更新指标
+        self.metrics.total_healing_attempts += 1
+        self.metrics.last_healing_timestamp = timestamp
+        if success:
+            self.metrics.successful_healings += 1
+            self.metrics.total_recovery_time += time_taken
+            self.metrics.last_successful_healing_timestamp = timestamp
+        else:
+            self.metrics.failed_healings += 1
+        
+        # 调用 FlowEngine 回调（如果已注册）
+        if self._flow_engine_callback is not None:
+            try:
+                self._flow_engine_callback(healing_action)
+            except Exception as e:
+                logging.warning(f"FlowEngine callback failed: {e}")
+        
         return RecoveryAttempt(
-            timestamp=time.time(),
+            timestamp=timestamp,
             strategy=best_suggestion.strategy,
             action_taken=best_suggestion.description,
-            success=recovery_result["success"],
+            success=success,
             details=recovery_result["details"],
             time_taken=time_taken
         )

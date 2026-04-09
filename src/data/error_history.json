@@ -1,0 +1,15 @@
+[
+  {
+    "timestamp": 1775756543.544558,
+    "error_type": "element_not_found",
+    "error_message": "Element not found: submit_button",
+    "workflow_name": "test_workflow",
+    "step_name": "click_submit",
+    "step_index": 0,
+    "context": {},
+    "stack_trace": "Traceback (most recent call last):\n  File \"<string>\", line 26, in <module>\nException: Element not found: submit_button\n",
+    "recovery_attempted": true,
+    "recovery_result": "success",
+    "recovery_details": "已重新定位元素"
+  }
+]

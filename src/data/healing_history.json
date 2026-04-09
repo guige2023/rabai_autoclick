@@ -1,0 +1,14 @@
+[
+  {
+    "timestamp": 1775756543.5449018,
+    "workflow_name": "test_workflow",
+    "step_name": "click_submit",
+    "step_index": 0,
+    "error_type": "element_not_found",
+    "error_message": "Element not found: submit_button",
+    "strategy_used": "relocate",
+    "success": true,
+    "recovery_time": 1.1920928955078125e-06,
+    "details": "已重新定位元素"
+  }
+]
