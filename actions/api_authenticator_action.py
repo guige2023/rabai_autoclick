@@ -1,437 +1,425 @@
 """
-API Authentication and Authorization Module.
+API Authenticator Action Module
 
-Supports OAuth 2.0, API keys, JWT tokens, and basic auth.
-Handles token refresh, scope validation, and permission checking.
+Token-based authentication, JWT validation, OAuth2 flows,
+API key management, and session handling.
 
-Author: AutoGen
+MIT License - Copyright (c) 2025 RabAi Research
 """
+
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import hmac
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from enum import Enum, auto
-from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
-
-import jwt
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
 
-class AuthScheme(Enum):
-    NONE = auto()
-    API_KEY = auto()
-    BASIC = auto()
-    BEARER = auto()
-    OAUTH2 = auto()
-    HMAC = auto()
+class AuthType(Enum):
+    """Authentication types."""
+    
+    API_KEY = "api_key"
+    BEARER_TOKEN = "bearer_token"
+    BASIC = "basic"
+    JWT = "jwt"
+    OAUTH2 = "oauth2"
+    CUSTOM = "custom"
 
 
-@dataclass(frozen=True)
+@dataclass
 class TokenInfo:
-    """Immutable token metadata."""
-    access_token: str
-    token_type: str = "Bearer"
+    """Token metadata and claims."""
+    
+    token_id: str
+    token_type: str
+    user_id: Optional[str] = None
+    scopes: List[str] = field(default_factory=list)
+    issued_at: float = field(default_factory=time.time)
     expires_at: Optional[float] = None
     refresh_token: Optional[str] = None
-    scope: FrozenSet[str] = field(default_factory=frozenset)
-    issued_at: float = field(default_factory=lambda: time.time())
-
-    def is_expired(self, leeway: float = 60) -> bool:
-        if self.expires_at is None:
-            return False
-        return time.time() + leeway >= self.expires_at
-
-    def has_scope(self, required: str) -> bool:
-        return required in self.scope
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class ApiKeyInfo:
-    """API key metadata."""
-    key_id: str
-    key_prefix: str
-    secret_hash: str
-    scopes: FrozenSet[str] = field(default_factory=frozenset)
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    expires_at: Optional[datetime] = None
-    is_active: bool = True
-    last_used: Optional[datetime] = None
-    rate_limit: Optional[int] = None
+class AuthConfig:
+    """Configuration for authentication."""
+    
+    auth_type: AuthType = AuthType.BEARER_TOKEN
+    jwt_secret: Optional[str] = None
+    jwt_algorithm: str = "HS256"
+    token_ttl_seconds: int = 3600
+    refresh_token_ttl_days: int = 30
+    require_https: bool = True
+    allowed_origins: List[str] = field(default_factory=list)
 
 
-@dataclass
-class UserCredentials:
-    """User authentication credentials."""
-    user_id: str
-    password_hash: str
-    salt: str
-    mfa_enabled: bool = False
-    roles: FrozenSet[str] = field(default_factory=frozenset)
-    scopes: FrozenSet[str] = field(default_factory=frozenset)
-
-
-class OAuth2Handler:
-    """OAuth 2.0 authorization code and client credentials flow."""
-
-    def __init__(
-        self,
-        token_url: str,
-        client_id: str,
-        client_secret: str,
-        scope: Optional[str] = None,
-    ):
-        self.token_url = token_url
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self.scope = scope
+class TokenStore:
+    """In-memory token storage."""
+    
+    def __init__(self):
         self._tokens: Dict[str, TokenInfo] = {}
-
-    async def fetch_token(
-        self,
-        grant_type: str = "client_credentials",
-        code: Optional[str] = None,
-        redirect_uri: Optional[str] = None,
-        refresh: bool = False,
-    ) -> TokenInfo:
-        """Fetch or refresh an OAuth2 access token."""
-        import aiohttp
-
-        params = {
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
-            "grant_type": grant_type,
-        }
-
-        if self.scope:
-            params["scope"] = self.scope
-        if code:
-            params["code"] = code
-        if redirect_uri:
-            params["redirect_uri"] = redirect_uri
-
-        key = f"{grant_type}:{code}" if code else grant_type
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.token_url, data=params, timeout=aiohttp.ClientTimeout(total=10)
-                ) as resp:
-                    if resp.status != 200:
-                        text = await resp.text()
-                        raise RuntimeError(f"Token fetch failed: {resp.status} {text}")
-
-                    data = await resp.json()
-                    expires_in = data.get("expires_in", 3600)
-                    scope_str = data.get("scope", self.scope or "")
-
-                    token_info = TokenInfo(
-                        access_token=data["access_token"],
-                        token_type=data.get("token_type", "Bearer"),
-                        expires_at=time.time() + expires_in,
-                        refresh_token=data.get("refresh_token"),
-                        scope=frozenset(scope_str.split()),
-                    )
-                    self._tokens[key] = token_info
-                    return token_info
-
-        except Exception as exc:
-            logger.error("OAuth2 token fetch error: %s", exc)
-            raise
-
-    async def refresh_if_needed(self, refresh_token: str) -> TokenInfo:
-        """Refresh an expired or near-expired token."""
-        import aiohttp
-
-        params = {
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        }
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.token_url, data=params, timeout=aiohttp.ClientTimeout(total=10)
-                ) as resp:
-                    if resp.status != 200:
-                        raise RuntimeError(f"Refresh failed: {resp.status}")
-                    data = await resp.json()
-                    expires_in = data.get("expires_in", 3600)
-                    return TokenInfo(
-                        access_token=data["access_token"],
-                        token_type=data.get("token_type", "Bearer"),
-                        expires_at=time.time() + expires_in,
-                        refresh_token=data.get("refresh_token", refresh_token),
-                        scope=frozenset(data.get("scope", "").split()),
-                    )
-        except Exception as exc:
-            logger.error("Token refresh error: %s", exc)
-            raise
+        self._refresh_tokens: Dict[str, TokenInfo] = {}
+        self._api_keys: Dict[str, Dict] = {}
+        self._lock = asyncio.Lock()
+    
+    async def store_token(self, info: TokenInfo) -> None:
+        """Store a token."""
+        async with self._lock:
+            self._tokens[info.token_id] = info
+    
+    async def get_token(self, token_id: str) -> Optional[TokenInfo]:
+        """Get token info."""
+        return self._tokens.get(token_id)
+    
+    async def revoke_token(self, token_id: str) -> bool:
+        """Revoke a token."""
+        async with self._lock:
+            if token_id in self._tokens:
+                del self._tokens[token_id]
+                return True
+            return False
+    
+    async def store_api_key(self, key: str, info: Dict) -> None:
+        """Store an API key."""
+        key_hash = hashlib.sha256(key.encode()).hexdigest()
+        async with self._lock:
+            self._api_keys[key_hash] = info
+    
+    async def get_api_key(self, key: str) -> Optional[Dict]:
+        """Get API key info."""
+        key_hash = hashlib.sha256(key.encode()).hexdigest()
+        return self._api_keys.get(key_hash)
+    
+    async def cleanup_expired(self) -> int:
+        """Remove expired tokens."""
+        count = 0
+        now = time.time()
+        async with self._lock:
+            expired = [
+                tid for tid, info in self._tokens.items()
+                if info.expires_at and info.expires_at < now
+            ]
+            for tid in expired:
+                del self._tokens[tid]
+                count += 1
+        return count
 
 
 class JWTAuthenticator:
-    """JWT-based authentication and claims validation."""
-
-    def __init__(
-        self,
-        secret_key: str,
-        algorithm: str = "HS256",
-        issuer: Optional[str] = None,
-        audience: Optional[str] = None,
-    ):
-        self.secret_key = secret_key
+    """JWT token creation and validation."""
+    
+    def __init__(self, secret: str, algorithm: str = "HS256"):
+        self.secret = secret
         self.algorithm = algorithm
-        self.issuer = issuer
-        self.audience = audience
-
+    
     def create_token(
         self,
-        subject: str,
+        user_id: str,
         scopes: List[str],
-        expiry_seconds: int = 3600,
-        extra_claims: Optional[Dict[str, Any]] = None,
+        ttl_seconds: int,
+        extra_claims: Optional[Dict] = None
     ) -> str:
-        """Create a signed JWT token."""
+        """Create a JWT token."""
+        import jwt
+        
         now = time.time()
         payload = {
-            "sub": subject,
-            "scope": " ".join(scopes),
+            "sub": user_id,
+            "scopes": scopes,
             "iat": now,
-            "exp": now + expiry_seconds,
-            "jti": hashlib.sha256(f"{subject}{now}".encode()).hexdigest()[:16],
+            "exp": now + ttl_seconds,
+            "jti": str(uuid.uuid4())
         }
-        if self.issuer:
-            payload["iss"] = self.issuer
-        if self.audience:
-            payload["aud"] = self.audience
+        
         if extra_claims:
             payload.update(extra_claims)
-
-        return jwt.encode(payload, self.secret_key, algorithm=self.algorithm)
-
-    def verify_token(self, token: str) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
-        """
-        Verify a JWT token.
-
-        Returns (is_valid, claims, error_message).
-        """
+        
+        return jwt.encode(payload, self.secret, algorithm=self.algorithm)
+    
+    def validate_token(self, token: str) -> Optional[Dict]:
+        """Validate a JWT token."""
+        import jwt
+        
         try:
-            options = {"verify_signature": True, "verify_exp": True}
-            if self.issuer:
-                options["verify_iss"] = True
-            if self.audience:
-                options["verify_aud"] = True
-
-            claims = jwt.decode(
+            payload = jwt.decode(
                 token,
-                self.secret_key,
-                algorithms=[self.algorithm],
-                issuer=self.issuer,
-                audience=self.audience,
-                options=options,
+                self.secret,
+                algorithms=[self.algorithm]
             )
-            return (True, claims, None)
+            return payload
         except jwt.ExpiredSignatureError:
-            return (False, None, "Token has expired")
-        except jwt.InvalidIssuerError:
-            return (False, None, "Invalid issuer")
-        except jwt.InvalidAudienceError:
-            return (False, None, "Invalid audience")
-        except jwt.InvalidTokenError as exc:
-            return (False, None, f"Invalid token: {exc}")
-
-    def extract_scopes(self, token: str) -> FrozenSet[str]:
-        """Extract scopes from a JWT token without full verification."""
-        try:
-            claims = jwt.decode(
-                token, options={"verify_signature": False, "verify_exp": False}
-            )
-            scope_str = claims.get("scope", "")
-            return frozenset(scope_str.split())
-        except Exception:
-            return frozenset()
-
-
-class HmacAuthenticator:
-    """HMAC-based request signing (AWS S3 style)."""
-
-    def __init__(self, access_key: str, secret_key: str, algorithm: str = "sha256"):
-        self.access_key = access_key
-        self.secret_key = secret_key
-        self.algorithm = algorithm
-
-    def sign_request(
-        self,
-        method: str,
-        path: str,
-        headers: Dict[str, str],
-        body: Optional[bytes] = None,
-        timestamp: Optional[str] = None,
-    ) -> Dict[str, str]:
-        """Create signed headers for an HMAC-authenticated request."""
-        import hashlib, hmac as hmac_lib
-
-        ts = timestamp or datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-        date_stamp = ts[:8]
-
-        algo = getattr(hashlib, self.algorithm)
-
-        canonical_headers = "\n".join(
-            f"{k.lower()}:{v.strip()}" for k, v in sorted(headers.items())
-        ) + "\n"
-
-        signed_headers = ";".join(k.lower() for k, v in sorted(headers.items()))
-
-        payload_hash = (
-            hashlib.sha256(body or b"").hexdigest() if body else hashlib.sha256(b"").hexdigest()
+            logger.warning("JWT token expired")
+            return None
+        except jwt.InvalidTokenError as e:
+            logger.warning(f"JWT validation failed: {e}")
+            return None
+    
+    def refresh_token(self, token: str, ttl_seconds: int) -> Optional[str]:
+        """Refresh a JWT token."""
+        payload = self.validate_token(token)
+        if not payload:
+            return None
+        
+        return self.create_token(
+            user_id=payload.get("sub"),
+            scopes=payload.get("scopes", []),
+            ttl_seconds=ttl_seconds
         )
 
-        canonical_request = "\n".join([
-            method.upper(),
-            path,
-            "",
-            canonical_headers,
-            signed_headers,
-            payload_hash,
-        ])
 
-        credential_scope = f"{date_stamp}/request/{hashlib.sha256(canonical_request.encode()).hexdigest()}"
-
-        string_to_sign = f"{self.algorithm}\n{ts}\n{credential_scope}\n{hashlib.sha256(canonical_request.encode()).hexdigest()}"
-
-        signature = hmac_lib.new(
-            self.secret_key.encode(), string_to_sign.encode(), algo
+class APIKeyGenerator:
+    """API key generation and validation."""
+    
+    @staticmethod
+    def generate(prefix: str = "sk", length: int = 32) -> str:
+        """Generate an API key."""
+        import secrets
+        key_body = secrets.token_urlsafe(length)
+        return f"{prefix}_{key_body}"
+    
+    @staticmethod
+    def validate_format(key: str, prefix: str = "sk") -> bool:
+        """Validate API key format."""
+        return key.startswith(f"{prefix}_") and len(key) > len(prefix) + 10
+    
+    @staticmethod
+    def generate_signature(method: str, path: str, timestamp: str, body: str, secret: str) -> str:
+        """Generate request signature for API key auth."""
+        message = f"{method}{path}{timestamp}{body}"
+        signature = hmac.new(
+            secret.encode(),
+            message.encode(),
+            hashlib.sha256
         ).hexdigest()
-
-        signed = {
-            "X-Signature": signature,
-            "X-Timestamp": ts,
-            "X-Access-Key": self.access_key,
-            "X-Signed-Headers": signed_headers,
-        }
-        return signed
+        return signature
 
 
-class ApiAuthenticator:
+class APIAuthenticatorAction:
     """
-    Unified API authenticator supporting multiple auth schemes.
+    Main API authenticator action handler.
+    
+    Provides multiple authentication methods with
+    token management and authorization checks.
     """
-
-    def __init__(self):
-        self._handlers: Dict[AuthScheme, Any] = {}
-        self._api_keys: Dict[str, ApiKeyInfo] = {}
-        self._users: Dict[str, UserCredentials] = {}
-
-    def register_oauth2(self, handler: OAuth2Handler) -> None:
-        self._handlers[AuthScheme.OAUTH2] = handler
-
-    def register_jwt(self, authenticator: JWTAuthenticator) -> None:
-        self._handlers[AuthScheme.BEARER] = authenticator
-
-    def register_api_key(self, key_id: str, info: ApiKeyInfo) -> None:
-        self._api_keys[key_id] = info
-
-    def register_user(self, user_id: str, credentials: UserCredentials) -> None:
-        self._users[user_id] = credentials
-
-    async def authenticate_request(
+    
+    def __init__(self, config: Optional[AuthConfig] = None):
+        self.config = config or AuthConfig()
+        self.store = TokenStore()
+        self._jwt_auth: Optional[JWTAuthenticator] = None
+        
+        if self.config.jwt_secret:
+            self._jwt_auth = JWTAuthenticator(
+                self.config.jwt_secret,
+                self.config.jwt_algorithm
+            )
+        
+        self._middleware: List[Callable] = []
+        self._auth_handlers: Dict[AuthType, Callable] = {}
+    
+    def register_handler(self, auth_type: AuthType, handler: Callable) -> None:
+        """Register a custom authentication handler."""
+        self._auth_handlers[auth_type] = handler
+    
+    async def authenticate(
         self,
-        scheme: AuthScheme,
-        headers: Dict[str, str],
-        body: Optional[bytes] = None,
-    ) -> Tuple[bool, Optional[str], FrozenSet[str]]:
-        """
-        Authenticate an incoming request.
-
-        Returns (success, user_id, scopes).
-        """
-        if scheme == AuthScheme.API_KEY:
-            return self._auth_api_key(headers)
-        elif scheme == AuthScheme.BEARER:
-            return self._auth_bearer(headers)
-        elif scheme == AuthScheme.BASIC:
-            return self._auth_basic(headers)
-        elif scheme == AuthScheme.HMAC:
-            return self._auth_hmac(headers, body)
-        return (False, None, frozenset())
-
-    def _auth_api_key(
-        self, headers: Dict[str, str]
-    ) -> Tuple[bool, Optional[str], FrozenSet[str]]:
-        api_key = headers.get("X-API-Key") or headers.get("Authorization", "").replace("ApiKey ", "")
+        auth_type: AuthType,
+        credentials: Dict
+    ) -> Optional[TokenInfo]:
+        """Authenticate with given credentials."""
+        if auth_type == AuthType.JWT:
+            return await self._authenticate_jwt(credentials)
+        elif auth_type == AuthType.API_KEY:
+            return await self._authenticate_api_key(credentials)
+        elif auth_type == AuthType.BEARER_TOKEN:
+            return await self._authenticate_bearer(credentials)
+        
+        handler = self._auth_handlers.get(auth_type)
+        if handler:
+            return await handler(credentials)
+        
+        return None
+    
+    async def _authenticate_jwt(self, credentials: Dict) -> Optional[TokenInfo]:
+        """Authenticate using JWT."""
+        token = credentials.get("token")
+        if not token or not self._jwt_auth:
+            return None
+        
+        payload = self._jwt_auth.validate_token(token)
+        if not payload:
+            return None
+        
+        return TokenInfo(
+            token_id=payload.get("jti", str(uuid.uuid4())),
+            token_type="jwt",
+            user_id=payload.get("sub"),
+            scopes=payload.get("scopes", []),
+            issued_at=payload.get("iat"),
+            expires_at=payload.get("exp"),
+            metadata=payload
+        )
+    
+    async def _authenticate_api_key(self, credentials: Dict) -> Optional[TokenInfo]:
+        """Authenticate using API key."""
+        api_key = credentials.get("api_key")
         if not api_key:
-            return (False, None, frozenset())
-
-        for key_id, info in self._api_keys.items():
-            if key_id == api_key[: len(key_id)]:
-                if info.is_active and (
-                    info.expires_at is None or info.expires_at > datetime.utcnow()
-                ):
-                    return (True, key_id, info.scopes)
-        return (False, None, frozenset())
-
-    def _auth_bearer(
-        self, headers: Dict[str, str]
-    ) -> Tuple[bool, Optional[str], FrozenSet[str]]:
+            return None
+        
+        key_info = await self.store.get_api_key(api_key)
+        if not key_info:
+            return None
+        
+        return TokenInfo(
+            token_id=api_key[:16],
+            token_type="api_key",
+            user_id=key_info.get("user_id"),
+            scopes=key_info.get("scopes", []),
+            metadata=key_info
+        )
+    
+    async def _authenticate_bearer(self, credentials: Dict) -> Optional[TokenInfo]:
+        """Authenticate using bearer token."""
+        token = credentials.get("token")
+        if not token:
+            return None
+        
+        return await self.store.get_token(token)
+    
+    async def create_token(
+        self,
+        user_id: str,
+        scopes: List[str] = None,
+        auth_type: AuthType = AuthType.BEARER_TOKEN,
+        extra_claims: Optional[Dict] = None
+    ) -> TokenInfo:
+        """Create a new authentication token."""
+        scopes = scopes or []
+        
+        if auth_type == AuthType.JWT and self._jwt_auth:
+            token = self._jwt_auth.create_token(
+                user_id,
+                scopes,
+                self.config.token_ttl_seconds,
+                extra_claims
+            )
+            token_id = str(uuid.uuid4())
+        else:
+            import secrets
+            token = f"{self.config.auth_type.value}_{secrets.token_urlsafe(32)}"
+            token_id = token
+        
+        info = TokenInfo(
+            token_id=token_id,
+            token_type=auth_type.value,
+            user_id=user_id,
+            scopes=scopes,
+            issued_at=time.time(),
+            expires_at=time.time() + self.config.token_ttl_seconds
+        )
+        
+        await self.store.store_token(info)
+        
+        return info
+    
+    async def create_api_key(
+        self,
+        user_id: str,
+        name: str,
+        scopes: List[str] = None
+    ) -> str:
+        """Create a new API key."""
+        api_key = APIKeyGenerator.generate()
+        
+        await self.store.store_api_key(api_key, {
+            "user_id": user_id,
+            "name": name,
+            "scopes": scopes or [],
+            "created_at": time.time()
+        })
+        
+        return api_key
+    
+    async def revoke_token(self, token_id: str) -> bool:
+        """Revoke a token."""
+        return await self.store.revoke_token(token_id)
+    
+    def validate_scopes(
+        self,
+        token_info: TokenInfo,
+        required_scopes: List[str]
+    ) -> bool:
+        """Validate that token has required scopes."""
+        if not required_scopes:
+            return True
+        
+        token_scopes = set(token_info.scopes)
+        for scope in required_scopes:
+            if scope not in token_scopes:
+                return False
+        return True
+    
+    async def middleware(
+        self,
+        request: Dict,
+        required_scopes: Optional[List[str]] = None
+    ) -> Optional[Dict]:
+        """Authentication middleware for requests."""
+        headers = request.get("headers", {})
+        
         auth_header = headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
-            return (False, None, frozenset())
-
-        token = auth_header[7:]
-        jwt_auth: Optional[JWTAuthenticator] = self._handlers.get(AuthScheme.BEARER)
-        if not jwt_auth:
-            return (False, None, frozenset())
-
-        valid, claims, _ = jwt_auth.verify_token(token)
-        if valid and claims:
-            subject = claims.get("sub", "")
-            scopes = jwt_auth.extract_scopes(token)
-            return (True, subject, scopes)
-        return (False, None, frozenset())
-
-    def _auth_basic(
-        self, headers: Dict[str, str]
-    ) -> Tuple[bool, Optional[str], FrozenSet[str]]:
-        import base64 as b64
-
-        auth_header = headers.get("Authorization", "")
-        if not auth_header.startswith("Basic "):
-            return (False, None, frozenset())
-
-        try:
-            decoded = b64.b64decode(auth_header[6:]).decode()
-            user_id, _, password = decoded.partition(":")
-            creds = self._users.get(user_id)
-            if creds and self._verify_password(password, creds.password_hash, creds.salt):
-                return (True, user_id, creds.scopes)
-        except Exception:
-            pass
-        return (False, None, frozenset())
-
-    def _auth_hmac(
-        self, headers: Dict[str, str], body: Optional[bytes]
-    ) -> Tuple[bool, Optional[str], FrozenSet[str]]:
-        access_key = headers.get("X-Access-Key")
-        if not access_key:
-            return (False, None, frozenset())
-        return (True, access_key, frozenset())
-
-    def _verify_password(self, password: str, stored_hash: str, salt: str) -> bool:
-        import hashlib
-        computed = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100000)
-        return computed.hex() == stored_hash
-
-    def hash_password(self, password: str, salt: Optional[str] = None) -> Tuple[str, str]:
-        import hashlib, os
-        s = salt or os.urandom(32).hex()
-        computed = hashlib.pbkdf2_hmac("sha256", password.encode(), s.encode(), 100000)
-        return computed.hex(), s
+        
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            credentials = {"token": token}
+            auth_type = AuthType.BEARER_TOKEN
+        elif auth_header.startswith("Basic "):
+            import base64
+            try:
+                decoded = base64.b64decode(auth_header[6:]).decode()
+                username, password = decoded.split(":", 1)
+                credentials = {"username": username, "password": password}
+                auth_type = AuthType.BASIC
+            except Exception:
+                return None
+        else:
+            api_key = headers.get("X-API-Key") or headers.get("api_key")
+            if api_key:
+                credentials = {"api_key": api_key}
+                auth_type = AuthType.API_KEY
+            else:
+                return None
+        
+        token_info = await self.authenticate(auth_type, credentials)
+        
+        if not token_info:
+            return None
+        
+        if token_info.expires_at and token_info.expires_at < time.time():
+            return None
+        
+        if required_scopes and not self.validate_scopes(token_info, required_scopes):
+            return None
+        
+        request["auth"] = token_info
+        
+        for mw in self._middleware:
+            await mw(request, token_info)
+        
+        return token_info
+    
+    def add_middleware(self, func: Callable) -> None:
+        """Add post-authentication middleware."""
+        self._middleware.append(func)
+    
+    async def cleanup(self) -> int:
+        """Clean up expired tokens."""
+        return await self.store.cleanup_expired()
