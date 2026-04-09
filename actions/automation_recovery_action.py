@@ -1,304 +1,330 @@
-"""Automation Recovery Action.
+"""Automation recovery action for error recovery and retry.
 
-Provides automatic recovery from automation failures with retry logic,
-checkpoint/restore, state rollback, and fallback action execution.
+Implements sophisticated recovery strategies including
+exponential backoff, circuit breaking, and state rollback.
 """
 
-import sys
-import os
+import asyncio
+import logging
 import time
-import pickle
-from typing import Any, Dict, List, Optional, Callable
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Optional
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class AutomationRecoveryAction(BaseAction):
-    """Recover from automation failures with various strategies.
-    
-    Supports retry with backoff, checkpoint/restore state,
-    rollback mechanisms, and fallback action chains.
+class RecoveryStrategy(Enum):
+    """Recovery strategies when failures occur."""
+    RETRY = "retry"
+    ROLLBACK = "rollback"
+    FALLBACK = "fallback"
+    SKIP = "skip"
+    ABORT = "abort"
+
+
+@dataclass
+class RecoveryConfig:
+    """Configuration for recovery behavior."""
+    max_retries: int = 3
+    initial_delay_ms: float = 100.0
+    max_delay_ms: float = 5000.0
+    backoff_multiplier: float = 2.0
+    enable_rollback: bool = True
+    enable_circuit_breaker: bool = True
+    circuit_threshold: int = 5
+
+
+@dataclass
+class RecoveryState:
+    """Current state of recovery mechanism."""
+    retry_count: int = 0
+    circuit_state: str = "closed"
+    last_failure: Optional[float] = None
+    consecutive_failures: int = 0
+
+
+@dataclass
+class RecoveryResult:
+    """Result of a recovery operation."""
+    success: bool
+    recovered: bool
+    strategy_used: RecoveryStrategy
+    attempts: int
+    total_time_ms: float
+    error: Optional[str] = None
+
+
+class AutomationRecoveryAction:
+    """Handle errors and recover from failures.
+
+    Args:
+        config: Recovery configuration options.
+        rollback_fn: Optional function to rollback state.
+
+    Example:
+        >>> recovery = AutomationRecoveryAction()
+        >>> result = await recovery.execute_with_recovery(
+        ...     fragile_operation,
+        ...     fallback_fn=backup_operation,
+        ... )
     """
-    action_type = "automation_recovery"
-    display_name = "自动化恢复"
-    description = "自动化失败恢复，支持重试、检查点/恢复、回滚"
 
-    def __init__(self):
-        super().__init__()
-        self._checkpoints: Dict[str, Any] = {}
-        self._rollback_handlers: Dict[str, Callable] = {}
+    def __init__(
+        self,
+        config: Optional[RecoveryConfig] = None,
+        rollback_fn: Optional[Callable[[], Any]] = None,
+    ) -> None:
+        self.config = config or RecoveryConfig()
+        self.rollback_fn = rollback_fn
+        self._state = RecoveryState()
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute action with recovery capabilities.
-        
+    async def execute_with_recovery(
+        self,
+        operation: Callable[..., Any],
+        fallback_fn: Optional[Callable[..., Any]] = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> RecoveryResult:
+        """Execute an operation with recovery support.
+
         Args:
-            context: Execution context.
-            params: Dict with keys:
-                - action: 'retry', 'checkpoint_save', 'checkpoint_restore',
-                         'rollback', 'fallback', 'recover'.
-                - target_action: Action to execute with recovery.
-                - target_params: Parameters for target action.
-                - max_retries: Max retry attempts (default: 3).
-                - retry_delay: Base delay between retries (default: 1.0).
-                - exponential_backoff: Use exponential backoff (default: True).
-                - checkpoint_id: ID for checkpoint save/restore.
-                - rollback_actions: List of rollback action definitions.
-                - fallback_actions: List of fallback action definitions.
-                - save_to_var: Variable name for results.
-        
+            operation: Operation to execute.
+            fallback_fn: Fallback if all retries fail.
+            *args: Positional arguments.
+            **kwargs: Keyword arguments.
+
         Returns:
-            ActionResult with recovery results.
+            Recovery result with details.
         """
-        try:
-            action = params.get('action', 'recover')
-            save_to_var = params.get('save_to_var', 'recovery_result')
+        import time
+        start_time = time.time()
+        attempts = 0
+        last_error: Optional[Exception] = None
 
-            if action == 'retry':
-                return self._retry_action(context, params, save_to_var)
-            elif action == 'checkpoint_save':
-                return self._save_checkpoint(context, params, save_to_var)
-            elif action == 'checkpoint_restore':
-                return self._restore_checkpoint(context, params, save_to_var)
-            elif action == 'rollback':
-                return self._rollback(context, params, save_to_var)
-            elif action == 'fallback':
-                return self._execute_fallback(context, params, save_to_var)
-            elif action == 'recover':
-                return self._recover_with_all_strategies(context, params, save_to_var)
-            else:
-                return ActionResult(success=False, message=f"Unknown recovery action: {action}")
+        while attempts < self.config.max_retries:
+            attempts += 1
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Recovery error: {e}")
+            if self._is_circuit_open():
+                logger.warning("Circuit breaker is open, using fallback")
+                return await self._use_fallback(
+                    operation, fallback_fn, args, kwargs,
+                    start_time, attempts, "Circuit breaker open"
+                )
 
-    def _retry_action(self, context: Any, params: Dict, save_to_var: str) -> ActionResult:
-        """Retry action with backoff."""
-        target_action = params.get('target_action')
-        target_params = params.get('target_params', {})
-        max_retries = params.get('max_retries', 3)
-        retry_delay = params.get('retry_delay', 1.0)
-        exponential_backoff = params.get('exponential_backoff', True)
-
-        if not target_action:
-            return ActionResult(success=False, message="target_action is required")
-
-        last_error = None
-        action_obj = self._get_action(target_action)
-
-        for attempt in range(max_retries + 1):
             try:
-                result = action_obj.execute(context, target_params) if action_obj else None
-                
-                if result and result.success:
-                    return ActionResult(success=True, data={
-                        'attempt': attempt + 1,
-                        'result': result.data
-                    }, message=f"Success on attempt {attempt + 1}")
+                if asyncio.iscoroutinefunction(operation):
+                    result = await operation(*args, **kwargs)
                 else:
-                    last_error = result.message if result else "Unknown error"
+                    result = operation(*args, **kwargs)
+
+                self._on_success()
+                return RecoveryResult(
+                    success=True,
+                    recovered=attempts > 1,
+                    strategy_used=RecoveryStrategy.RETRY,
+                    attempts=attempts,
+                    total_time_ms=(time.time() - start_time) * 1000,
+                )
+
             except Exception as e:
-                last_error = str(e)
+                last_error = e
+                self._on_failure()
+                logger.warning(
+                    f"Operation attempt {attempts} failed: {e}"
+                )
 
-            if attempt < max_retries:
-                delay = retry_delay * (2 ** attempt) if exponential_backoff else retry_delay
-                time.sleep(delay)
+                if attempts < self.config.max_retries:
+                    delay = self._calculate_delay(attempts)
+                    await asyncio.sleep(delay / 1000.0)
 
-        return ActionResult(success=False, data={
-            'attempts': max_retries + 1,
-            'last_error': last_error
-        }, message=f"All {max_retries + 1} attempts failed")
+        if fallback_fn and self.config.enable_rollback:
+            return await self._attempt_rollback(
+                operation, fallback_fn, args, kwargs, start_time, attempts
+            )
 
-    def _save_checkpoint(self, context: Any, params: Dict, save_to_var: str) -> ActionResult:
-        """Save current state as checkpoint."""
-        checkpoint_id = params.get('checkpoint_id', 'default')
-        include_variables = params.get('include_variables', True)
-        include_state = params.get('include_state', True)
+        return RecoveryResult(
+            success=False,
+            recovered=False,
+            strategy_used=RecoveryStrategy.ABORT,
+            attempts=attempts,
+            total_time_ms=(time.time() - start_time) * 1000,
+            error=str(last_error),
+        )
 
-        checkpoint_data = {
-            'timestamp': time.time(),
-            'variables': context.get_all_variables() if include_variables else {},
-            'state': self._serialize_state(context) if include_state else {}
-        }
+    async def _attempt_rollback(
+        self,
+        operation: Callable[..., Any],
+        fallback_fn: Callable[..., Any],
+        args: tuple,
+        kwargs: dict,
+        start_time: float,
+        attempts: int,
+    ) -> RecoveryResult:
+        """Attempt to rollback and use fallback.
 
-        self._checkpoints[checkpoint_id] = checkpoint_data
+        Args:
+            operation: Original operation.
+            fallback_fn: Fallback function.
+            args: Operation arguments.
+            kwargs: Operation keyword arguments.
+            start_time: Start timestamp.
+            attempts: Number of attempts made.
 
-        context.set_variable(save_to_var, {
-            'checkpoint_id': checkpoint_id,
-            'saved': True,
-            'timestamp': checkpoint_data['timestamp']
-        })
-
-        return ActionResult(success=True, data=checkpoint_data,
-                           message=f"Checkpoint '{checkpoint_id}' saved")
-
-    def _restore_checkpoint(self, context: Any, params: Dict, save_to_var: str) -> ActionResult:
-        """Restore state from checkpoint."""
-        checkpoint_id = params.get('checkpoint_id', 'default')
-
-        if checkpoint_id not in self._checkpoints:
-            return ActionResult(success=False, message=f"Checkpoint '{checkpoint_id}' not found")
-
-        checkpoint = self._checkpoints[checkpoint_id]
-        
-        # Restore variables
-        for key, value in checkpoint.get('variables', {}).items():
-            context.set_variable(key, value)
-
-        # Restore state
-        self._deserialize_state(context, checkpoint.get('state', {}))
-
-        context.set_variable(save_to_var, {
-            'checkpoint_id': checkpoint_id,
-            'restored': True,
-            'timestamp': checkpoint['timestamp']
-        })
-
-        return ActionResult(success=True, data=checkpoint,
-                           message=f"Checkpoint '{checkpoint_id}' restored")
-
-    def _rollback(self, context: Any, params: Dict, save_to_var: str) -> ActionResult:
-        """Execute rollback actions."""
-        rollback_actions = params.get('rollback_actions', [])
-        rollback_id = params.get('rollback_id', 'default')
-
-        results = []
-        for i, rb_action_def in enumerate(reversed(rollback_actions)):
-            action_name = rb_action_def.get('action')
-            action_params = rb_action_def.get('params', {})
-
+        Returns:
+            Recovery result.
+        """
+        if self.rollback_fn:
             try:
-                action_obj = self._get_action(action_name)
-                if action_obj:
-                    result = action_obj.execute(context, action_params)
-                    results.append({
-                        'index': i,
-                        'action': action_name,
-                        'success': result.success if result else False,
-                        'result': result.data if result else None
-                    })
+                logger.info("Attempting rollback before fallback")
+                if asyncio.iscoroutinefunction(self.rollback_fn):
+                    await self.rollback_fn()
+                else:
+                    self.rollback_fn()
             except Exception as e:
-                results.append({
-                    'index': i,
-                    'action': action_name,
-                    'success': False,
-                    'error': str(e)
-                })
+                logger.error(f"Rollback failed: {e}")
 
-        summary = {
-            'rollback_id': rollback_id,
-            'total_actions': len(rollback_actions),
-            'results': results,
-            'all_success': all(r.get('success', False) for r in results)
-        }
-
-        context.set_variable(save_to_var, summary)
-        return ActionResult(success=summary['all_success'], data=summary,
-                           message=f"Rollback: {sum(1 for r in results if r.get('success'))}/{len(results)} actions succeeded")
-
-    def _execute_fallback(self, context: Any, params: Dict, save_to_var: str) -> ActionResult:
-        """Execute fallback action chain."""
-        fallback_actions = params.get('fallback_actions', [])
-        original_error = params.get('original_error', 'Unknown')
-
-        for i, fb_action_def in enumerate(fallback_actions):
-            action_name = fb_action_def.get('action')
-            action_params = fb_action_def.get('params', {})
-
-            try:
-                action_obj = self._get_action(action_name)
-                if action_obj:
-                    result = action_obj.execute(context, action_params)
-                    if result and result.success:
-                        context.set_variable(save_to_var, {
-                            'fallback_succeeded': True,
-                            'fallback_index': i,
-                            'action': action_name,
-                            'result': result.data
-                        })
-                        return ActionResult(success=True, data=result.data,
-                                          message=f"Fallback {i+1} succeeded")
-            except Exception as e:
-                continue
-
-        return ActionResult(success=False, data={
-            'fallback_succeeded': False,
-            'original_error': original_error
-        }, message="All fallbacks failed")
-
-    def _recover_with_all_strategies(self, context: Any, params: Dict, save_to_var: str) -> ActionResult:
-        """Attempt recovery using all available strategies."""
-        checkpoint_id = params.get('checkpoint_id', 'recovery')
-        max_retries = params.get('max_retries', 3)
-        fallback_actions = params.get('fallback_actions', [])
-        rollback_actions = params.get('rollback_actions', [])
-
-        strategies_attempted = []
-        recovery_success = False
-        final_result = None
-
-        # Strategy 1: Checkpoint restore
-        if checkpoint_id in self._checkpoints:
-            strategies_attempted.append('checkpoint_restore')
-            restore_result = self._restore_checkpoint(context, params, f'{save_to_var}_cp')
-            if restore_result.success:
-                recovery_success = True
-                final_result = restore_result.data
-
-        # Strategy 2: Retry
-        if not recovery_success:
-            strategies_attempted.append('retry')
-            retry_result = self._retry_action(context, params, f'{save_to_var}_retry')
-            if retry_result.success:
-                recovery_success = True
-                final_result = retry_result.data
-
-        # Strategy 3: Rollback
-        if not recovery_success and rollback_actions:
-            strategies_attempted.append('rollback')
-            rollback_result = self._rollback(context, {'rollback_actions': rollback_actions}, f'{save_to_var}_rb')
-            if rollback_result.success:
-                recovery_success = True
-                final_result = rollback_result.data
-
-        # Strategy 4: Fallback
-        if not recovery_success and fallback_actions:
-            strategies_attempted.append('fallback')
-            fallback_result = self._execute_fallback(context, {'fallback_actions': fallback_actions}, f'{save_to_var}_fb')
-            if fallback_result.success:
-                recovery_success = True
-                final_result = fallback_result.data
-
-        summary = {
-            'recovered': recovery_success,
-            'strategies_attempted': strategies_attempted,
-            'final_result': final_result
-        }
-
-        context.set_variable(save_to_var, summary)
-        return ActionResult(success=recovery_success, data=summary,
-                           message=f"Recovery: {'succeeded' if recovery_success else 'failed'}")
-
-    def _serialize_state(self, context: Any) -> Dict:
-        """Serialize context state."""
         try:
-            return {
-                'variables': context.get_all_variables(),
-                'serialized_at': time.time()
-            }
-        except Exception:
-            return {}
+            if asyncio.iscoroutinefunction(fallback_fn):
+                result = await fallback_fn(*args, **kwargs)
+            else:
+                result = fallback_fn(*args, **kwargs)
 
-    def _deserialize_state(self, context: Any, state: Dict):
-        """Deserialize and restore state to context."""
+            return RecoveryResult(
+                success=True,
+                recovered=True,
+                strategy_used=RecoveryStrategy.FALLBACK,
+                attempts=attempts,
+                total_time_ms=(time.time() - start_time) * 1000,
+            )
+        except Exception as e:
+            return RecoveryResult(
+                success=False,
+                recovered=False,
+                strategy_used=RecoveryStrategy.FALLBACK,
+                attempts=attempts,
+                total_time_ms=(time.time() - start_time) * 1000,
+                error=str(e),
+            )
+
+    async def _use_fallback(
+        self,
+        operation: Callable[..., Any],
+        fallback_fn: Optional[Callable[..., Any]],
+        args: tuple,
+        kwargs: dict,
+        start_time: float,
+        attempts: int,
+        reason: str,
+    ) -> RecoveryResult:
+        """Use fallback when circuit is open.
+
+        Args:
+            operation: Original operation.
+            fallback_fn: Fallback function.
+            args: Operation arguments.
+            kwargs: Operation keyword arguments.
+            start_time: Start timestamp.
+            attempts: Number of attempts.
+            reason: Reason for fallback.
+
+        Returns:
+            Recovery result.
+        """
+        if not fallback_fn:
+            return RecoveryResult(
+                success=False,
+                recovered=False,
+                strategy_used=RecoveryStrategy.ABORT,
+                attempts=attempts,
+                total_time_ms=(time.time() - start_time) * 1000,
+                error=reason,
+            )
+
         try:
-            for key, value in state.get('variables', {}).items():
-                context.set_variable(key, value)
-        except Exception:
-            pass
+            if asyncio.iscoroutinefunction(fallback_fn):
+                await fallback_fn(*args, **kwargs)
+            else:
+                fallback_fn(*args, **kwargs)
 
-    def _get_action(self, action_name: str):
-        """Get action from registry."""
-        from core.action_registry import ActionRegistry
-        registry = ActionRegistry.get_instance()
-        return registry.get_action(action_name)
+            return RecoveryResult(
+                success=True,
+                recovered=True,
+                strategy_used=RecoveryStrategy.FALLBACK,
+                attempts=attempts,
+                total_time_ms=(time.time() - start_time) * 1000,
+            )
+        except Exception as e:
+            return RecoveryResult(
+                success=False,
+                recovered=False,
+                strategy_used=RecoveryStrategy.FALLBACK,
+                attempts=attempts,
+                total_time_ms=(time.time() - start_time) * 1000,
+                error=str(e),
+            )
+
+    def _calculate_delay(self, attempt: int) -> float:
+        """Calculate delay for retry with exponential backoff.
+
+        Args:
+            attempt: Current attempt number.
+
+        Returns:
+            Delay in milliseconds.
+        """
+        delay = self.config.initial_delay_ms * (
+            self.config.backoff_multiplier ** (attempt - 1)
+        )
+        return min(delay, self.config.max_delay_ms)
+
+    def _on_success(self) -> None:
+        """Handle successful operation."""
+        self._state.consecutive_failures = 0
+        if self._state.circuit_state == "half_open":
+            self._state.circuit_state = "closed"
+
+    def _on_failure(self) -> None:
+        """Handle failed operation."""
+        self._state.consecutive_failures += 1
+        self._state.last_failure = time.time()
+
+        if self.config.enable_circuit_breaker:
+            if self._state.consecutive_failures >= self.config.circuit_threshold:
+                self._state.circuit_state = "open"
+                logger.warning("Circuit breaker opened")
+
+    def _is_circuit_open(self) -> bool:
+        """Check if circuit breaker is open.
+
+        Returns:
+            True if circuit is open.
+        """
+        if not self.config.enable_circuit_breaker:
+            return False
+
+        if self._state.circuit_state == "open":
+            if self._state.last_failure:
+                reset_time = (
+                    self._state.last_failure +
+                    self.config.max_delay_ms / 1000 * 2
+                )
+                if time.time() > reset_time:
+                    self._state.circuit_state = "half_open"
+                    logger.info("Circuit breaker entering half-open state")
+                    return False
+            return True
+
+        return False
+
+    def reset(self) -> None:
+        """Reset recovery state."""
+        self._state = RecoveryState()
+
+    def get_state(self) -> RecoveryState:
+        """Get current recovery state.
+
+        Returns:
+            Current state.
+        """
+        return self._state

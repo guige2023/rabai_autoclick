@@ -1,314 +1,272 @@
-"""Rate limiting action module for RabAI AutoClick.
+"""Rate limit bucket action for token bucket rate limiting.
 
-Provides rate limiting algorithms: token bucket, sliding window,
-leaky bucket, and fixed window with multi-tier limits.
+Provides distributed rate limiting with token bucket algorithm,
+supporting multiple buckets and configurable limits.
 """
 
-from __future__ import annotations
-
-import sys
-import os
+import logging
 import time
-from typing import Any, Dict, Optional
-from dataclasses import dataclass
-from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Optional
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
+
+
+class BucketType(Enum):
+    TOKEN_BUCKET = "token_bucket"
+    LEAKY_BUCKET = "leaky_bucket"
+    SLIDING_WINDOW = "sliding_window"
 
 
 @dataclass
-class TokenBucketConfig:
-    """Token bucket configuration."""
-    capacity: float  # Max tokens in bucket
-    refill_rate: float  # Tokens per second
-    initial_tokens: Optional[float] = None
+class RateLimitBucket:
+    name: str
+    bucket_type: BucketType
+    capacity: float
+    refill_rate: float
+    tokens: float
+    last_refill: float
+    requests: list[float] = field(default_factory=list)
 
 
 @dataclass
 class RateLimitResult:
-    """Result of a rate limit check."""
     allowed: bool
     remaining: float
-    retry_after: Optional[float]  # Seconds until next allowed request
+    reset_at: float
+    retry_after: Optional[float] = None
 
 
-class TokenBucketAction(BaseAction):
-    """Token bucket rate limiter.
-    
-    Each request consumes one token. Tokens refill at a constant
-    rate. When bucket is empty, requests are rejected.
-    
+class RateLimitBucketAction:
+    """Token bucket rate limiter with multiple bucket support.
+
     Args:
-        capacity: Maximum tokens (requests allowed in burst)
-        refill_rate: Tokens per second
+        default_capacity: Default bucket capacity.
+        default_refill_rate: Default refill rate (tokens/second).
     """
 
-    def __init__(self, capacity: float = 100.0, refill_rate: float = 10.0):
-        super().__init__()
-        self.capacity = capacity
-        self.refill_rate = refill_rate
-        self._tokens = capacity
-        self._last_refill = time.time()
+    def __init__(
+        self,
+        default_capacity: float = 100.0,
+        default_refill_rate: float = 10.0,
+    ) -> None:
+        self._buckets: dict[str, RateLimitBucket] = {}
+        self._default_capacity = default_capacity
+        self._default_refill_rate = default_refill_rate
+        self._violation_handlers: list[Callable[[str, str], None]] = []
 
-    def _refill(self):
+    def create_bucket(
+        self,
+        name: str,
+        bucket_type: BucketType = BucketType.TOKEN_BUCKET,
+        capacity: Optional[float] = None,
+        refill_rate: Optional[float] = None,
+    ) -> bool:
+        """Create a new rate limit bucket.
+
+        Args:
+            name: Bucket name.
+            bucket_type: Type of bucket algorithm.
+            capacity: Maximum tokens.
+            refill_rate: Refill rate per second.
+
+        Returns:
+            True if created successfully.
+        """
+        if name in self._buckets:
+            logger.warning(f"Bucket already exists: {name}")
+            return False
+
+        bucket = RateLimitBucket(
+            name=name,
+            bucket_type=bucket_type,
+            capacity=capacity or self._default_capacity,
+            refill_rate=refill_rate or self._default_refill_rate,
+            tokens=capacity or self._default_capacity,
+            last_refill=time.time(),
+        )
+
+        self._buckets[name] = bucket
+        logger.debug(f"Created rate limit bucket: {name}")
+        return True
+
+    def delete_bucket(self, name: str) -> bool:
+        """Delete a rate limit bucket.
+
+        Args:
+            name: Bucket name.
+
+        Returns:
+            True if deleted.
+        """
+        if name in self._buckets:
+            del self._buckets[name]
+            return True
+        return False
+
+    def check_rate_limit(
+        self,
+        bucket_name: str,
+        tokens: float = 1.0,
+    ) -> RateLimitResult:
+        """Check if request is allowed under rate limit.
+
+        Args:
+            bucket_name: Bucket name.
+            tokens: Number of tokens to consume.
+
+        Returns:
+            Rate limit result.
+        """
+        bucket = self._buckets.get(bucket_name)
+        if not bucket:
+            self.create_bucket(bucket_name)
+            bucket = self._buckets[bucket_name]
+
         now = time.time()
-        elapsed = now - self._last_refill
-        self._tokens = min(self.capacity, self._tokens + elapsed * self.refill_rate)
-        self._last_refill = now
 
-    def execute(
-        self,
-        action: str,
-        tokens_requested: float = 1.0,
-        client_key: Optional[str] = None
-    ) -> ActionResult:
-        try:
-            if action == "allow":
-                self._refill()
-                if self._tokens >= tokens_requested:
-                    self._tokens -= tokens_requested
-                    return ActionResult(success=True, data={
-                        "allowed": True,
-                        "remaining": round(self._tokens, 4),
-                        "retry_after": None
-                    })
-                else:
-                    retry_after = (tokens_requested - self._tokens) / self.refill_rate
-                    return ActionResult(success=True, data={
-                        "allowed": False,
-                        "remaining": round(self._tokens, 4),
-                        "retry_after": round(retry_after, 4)
-                    })
+        self._refill_bucket(bucket, now)
 
-            elif action == "status":
-                self._refill()
-                return ActionResult(success=True, data={
-                    "capacity": self.capacity,
-                    "tokens_available": round(self._tokens, 4),
-                    "refill_rate": self.refill_rate,
-                    "utilization": round(self._tokens / self.capacity, 4)
-                })
+        if bucket.tokens >= tokens:
+            bucket.tokens -= tokens
 
-            elif action == "reset":
-                self._tokens = self.capacity
-                self._last_refill = time.time()
-                return ActionResult(success=True, data={"reset": True})
+            reset_at = now + (bucket.capacity - bucket.tokens) / bucket.refill_rate
 
-            else:
-                return ActionResult(success=False, error=f"Unknown action: {action}")
-        except Exception as e:
-            return ActionResult(success=False, error=str(e))
+            return RateLimitResult(
+                allowed=True,
+                remaining=bucket.tokens,
+                reset_at=reset_at,
+            )
+        else:
+            retry_after = (tokens - bucket.tokens) / bucket.refill_rate
 
+            for handler in self._violation_handlers:
+                try:
+                    handler(bucket_name, "rate_limit_exceeded")
+                except Exception as e:
+                    logger.error(f"Violation handler error: {e}")
 
-class SlidingWindowAction(BaseAction):
-    """Sliding window rate limiter.
-    
-    Counts requests in a rolling time window. More accurate than
-    fixed window but requires more memory.
-    
-    Args:
-        max_requests: Maximum requests per window
-        window_seconds: Window size in seconds
-    """
+            return RateLimitResult(
+                allowed=False,
+                remaining=bucket.tokens,
+                reset_at=now + retry_after,
+                retry_after=retry_after,
+            )
 
-    def __init__(self, max_requests: int = 100, window_seconds: float = 60.0):
-        super().__init__()
-        self.max_requests = max_requests
-        self.window_seconds = window_seconds
-        self._requests: deque = deque()
+    def _refill_bucket(self, bucket: RateLimitBucket, now: float) -> None:
+        """Refill bucket tokens based on elapsed time.
 
-    def _clean_window(self, now: float):
-        cutoff = now - self.window_seconds
-        while self._requests and self._requests[0] < cutoff:
-            self._requests.popleft()
+        Args:
+            bucket: Bucket to refill.
+            now: Current timestamp.
+        """
+        elapsed = now - bucket.last_refill
+        tokens_to_add = elapsed * bucket.refill_rate
 
-    def execute(
-        self,
-        action: str,
-        client_key: Optional[str] = None,
-        tokens_requested: int = 1
-    ) -> ActionResult:
-        try:
-            if action == "allow":
-                now = time.time()
-                self._clean_window(now)
-                if len(self._requests) + tokens_requested <= self.max_requests:
-                    for _ in range(tokens_requested):
-                        self._requests.append(now)
-                    return ActionResult(success=True, data={
-                        "allowed": True,
-                        "remaining": self.max_requests - len(self._requests),
-                        "window_size": self.window_seconds
-                    })
-                else:
-                    oldest = self._requests[0] if self._requests else now
-                    retry_after = oldest + self.window_seconds - now
-                    return ActionResult(success=True, data={
-                        "allowed": False,
-                        "remaining": max(0, self.max_requests - len(self._requests)),
-                        "retry_after": round(max(0, retry_after), 4)
-                    })
+        bucket.tokens = min(bucket.capacity, bucket.tokens + tokens_to_add)
+        bucket.last_refill = now
 
-            elif action == "status":
-                now = time.time()
-                self._clean_window(now)
-                return ActionResult(success=True, data={
-                    "current_requests": len(self._requests),
-                    "max_requests": self.max_requests,
-                    "window_seconds": self.window_seconds,
-                    "utilization": round(len(self._requests) / self.max_requests, 4)
-                })
+    def get_bucket_status(self, bucket_name: str) -> Optional[dict[str, Any]]:
+        """Get current bucket status.
 
-            elif action == "reset":
-                self._requests.clear()
-                return ActionResult(success=True, data={"reset": True})
+        Args:
+            bucket_name: Bucket name.
 
-            else:
-                return ActionResult(success=False, error=f"Unknown action: {action}")
-        except Exception as e:
-            return ActionResult(success=False, error=str(e))
+        Returns:
+            Bucket status dictionary.
+        """
+        bucket = self._buckets.get(bucket_name)
+        if not bucket:
+            return None
 
-
-class LeakyBucketAction(BaseAction):
-    """Leaky bucket rate limiter.
-    
-    Requests are processed at a constant rate. Excess requests
-    are queued or dropped. Useful for smoothing output rate.
-    
-    Args:
-        capacity: Maximum queue size
-        leak_rate: Requests per second (processing rate)
-    """
-
-    def __init__(self, capacity: int = 100, leak_rate: float = 10.0):
-        super().__init__()
-        self.capacity = capacity
-        self.leak_rate = leak_rate
-        self._queue_size = 0
-        self._last_leak = time.time()
-
-    def _leak(self):
         now = time.time()
-        elapsed = now - self._last_leak
-        leaked = elapsed * self.leak_rate
-        self._queue_size = max(0, self._queue_size - leaked)
-        self._last_leak = now
+        self._refill_bucket(bucket, now)
 
-    def execute(self, action: str) -> ActionResult:
-        try:
-            if action == "enqueue":
-                self._leak()
-                if self._queue_size < self.capacity:
-                    self._queue_size += 1
-                    return ActionResult(success=True, data={
-                        "enqueued": True,
-                        "queue_size": self._queue_size,
-                        "capacity": self.capacity
-                    })
-                else:
-                    return ActionResult(success=True, data={
-                        "enqueued": False,
-                        "queue_size": self._queue_size,
-                        "capacity": self.capacity,
-                        "dropped": True
-                    })
+        return {
+            "name": bucket.name,
+            "type": bucket.bucket_type.value,
+            "capacity": bucket.capacity,
+            "tokens": bucket.tokens,
+            "remaining": bucket.tokens,
+            "refill_rate": bucket.refill_rate,
+            "last_refill": bucket.last_refill,
+            "utilization": (bucket.capacity - bucket.tokens) / bucket.capacity,
+        }
 
-            elif action == "drain":
-                self._leak()
-                return ActionResult(success=True, data={
-                    "queue_size": round(self._queue_size, 4),
-                    "leak_rate": self.leak_rate
-                })
+    def reset_bucket(self, bucket_name: str) -> bool:
+        """Reset a bucket to full capacity.
 
-            elif action == "status":
-                self._leak()
-                return ActionResult(success=True, data={
-                    "queue_size": round(self._queue_size, 4),
-                    "capacity": self.capacity,
-                    "leak_rate": self.leak_rate,
-                    "utilization": round(self._queue_size / self.capacity, 4)
-                })
+        Args:
+            bucket_name: Bucket name.
 
-            else:
-                return ActionResult(success=False, error=f"Unknown action: {action}")
-        except Exception as e:
-            return ActionResult(success=False, error=str(e))
+        Returns:
+            True if reset.
+        """
+        bucket = self._buckets.get(bucket_name)
+        if not bucket:
+            return False
 
+        bucket.tokens = bucket.capacity
+        bucket.last_refill = time.time()
+        return True
 
-class MultiTierRateLimitAction(BaseAction):
-    """Multi-tier rate limiter supporting per-client limits.
-    
-    Manages separate rate limiters per client key, with
-    global limits and per-client limits.
-    
-    Args:
-        global_limit: Global rate limit
-        per_client_limit: Per-client rate limit
-    """
-
-    def __init__(self, global_max: int = 1000, per_client_max: int = 100,
-                 window_seconds: float = 60.0):
-        super().__init__()
-        self.global_max = global_max
-        self.per_client_max = per_client_max
-        self.window_seconds = window_seconds
-        self._client_windows: Dict[str, SlidingWindowAction] = {}
-        self._global_window = SlidingWindowAction(global_max, window_seconds)
-
-    def execute(
+    def set_rate_limit(
         self,
-        action: str,
-        client_key: Optional[str] = None,
-        tokens_requested: int = 1
-    ) -> ActionResult:
-        try:
-            if action == "allow":
-                if not client_key:
-                    return ActionResult(success=False, error="client_key required")
+        bucket_name: str,
+        capacity: float,
+        refill_rate: float,
+    ) -> bool:
+        """Update bucket rate limit parameters.
 
-                # Check global
-                global_res = self._global_window.execute("allow", tokens_requested=tokens_requested)
-                if not global_res.data["allowed"]:
-                    return ActionResult(success=True, data={
-                        "allowed": False, "reason": "global_limit_exceeded",
-                        "retry_after": global_res.data.get("retry_after")
-                    })
+        Args:
+            bucket_name: Bucket name.
+            capacity: New capacity.
+            refill_rate: New refill rate.
 
-                # Check per-client
-                if client_key not in self._client_windows:
-                    self._client_windows[client_key] = SlidingWindowAction(
-                        self.per_client_max, self.window_seconds
-                    )
-                client_res = self._client_windows[client_key].execute("allow", tokens_requested=tokens_requested)
+        Returns:
+            True if updated.
+        """
+        bucket = self._buckets.get(bucket_name)
+        if not bucket:
+            return False
 
-                if not client_res.data["allowed"]:
-                    return ActionResult(success=True, data={
-                        "allowed": False, "reason": "client_limit_exceeded",
-                        "client": client_key, "retry_after": client_res.data.get("retry_after")
-                    })
+        bucket.capacity = capacity
+        bucket.refill_rate = refill_rate
+        bucket.tokens = min(bucket.tokens, capacity)
+        return True
 
-                return ActionResult(success=True, data={
-                    "allowed": True, "client": client_key
-                })
+    def register_violation_handler(
+        self,
+        handler: Callable[[str, str], None],
+    ) -> None:
+        """Register a handler for rate limit violations.
 
-            elif action == "status":
-                global_res = self._global_window.execute("status")
-                client_statuses = {}
-                for k, v in self._client_windows.items():
-                    sr = v.execute("status")
-                    client_statuses[k] = sr.data
-                return ActionResult(success=True, data={
-                    "global": global_res.data,
-                    "clients": client_statuses
-                })
+        Args:
+            handler: Callback function(bucket_name, violation_type).
+        """
+        self._violation_handlers.append(handler)
 
-            elif action == "reset_client":
-                if client_key and client_key in self._client_windows:
-                    self._client_windows[client_key].execute("reset")
-                return ActionResult(success=True, data={"client_key": client_key, "reset": True})
+    def get_all_buckets(self) -> list[str]:
+        """Get list of all bucket names.
 
-            else:
-                return ActionResult(success=False, error=f"Unknown action: {action}")
-        except Exception as e:
-            return ActionResult(success=False, error=str(e))
+        Returns:
+            List of bucket names.
+        """
+        return list(self._buckets.keys())
+
+    def get_stats(self) -> dict[str, Any]:
+        """Get rate limit statistics.
+
+        Returns:
+            Dictionary with stats.
+        """
+        return {
+            "total_buckets": len(self._buckets),
+            "bucket_types": {
+                bt.value: sum(1 for b in self._buckets.values() if b.bucket_type == bt)
+                for bt in BucketType
+            },
+            "default_capacity": self._default_capacity,
+            "default_refill_rate": self._default_refill_rate,
+        }

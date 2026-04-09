@@ -1,430 +1,291 @@
 """
-Data Quality Action Module
+Data Quality Assessment and Validation Module.
 
-Data quality checking with completeness, accuracy, consistency,
-and timeliness validation. Supports rule-based and ML-based checks.
+Validates data quality dimensions: completeness, consistency,
+accuracy, timeliness, and uniqueness. Provides quality scores and reports.
 
-MIT License - Copyright (c) 2025 RabAi Research
+Author: AutoGen
 """
-
 from __future__ import annotations
 
+import json
 import logging
 import re
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Set
+from enum import Enum, auto
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
 
-class QualityLevel(Enum):
-    """Data quality severity levels."""
-
-    PASS = "pass"
-    WARNING = "warning"
-    FAIL = "fail"
-
-
-class CheckType(Enum):
-    """Types of data quality checks."""
-
-    COMPLETENESS = "completeness"
-    UNIQUENESS = "uniqueness"
-    CONSISTENCY = "consistency"
-    VALIDITY = "validity"
-    TIMELINESS = "timeliness"
-    ACCURACY = "accuracy"
+class QualityDimension(Enum):
+    COMPLETENESS = auto()
+    CONSISTENCY = auto()
+    ACCURACY = auto()
+    TIMELINESS = auto()
+    UNIQUENESS = auto()
+    VALIDITY = auto()
 
 
 @dataclass
-class QualityIssue:
-    """A single data quality issue."""
-
-    check_type: CheckType
-    level: QualityLevel
-    message: str
-    field: Optional[str] = None
-    row_count: int = 0
-    sample_values: List[Any] = field(default_factory=list)
+class ValidationRule:
+    rule_id: str
+    field: str
+    rule_type: str
+    params: Dict[str, Any] = field(default_factory=dict)
+    error_message: str = ""
+    severity: str = "error"
 
 
 @dataclass
-class QualityRule:
-    """A data quality validation rule."""
-
-    name: str
-    check_type: CheckType
-    field: Optional[str] = None
-    validator: Optional[Callable[[Any], bool]] = None
-    threshold: float = 1.0
-    level: QualityLevel = QualityLevel.FAIL
+class ValidationResult:
+    rule_id: str
+    field: str
+    passed: bool
+    value: Any = None
+    error_message: str = ""
 
 
 @dataclass
-class QualityResult:
-    """Result of quality check."""
+class FieldQuality:
+    field_name: str
+    completeness: float = 1.0
+    uniqueness: float = 1.0
+    validity: float = 1.0
+    consistency: float = 1.0
+    accuracy: float = 1.0
+    quality_score: float = 1.0
+    issues: List[str] = field(default_factory=list)
 
+
+@dataclass
+class DataQualityReport:
     dataset_name: str
-    total_rows: int
-    overall_level: QualityLevel
-    issues: List[QualityIssue] = field(default_factory=list)
-    passed_checks: int = 0
-    failed_checks: int = 0
-    warning_checks: int = 0
-    checked_at: datetime = field(default_factory=datetime.now)
+    total_records: int = 0
+    overall_score: float = 1.0
+    dimension_scores: Dict[str, float] = field(default_factory=dict)
+    field_quality: List[FieldQuality] = field(default_factory=list)
+    validation_results: List[ValidationResult] = field(default_factory=list)
+    issues: List[str] = field(default_factory=list)
+    generated_at: datetime = field(default_factory=datetime.utcnow)
 
 
-class CompletenessChecker:
-    """Checks for missing or null values."""
+class ValidationRuleEngine:
+    """Executes validation rules against data records."""
 
-    def check_nulls(
+    BUILT_IN_RULES = {
+        "required": lambda v: v is not None and str(v).strip() != "",
+        "email": lambda v: bool(re.match(r"^[\w\.\+\-]+@[\w\.\-]+\.\w+$", str(v))) if v else False,
+        "phone": lambda v: bool(re.match(r"^\+?[\d\s\-]{10,}$", str(v))) if v else False,
+        "url": lambda v: bool(re.match(r"^https?://", str(v))) if v else False,
+        "numeric": lambda v: str(v).isdigit() if v else False,
+        "min_length": lambda v, p: len(str(v)) >= int(p) if v else False,
+        "max_length": lambda v, p: len(str(v)) <= int(p) if v else False,
+        "min_value": lambda v, p: float(v) >= float(p) if v else False,
+        "max_value": lambda v, p: float(v) <= float(p) if v else False,
+        "pattern": lambda v, p: bool(re.match(p, str(v))) if v else False,
+        "in_list": lambda v, p: str(v) in p.split(",") if v else False,
+    }
+
+    def __init__(self):
+        self._rules: List[ValidationRule] = []
+
+    def add_rule(
         self,
-        data: List[Dict[str, Any]],
         field: str,
-        threshold: float,
-    ) -> QualityIssue:
-        """Check for null values."""
-        null_count = sum(1 for row in data if row.get(field) is None)
-        null_rate = null_count / len(data) if data else 0
-
-        level = QualityLevel.PASS
-        if null_rate > threshold:
-            level = QualityLevel.FAIL
-        elif null_rate > 0:
-            level = QualityLevel.WARNING
-
-        return QualityIssue(
-            check_type=CheckType.COMPLETENESS,
-            level=level,
-            message=f"Field '{field}' has {null_count} null values ({null_rate:.2%})",
+        rule_type: str,
+        params: Optional[Dict[str, Any]] = None,
+        error_message: str = "",
+        severity: str = "error",
+    ) -> str:
+        import uuid
+        rule_id = str(uuid.uuid4())[:8]
+        rule = ValidationRule(
+            rule_id=rule_id,
             field=field,
-            row_count=null_count,
+            rule_type=rule_type,
+            params=params or {},
+            error_message=error_message or f"Validation failed for {field} ({rule_type})",
+            severity=severity,
         )
-
-    def check_empty_strings(
-        self,
-        data: List[Dict[str, Any]],
-        field: str,
-        threshold: float,
-    ) -> QualityIssue:
-        """Check for empty strings."""
-        empty_count = sum(1 for row in data if str(row.get(field, "")).strip() == "")
-        empty_rate = empty_count / len(data) if data else 0
-
-        level = QualityLevel.PASS
-        if empty_rate > threshold:
-            level = QualityLevel.FAIL
-        elif empty_rate > 0:
-            level = QualityLevel.WARNING
-
-        return QualityIssue(
-            check_type=CheckType.COMPLETENESS,
-            level=level,
-            message=f"Field '{field}' has {empty_count} empty strings ({empty_rate:.2%})",
-            field=field,
-            row_count=empty_count,
-        )
-
-
-class UniquenessChecker:
-    """Checks for duplicate values."""
-
-    def check_duplicate_values(
-        self,
-        data: List[Dict[str, Any]],
-        field: str,
-        threshold: float,
-    ) -> QualityIssue:
-        """Check for duplicate values in a field."""
-        values = [row.get(field) for row in data if row.get(field) is not None]
-        unique_values = set(values)
-        duplicate_count = len(values) - len(unique_values)
-        duplicate_rate = duplicate_count / len(values) if values else 0
-
-        level = QualityLevel.PASS
-        if duplicate_rate > threshold:
-            level = QualityLevel.FAIL
-        elif duplicate_rate > 0:
-            level = QualityLevel.WARNING
-
-        # Sample duplicates
-        from collections import Counter
-        counter = Counter(values)
-        samples = [v for v, c in counter.most_common(3) if c > 1]
-
-        return QualityIssue(
-            check_type=CheckType.UNIQUENESS,
-            level=level,
-            message=f"Field '{field}' has {duplicate_count} duplicate values ({duplicate_rate:.2%})",
-            field=field,
-            row_count=duplicate_count,
-            sample_values=samples,
-        )
-
-
-class ValidityChecker:
-    """Checks for valid data values."""
-
-    EMAIL_REGEX = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-    URL_REGEX = r"^https?://[^\s]+$"
-
-    def check_email_format(
-        self,
-        data: List[Dict[str, Any]],
-        field: str,
-        threshold: float,
-    ) -> QualityIssue:
-        """Check email format validity."""
-        invalid_count = 0
-        invalid_samples = []
-
-        for row in data:
-            value = row.get(field)
-            if value and not re.match(self.EMAIL_REGEX, str(value)):
-                invalid_count += 1
-                if len(invalid_samples) < 3:
-                    invalid_samples.append(value)
-
-        invalid_rate = invalid_count / len(data) if data else 0
-
-        level = QualityLevel.PASS
-        if invalid_rate > threshold:
-            level = QualityLevel.FAIL
-        elif invalid_rate > 0:
-            level = QualityLevel.WARNING
-
-        return QualityIssue(
-            check_type=CheckType.VALIDITY,
-            level=level,
-            message=f"Field '{field}' has {invalid_count} invalid emails ({invalid_rate:.2%})",
-            field=field,
-            row_count=invalid_count,
-            sample_values=invalid_samples,
-        )
-
-    def check_numeric_range(
-        self,
-        data: List[Dict[str, Any]],
-        field: str,
-        min_value: Optional[float] = None,
-        max_value: Optional[float] = None,
-        threshold: float = 1.0,
-    ) -> QualityIssue:
-        """Check numeric values are within range."""
-        out_of_range_count = 0
-        out_of_range_samples = []
-
-        for row in data:
-            value = row.get(field)
-            if value is not None:
-                try:
-                    num_value = float(value)
-                    if (min_value is not None and num_value < min_value) or \
-                       (max_value is not None and num_value > max_value):
-                        out_of_range_count += 1
-                        if len(out_of_range_samples) < 3:
-                            out_of_range_samples.append(value)
-                except (ValueError, TypeError):
-                    out_of_range_count += 1
-
-        out_of_range_rate = out_of_range_count / len(data) if data else 0
-
-        level = QualityLevel.PASS
-        if out_of_range_rate > threshold:
-            level = QualityLevel.FAIL
-        elif out_of_range_rate > 0:
-            level = QualityLevel.WARNING
-
-        return QualityIssue(
-            check_type=CheckType.VALIDITY,
-            level=level,
-            message=f"Field '{field}' has {out_of_range_count} out-of-range values ({out_of_range_rate:.2%})",
-            field=field,
-            row_count=out_of_range_count,
-            sample_values=out_of_range_samples,
-        )
-
-
-class ConsistencyChecker:
-    """Checks for data consistency."""
-
-    def check_cross_field_consistency(
-        self,
-        data: List[Dict[str, Any]],
-        source_field: str,
-        target_field: str,
-        validator: Callable[[Dict[str, Any]], bool],
-        threshold: float,
-    ) -> QualityIssue:
-        """Check consistency between fields."""
-        inconsistent_count = 0
-
-        for row in data:
-            if not validator(row):
-                inconsistent_count += 1
-
-        inconsistent_rate = inconsistent_count / len(data) if data else 0
-
-        level = QualityLevel.PASS
-        if inconsistent_rate > threshold:
-            level = QualityLevel.FAIL
-        elif inconsistent_rate > 0:
-            level = QualityLevel.WARNING
-
-        return QualityIssue(
-            check_type=CheckType.CONSISTENCY,
-            level=level,
-            message=f"Inconsistent rows between '{source_field}' and '{target_field}' ({inconsistent_rate:.2%})",
-            field=f"{source_field} <-> {target_field}",
-            row_count=inconsistent_count,
-        )
-
-
-class DataQualityAction:
-    """
-    Main action class for data quality checking.
-
-    Features:
-    - Completeness checks (nulls, empty values)
-    - Uniqueness checks (duplicates)
-    - Validity checks (formats, ranges, patterns)
-    - Consistency checks (cross-field, referential)
-    - Custom validation rules
-    - Configurable thresholds
-
-    Usage:
-        action = DataQualityAction()
-        action.add_rule(QualityRule(name="email_valid", check_type=CheckType.VALIDITY, field="email"))
-        result = action.check(data)
-    """
-
-    def __init__(self, dataset_name: str = "dataset"):
-        self.dataset_name = dataset_name
-        self._rules: List[QualityRule] = []
-        self._completeness = CompletenessChecker()
-        self._uniqueness = UniquenessChecker()
-        self._validity = ValidityChecker()
-        self._consistency = ConsistencyChecker()
-
-    def add_rule(self, rule: QualityRule) -> "DataQualityAction":
-        """Add a quality rule."""
         self._rules.append(rule)
-        return self
+        return rule_id
 
-    def check_completeness(
-        self,
-        data: List[Dict[str, Any]],
-        field: str,
-        threshold: float = 1.0,
-    ) -> QualityIssue:
-        """Check data completeness."""
-        return self._completeness.check_nulls(data, field, threshold)
-
-    def check_uniqueness(
-        self,
-        data: List[Dict[str, Any]],
-        field: str,
-        threshold: float = 1.0,
-    ) -> QualityIssue:
-        """Check data uniqueness."""
-        return self._uniqueness.check_duplicate_values(data, field, threshold)
-
-    def check_email_validity(
-        self,
-        data: List[Dict[str, Any]],
-        field: str,
-        threshold: float = 0.01,
-    ) -> QualityIssue:
-        """Check email validity."""
-        return self._validity.check_email_format(data, field, threshold)
-
-    def check_numeric_range(
-        self,
-        data: List[Dict[str, Any]],
-        field: str,
-        min_value: Optional[float] = None,
-        max_value: Optional[float] = None,
-        threshold: float = 0.01,
-    ) -> QualityIssue:
-        """Check numeric range."""
-        return self._validity.check_numeric_range(data, field, min_value, max_value, threshold)
-
-    def check(
-        self,
-        data: List[Dict[str, Any]],
-    ) -> QualityResult:
-        """Run all quality checks."""
-        issues: List[QualityIssue] = []
-        passed = failed = warnings = 0
-
+    def validate_record(self, record: Dict[str, Any]) -> List[ValidationResult]:
+        results = []
         for rule in self._rules:
-            issue = self._run_check(rule, data)
-            if issue:
-                issues.append(issue)
-                if issue.level == QualityLevel.PASS:
-                    passed += 1
-                elif issue.level == QualityLevel.FAIL:
-                    failed += 1
-                else:
-                    warnings += 1
+            value = record.get(rule.field)
+            result = self._apply_rule(rule, value)
+            results.append(result)
+        return results
 
-        # Determine overall level
-        overall = QualityLevel.PASS
-        if failed > 0:
-            overall = QualityLevel.FAIL
-        elif warnings > 0:
-            overall = QualityLevel.WARNING
+    def _apply_rule(self, rule: ValidationRule, value: Any) -> ValidationResult:
+        rule_func = self.BUILT_IN_RULES.get(rule.rule_type)
+        if not rule_func:
+            return ValidationResult(
+                rule_id=rule.rule_id,
+                field=rule.field,
+                passed=False,
+                value=value,
+                error_message=f"Unknown rule type: {rule.rule_type}",
+            )
 
-        return QualityResult(
-            dataset_name=self.dataset_name,
-            total_rows=len(data),
-            overall_level=overall,
-            issues=issues,
-            passed_checks=passed,
-            failed_checks=failed,
-            warning_checks=warnings,
+        try:
+            if rule.params:
+                passed = rule_func(value, *rule.params.values())
+            else:
+                passed = rule_func(value)
+        except Exception as exc:
+            passed = False
+
+        return ValidationResult(
+            rule_id=rule.rule_id,
+            field=rule.field,
+            passed=bool(passed),
+            value=value,
+            error_message=rule.error_message if not passed else "",
         )
 
-    def _run_check(
+
+class DataQualityChecker:
+    """
+    Assesses data quality across multiple dimensions.
+    """
+
+    def __init__(self):
+        self.rule_engine = ValidationRuleEngine()
+
+    def assess_field_quality(self, field_name: str, values: List[Any]) -> FieldQuality:
+        non_null = [v for v in values if v is not None and str(v).strip() != ""]
+        completeness = len(non_null) / max(len(values), 1)
+
+        unique_values = set(non_null)
+        uniqueness = len(unique_values) / max(len(non_null), 1)
+
+        valid_count = sum(1 for v in non_null if self._is_valid_scalar(v))
+        validity = valid_count / max(len(non_null), 1)
+
+        consistency = 1.0
+        if len(non_null) > 1:
+            types = Counter(type(v).__name__ for v in non_null)
+            consistency = types.most_common(1)[0][1] / len(non_null)
+
+        quality_score = (
+            completeness * 0.25 +
+            uniqueness * 0.25 +
+            validity * 0.25 +
+            consistency * 0.25
+        )
+
+        issues = []
+        if completeness < 0.5:
+            issues.append(f"Low completeness: {completeness:.1%}")
+        if uniqueness < 0.1 and len(non_null) > 10:
+            issues.append(f"Low uniqueness: {uniqueness:.1%} (possible duplicates)")
+        if validity < 0.8:
+            issues.append(f"Validity concerns: {validity:.1%}")
+
+        return FieldQuality(
+            field_name=field_name,
+            completeness=completeness,
+            uniqueness=uniqueness,
+            validity=validity,
+            consistency=consistency,
+            quality_score=quality_score,
+            issues=issues,
+        )
+
+    def _is_valid_scalar(self, value: Any) -> bool:
+        if isinstance(value, (int, float, str, bool)):
+            return True
+        return False
+
+    def assess_dataset(
         self,
-        rule: QualityRule,
-        data: List[Dict[str, Any]],
-    ) -> Optional[QualityIssue]:
-        """Run a single quality check."""
-        if not rule.field:
-            return None
+        dataset_name: str,
+        records: List[Dict[str, Any]],
+        rules: Optional[List[ValidationRule]] = None,
+    ) -> DataQualityReport:
+        if not records:
+            return DataQualityReport(
+                dataset_name=dataset_name,
+                total_records=0,
+                overall_score=0.0,
+                issues=["Empty dataset"],
+            )
 
-        if rule.check_type == CheckType.COMPLETENESS:
-            return self._completeness.check_nulls(data, rule.field, 1.0 - rule.threshold)
+        field_names = list(records[0].keys()) if records else []
+        field_values: Dict[str, List[Any]] = {f: [] for f in field_names}
 
-        elif rule.check_type == CheckType.UNIQUENESS:
-            return self._uniqueness.check_duplicate_values(data, rule.field, 1.0 - rule.threshold)
+        for record in records:
+            for field_name in field_names:
+                field_values[field_name].append(record.get(field_name))
 
-        elif rule.check_type == CheckType.VALIDITY:
-            return self._validity.check_email_format(data, rule.field, 1.0 - rule.threshold)
+        field_quality_list = []
+        dimension_totals = {d.name.lower(): 0.0 for d in QualityDimension}
 
-        return None
+        for field_name, values in field_values.items():
+            fq = self.assess_field_quality(field_name, values)
+            field_quality_list.append(fq)
+            dimension_totals["completeness"] += fq.completeness
+            dimension_totals["uniqueness"] += fq.uniqueness
+            dimension_totals["validity"] += fq.validity
+            dimension_totals["consistency"] += fq.consistency
 
+        dimension_scores = {
+            name: score / max(len(field_names), 1)
+            for name, score in dimension_totals.items()
+        }
 
-def demo_quality():
-    """Demonstrate data quality checking."""
-    data = [
-        {"email": "alice@example.com", "age": 30, "name": "Alice"},
-        {"email": "invalid-email", "age": 25, "name": "Bob"},
-        {"email": "charlie@example.com", "age": 35, "name": "Charlie"},
-        {"email": "", "age": None, "name": "Diana"},
-        {"email": "eve@example.com", "age": 28, "name": "Eve"},
-    ]
+        all_results = []
+        if rules:
+            self.rule_engine._rules = rules
+        for record in records:
+            all_results.extend(self.rule_engine.validate_record(record))
 
-    action = DataQualityAction("users")
-    result = action.check_completeness(data, "email")
-    print(f"Completeness check: {result.level.value} - {result.message}")
+        overall_score = sum(dimension_scores.values()) / len(dimension_scores) if dimension_scores else 0.0
 
-    result = action.check_email_validity(data, "email")
-    print(f"Validity check: {result.level.value} - {result.message}")
+        issues = []
+        if overall_score < 0.7:
+            issues.append(f"Overall quality score is below threshold: {overall_score:.1%}")
+        failed_validations = [r for r in all_results if not r.passed]
+        if failed_validations:
+            issues.append(f"{len(failed_validations)} validation rules failed")
 
+        return DataQualityReport(
+            dataset_name=dataset_name,
+            total_records=len(records),
+            overall_score=overall_score,
+            dimension_scores=dimension_scores,
+            field_quality=field_quality_list,
+            validation_results=all_results,
+            issues=issues,
+        )
 
-if __name__ == "__main__":
-    demo_quality()
+    def to_json(self, report: DataQualityReport) -> str:
+        return json.dumps({
+            "dataset_name": report.dataset_name,
+            "total_records": report.total_records,
+            "overall_score": report.overall_score,
+            "dimension_scores": report.dimension_scores,
+            "field_quality": [
+                {
+                    "field_name": fq.field_name,
+                    "quality_score": fq.quality_score,
+                    "completeness": fq.completeness,
+                    "uniqueness": fq.uniqueness,
+                    "validity": fq.validity,
+                    "issues": fq.issues,
+                }
+                for fq in report.field_quality
+            ],
+            "validation_summary": {
+                "total": len(report.validation_results),
+                "passed": sum(1 for r in report.validation_results if r.passed),
+                "failed": sum(1 for r in report.validation_results if not r.passed),
+            },
+            "issues": report.issues,
+            "generated_at": report.generated_at.isoformat(),
+        }, indent=2)
