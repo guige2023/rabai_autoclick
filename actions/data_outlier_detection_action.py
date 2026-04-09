@@ -1,16 +1,16 @@
 """Data outlier detection action module for RabAI AutoClick.
 
 Provides outlier detection operations:
-- DataOutlierDetectionAction: Detect outliers in data
-- DataOutlierIQRAction: IQR-based outlier detection
-- DataOutlierZScoreAction: Z-score based outlier detection
-- DataOutlierIsolationAction: Isolation forest-style outlier detection
+- ZScoreOutlierAction: Detect outliers using Z-score
+- IQROutlierAction: Detect outliers using IQR method
+- IsolationForestAction: Detect outliers using isolation forest
+- DBSCANOutlierAction: Detect outliers using DBSCAN clustering
+- MahalanobisOutlierAction: Detect outliers using Mahalanobis distance
 """
 
-import math
 from typing import Any, Dict, List, Optional, Tuple
-from collections import deque
-from datetime import datetime
+from collections import defaultdict
+import math
 
 import sys
 import os
@@ -20,257 +20,461 @@ sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class DataOutlierDetectionAction(BaseAction):
-    """Detect outliers using multiple methods."""
-    action_type = "data_outlier_detection"
-    display_name = "数据异常值检测"
-    description = "多方法异常值检测"
-
+class ZScoreOutlierAction(BaseAction):
+    """Detect outliers using Z-score method."""
+    action_type = "zscore_outlier"
+    display_name = "Z分数异常检测"
+    description = "使用Z分数方法检测异常值"
+    
+    def __init__(self):
+        super().__init__()
+    
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
             data = params.get("data", [])
-            method = params.get("method", "zscore")
+            field = params.get("field")
             threshold = params.get("threshold", 3.0)
-            column = params.get("column")
-
+            
             if not data:
-                return ActionResult(success=False, message="data is required")
-
-            if isinstance(data, list) and isinstance(data[0], dict) and column:
-                values = [row.get(column) for row in data]
-            else:
-                values = list(data) if isinstance(data, list) else [data]
-
-            numeric = [v for v in values if v is not None and isinstance(v, (int, float))]
-            if not numeric:
-                return ActionResult(success=False, message="No numeric values found")
-
-            outliers_indices = []
-
-            if method == "zscore":
-                outliers_indices = self._zscore_method(values, threshold)
-            elif method == "iqr":
-                outliers_indices = self._iqr_method(values, threshold)
-            elif method == "modified_zscore":
-                outliers_indices = self._modified_zscore(values, threshold)
-            elif method == "percentile":
-                p_low = params.get("percentile_low", 5)
-                p_high = params.get("percentile_high", 95)
-                outliers_indices = self._percentile_method(values, p_low, p_high)
-            elif method == "mad":
-                outliers_indices = self._mad_method(values, threshold)
-            else:
-                outliers_indices = self._zscore_method(values, threshold)
-
-            outliers = [data[i] if i < len(data) else None for i in outliers_indices]
-            inliers = [data[i] if i < len(data) and i not in outliers_indices else None for i in range(len(data))]
-            inliers = [x for x in inliers if x is not None]
-
+                return ActionResult(success=False, message="No data provided")
+            
+            if not field:
+                return ActionResult(success=False, message="field is required")
+            
+            outliers, scores = self._detect_outliers(data, field, threshold)
+            
             return ActionResult(
                 success=True,
-                message=f"Found {len(outliers)} outliers using {method}",
-                data={"outliers": outliers, "inliers": inliers, "outlier_count": len(outliers), "method": method, "threshold": threshold}
+                message=f"Z-score outlier detection complete",
+                data={
+                    "outliers": outliers,
+                    "outlier_count": len(outliers),
+                    "threshold": threshold,
+                    "scores": scores[:100]
+                }
             )
         except Exception as e:
-            return ActionResult(success=False, message=f"Outlier detection error: {e}")
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+    
+    def _detect_outliers(self, data: List[Dict], field: str, threshold: float) -> Tuple[List[Dict], List[Dict]]:
+        values = []
+        for item in data:
+            if isinstance(item, dict) and field in item:
+                values.append((item, item[field]))
+        
+        if not values:
+            return [], []
+        
+        numeric_values = [v[1] for v in values if isinstance(v[1], (int, float))]
+        
+        if not numeric_values:
+            return [], []
+        
+        mean = sum(numeric_values) / len(numeric_values)
+        variance = sum((v - mean) ** 2 for v in numeric_values) / len(numeric_values)
+        std = math.sqrt(variance)
+        
+        outliers = []
+        scores = []
+        
+        for item, value in values:
+            if isinstance(value, (int, float)) and std > 0:
+                z_score = abs((value - mean) / std)
+                scores.append({"item": item, "z_score": z_score, "value": value})
+                
+                if z_score > threshold:
+                    outliers.append(item)
+        
+        return outliers, sorted(scores, key=lambda x: x["z_score"], reverse=True)
 
-    def _zscore_method(self, values: List[float], threshold: float) -> List[int]:
-        """Z-score based detection."""
-        n = len(values)
-        mean = sum(values) / n
-        std = math.sqrt(sum((v - mean) ** 2 for v in values) / n)
-        if std == 0:
-            return []
-        return [i for i, v in enumerate(values) if abs((v - mean) / std) > threshold]
 
-    def _iqr_method(self, values: List[float], factor: float = 1.5) -> List[int]:
-        """IQR-based detection."""
-        sorted_vals = sorted(values)
-        n = len(sorted_vals)
-        q1_idx = n // 4
-        q3_idx = 3 * n // 4
-        q1 = sorted_vals[q1_idx]
-        q3 = sorted_vals[q3_idx]
+class IQROutlierAction(BaseAction):
+    """Detect outliers using IQR method."""
+    action_type = "iqr_outlier"
+    display_name = "IQR异常检测"
+    description = "使用四分位距方法检测异常值"
+    
+    def __init__(self):
+        super().__init__()
+    
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            field = params.get("field")
+            multiplier = params.get("multiplier", 1.5)
+            
+            if not data:
+                return ActionResult(success=False, message="No data provided")
+            
+            if not field:
+                return ActionResult(success=False, message="field is required")
+            
+            outliers, bounds = self._detect_outliers(data, field, multiplier)
+            
+            return ActionResult(
+                success=True,
+                message="IQR outlier detection complete",
+                data={
+                    "outliers": outliers,
+                    "outlier_count": len(outliers),
+                    "multiplier": multiplier,
+                    "bounds": bounds
+                }
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+    
+    def _detect_outliers(self, data: List[Dict], field: str, multiplier: float) -> Tuple[List[Dict], Dict]:
+        values = []
+        for item in data:
+            if isinstance(item, dict) and field in item:
+                values.append((item, item[field]))
+        
+        numeric_values = sorted([v[1] for v in values if isinstance(v[1], (int, float))])
+        
+        if not numeric_values:
+            return [], {}
+        
+        q1_idx = len(numeric_values) // 4
+        q3_idx = 3 * len(numeric_values) // 4
+        q1 = numeric_values[q1_idx]
+        q3 = numeric_values[q3_idx]
         iqr = q3 - q1
-        lower = q1 - factor * iqr
-        upper = q3 + factor * iqr
-        return [i for i, v in enumerate(values) if v < lower or v > upper]
-
-    def _modified_zscore(self, values: List[float], threshold: float) -> List[int]:
-        """Modified Z-score using median."""
-        sorted_vals = sorted(values)
-        median = sorted_vals[len(sorted_vals) // 2]
-        diffs = [abs(v - median) for v in values]
-        mad = sorted(diffs)[len(diffs) // 2]
-        if mad == 0:
-            return []
-        modified_zscores = [0.6745 * diff / mad for diff in diffs]
-        return [i for i, z in enumerate(modified_zscores) if abs(z) > threshold]
-
-    def _percentile_method(self, values: List[float], p_low: float, p_high: float) -> List[int]:
-        """Percentile-based detection."""
-        sorted_vals = sorted(values)
-        low_val = sorted_vals[int(len(sorted_vals) * p_low / 100)]
-        high_val = sorted_vals[int(len(sorted_vals) * p_high / 100)]
-        return [i for i, v in enumerate(values) if v < low_val or v > high_val]
-
-    def _mad_method(self, values: List[float], threshold: float) -> List[int]:
-        """Median Absolute Deviation method."""
-        median = sorted(values)[len(values) // 2]
-        deviations = [abs(v - median) for v in values]
-        mad = sorted(deviations)[len(deviations) // 2]
-        if mad == 0:
-            return []
-        return [i for i, d in enumerate(deviations) if d / mad > threshold]
+        
+        lower_bound = q1 - multiplier * iqr
+        upper_bound = q3 + multiplier * iqr
+        
+        outliers = []
+        for item, value in values:
+            if isinstance(value, (int, float)):
+                if value < lower_bound or value > upper_bound:
+                    outliers.append(item)
+        
+        return outliers, {
+            "q1": q1,
+            "q3": q3,
+            "iqr": iqr,
+            "lower_bound": lower_bound,
+            "upper_bound": upper_bound
+        }
 
 
-class DataOutlierIQRAction(BaseAction):
-    """IQR-based outlier detection."""
-    action_type = "data_outlier_iqr"
-    display_name = "IQR异常值检测"
-    description = "四分位距异常值检测"
-
+class IsolationForestAction(BaseAction):
+    """Detect outliers using isolation forest method."""
+    action_type = "isolation_forest_outlier"
+    display_name = "隔离森林异常检测"
+    description = "使用隔离森林算法检测异常值"
+    
+    def __init__(self):
+        super().__init__()
+        self._trees = []
+        self._tree_count = 10
+        self._sample_size = 256
+    
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
             data = params.get("data", [])
-            factor = params.get("factor", 1.5)
-            column = params.get("column")
-
+            fields = params.get("fields", [])
+            contamination = params.get("contamination", 0.1)
+            
             if not data:
-                return ActionResult(success=False, message="data is required")
-
-            if isinstance(data, list) and isinstance(data[0], dict) and column:
-                values = [row.get(column) for row in data]
-            else:
-                values = list(data) if isinstance(data, list) else [data]
-
-            numeric = [v for v in values if v is not None and isinstance(v, (int, float))]
-            if len(numeric) < 4:
-                return ActionResult(success=False, message="Need at least 4 values for IQR")
-
-            sorted_vals = sorted(numeric)
-            n = len(sorted_vals)
-            q1 = sorted_vals[n // 4]
-            q3 = sorted_vals[3 * n // 4]
-            iqr = q3 - q1
-            lower = q1 - factor * iqr
-            upper = q3 + factor * iqr
-
-            outliers = [v for v in numeric if v < lower or v > upper]
-            outlier_data = []
-            for i, v in enumerate(data):
-                val = values[i] if i < len(values) else None
-                if val is not None and (val < lower or val > upper):
-                    outlier_data.append({"index": i, "value": val, "bounds": {"lower": lower, "upper": upper}})
-
+                return ActionResult(success=False, message="No data provided")
+            
+            if not fields:
+                return ActionResult(success=False, message="fields is required")
+            
+            scores, outlier_indices = self._detect_outliers(data, fields, contamination)
+            
+            outliers = [data[i] for i in outlier_indices]
+            
             return ActionResult(
                 success=True,
-                message=f"Found {len(outliers)} outliers (IQR={iqr:.4f})",
-                data={"outliers": outliers, "outlier_data": outlier_data, "q1": q1, "q3": q3, "iqr": iqr, "lower": lower, "upper": upper}
+                message="Isolation forest outlier detection complete",
+                data={
+                    "outliers": outliers,
+                    "outlier_count": len(outliers),
+                    "contamination": contamination,
+                    "scores": scores[:100]
+                }
             )
         except Exception as e:
-            return ActionResult(success=False, message=f"IQR outlier error: {e}")
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+    
+    def _detect_outliers(self, data: List[Dict], fields: List[str], contamination: float) -> Tuple[List[float], List[int]]:
+        vectors = []
+        for item in data:
+            if isinstance(item, dict):
+                vector = [item.get(f, 0) for f in fields]
+                vectors.append(vector)
+        
+        if not vectors:
+            return [], []
+        
+        n = len(vectors)
+        sample_size = min(self._sample_size, n)
+        
+        scores = [0.0] * n
+        
+        for _ in range(self._tree_count):
+            sample_indices = [i % n for i in range(sample_size)]
+            
+            for i in range(n):
+                path_length = 0
+                node_indices = set(sample_indices)
+                
+                while len(node_indices) > 1 and path_length < 10:
+                    node_indices = set(i // 2 for i in node_indices)
+                    path_length += 1
+                
+                scores[i] += path_length
+        
+        avg_path_length = sum(scores) / (n * self._tree_count) if n > 0 else 1
+        
+        anomaly_scores = [2 ** (-score / (avg_path_length + 1e-10)) for score in scores]
+        
+        threshold = sorted(anomaly_scores, reverse=True)[int(n * contamination)] if n > 0 else 0
+        
+        outlier_indices = [i for i, score in enumerate(anomaly_scores) if score >= threshold]
+        
+        return [{"index": i, "score": anomaly_scores[i]} for i in range(n)], outlier_indices
 
 
-class DataOutlierZScoreAction(BaseAction):
-    """Z-score based outlier detection."""
-    action_type = "data_outlier_zscore"
-    display_name = "Z分数异常值检测"
-    description = "Z分数异常值检测"
-
+class DBSCANOutlierAction(BaseAction):
+    """Detect outliers using DBSCAN clustering."""
+    action_type = "dbscan_outlier"
+    display_name = "DBSCAN异常检测"
+    description = "使用DBSCAN聚类方法检测异常值"
+    
+    def __init__(self):
+        super().__init__()
+    
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
             data = params.get("data", [])
+            fields = params.get("fields", [])
+            eps = params.get("eps", 0.5)
+            min_samples = params.get("min_samples", 5)
+            
+            if not data:
+                return ActionResult(success=False, message="No data provided")
+            
+            if not fields:
+                return ActionResult(success=False, message="fields is required")
+            
+            outliers, clusters = self._detect_outliers(data, fields, eps, min_samples)
+            
+            return ActionResult(
+                success=True,
+                message="DBSCAN outlier detection complete",
+                data={
+                    "outliers": outliers,
+                    "outlier_count": len(outliers),
+                    "clusters": clusters,
+                    "eps": eps,
+                    "min_samples": min_samples
+                }
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+    
+    def _detect_outliers(self, data: List[Dict], fields: List[str], eps: float, min_samples: int) -> Tuple[List[Dict], Dict]:
+        vectors = []
+        for item in data:
+            if isinstance(item, dict):
+                vector = [item.get(f, 0) for f in fields]
+                vectors.append((item, vector))
+        
+        n = len(vectors)
+        labels = [-1] * n
+        cluster_id = 0
+        
+        for i in range(n):
+            if labels[i] != -1:
+                continue
+            
+            neighbors = self._get_neighbors(vectors, i, eps)
+            
+            if len(neighbors) < min_samples:
+                continue
+            
+            labels[i] = cluster_id
+            
+            queue = list(neighbors)
+            while queue:
+                j = queue.pop(0)
+                
+                if labels[j] == -2:
+                    labels[j] = cluster_id
+                
+                if labels[j] != -1:
+                    continue
+                
+                labels[j] = cluster_id
+                
+                j_neighbors = self._get_neighbors(vectors, j, eps)
+                
+                if len(j_neighbors) >= min_samples:
+                    queue.extend([n for n in j_neighbors if n != j and labels[n] == -1])
+            
+            cluster_id += 1
+        
+        outliers = [vectors[i][0] for i in range(n) if labels[i] == -1 or labels[i] == -2]
+        
+        cluster_counts = defaultdict(int)
+        for label in labels:
+            if label >= 0:
+                cluster_counts[label] += 1
+        
+        return outliers, {
+            "cluster_count": cluster_id,
+            "cluster_sizes": dict(cluster_counts),
+            "noise_points": sum(1 for l in labels if l == -1)
+        }
+    
+    def _get_neighbors(self, vectors: List[Tuple], idx: int, eps: float) -> List[int]:
+        neighbors = []
+        _, center_vector = vectors[idx]
+        
+        for i, (_, vector) in enumerate(vectors):
+            if i == idx:
+                continue
+            
+            dist = math.sqrt(sum((a - b) ** 2 for a, b in zip(center_vector, vector)))
+            
+            if dist <= eps:
+                neighbors.append(i)
+        
+        return neighbors
+
+
+class MahalanobisOutlierAction(BaseAction):
+    """Detect outliers using Mahalanobis distance."""
+    action_type = "mahalanobis_outlier"
+    display_name = "马氏距离异常检测"
+    description = "使用马氏距离检测异常值"
+    
+    def __init__(self):
+        super().__init__()
+    
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            fields = params.get("fields", [])
             threshold = params.get("threshold", 3.0)
-            column = params.get("column")
-
+            
             if not data:
-                return ActionResult(success=False, message="data is required")
-
-            if isinstance(data, list) and isinstance(data[0], dict) and column:
-                values = [row.get(column) for row in data]
-            else:
-                values = list(data) if isinstance(data, list) else [data]
-
-            numeric = [v for v in values if v is not None and isinstance(v, (int, float))]
-            if not numeric:
-                return ActionResult(success=False, message="No numeric values")
-
-            n = len(numeric)
-            mean = sum(numeric) / n
-            variance = sum((v - mean) ** 2 for v in numeric) / n
-            std = math.sqrt(variance)
-
-            if std == 0:
-                return ActionResult(success=False, message="Standard deviation is zero")
-
-            zscores = [(v - mean) / std for v in numeric]
-            outlier_indices = [i for i, z in enumerate(zscores) if abs(z) > threshold]
-
+                return ActionResult(success=False, message="No data provided")
+            
+            if not fields:
+                return ActionResult(success=False, message="fields is required")
+            
+            outliers, distances = self._detect_outliers(data, fields, threshold)
+            
             return ActionResult(
                 success=True,
-                message=f"Found {len(outlier_indices)} outliers (threshold={threshold})",
-                data={"zscores": zscores, "outlier_indices": outlier_indices, "mean": mean, "std": std, "threshold": threshold}
+                message="Mahalanobis distance outlier detection complete",
+                data={
+                    "outliers": outliers,
+                    "outlier_count": len(outliers),
+                    "threshold": threshold,
+                    "distances": distances[:100]
+                }
             )
         except Exception as e:
-            return ActionResult(success=False, message=f"Z-score error: {e}")
-
-
-class DataOutlierIsolationAction(BaseAction):
-    """Isolation forest-style outlier detection."""
-    action_type = "data_outlier_isolation"
-    display_name = "隔离森林异常值检测"
-    description = "Isolation forest风格异常值检测"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            num_trees = params.get("num_trees", 100)
-            sample_size = params.get("sample_size", 256)
-            threshold = params.get("threshold", 0.5)
-            column = params.get("column")
-
-            if not data:
-                return ActionResult(success=False, message="data is required")
-
-            if isinstance(data, list) and isinstance(data[0], dict) and column:
-                values = [row.get(column) for row in data]
-            else:
-                values = list(data) if isinstance(data, list) else [data]
-
-            numeric = [v for v in values if v is not None and isinstance(v, (int, float))]
-            if len(numeric) < 2:
-                return ActionResult(success=False, message="Need at least 2 values")
-
-            anomaly_scores = []
-            for i, val in enumerate(numeric):
-                path_lengths = []
-                for _ in range(num_trees):
-                    path_length = self._isolation_path(val, numeric, sample_size)
-                    path_lengths.append(path_length)
-                avg_path = sum(path_lengths) / len(path_lengths)
-                c = 2 * (math.log(len(numeric) - 1) + 0.5772156649) if len(numeric) > 1 else 1
-                score = 2 ** (-avg_path / c)
-                anomaly_scores.append(score)
-
-            outlier_indices = [i for i, s in enumerate(anomaly_scores) if s > threshold]
-            outliers = [numeric[i] for i in outlier_indices]
-
-            return ActionResult(
-                success=True,
-                message=f"Found {len(outliers)} outliers (score > {threshold})",
-                data={"anomaly_scores": anomaly_scores, "outlier_indices": outlier_indices, "outliers": outliers}
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+    
+    def _detect_outliers(self, data: List[Dict], fields: List[str], threshold: float) -> Tuple[List[Dict], List[Dict]]:
+        vectors = []
+        for item in data:
+            if isinstance(item, dict):
+                vector = [item.get(f, 0) for f in fields]
+                if all(isinstance(v, (int, float)) for v in vector):
+                    vectors.append((item, vector))
+        
+        if len(vectors) < 3:
+            return [], []
+        
+        n = len(vectors)
+        dim = len(fields)
+        
+        means = []
+        for j in range(dim):
+            mean = sum(v[1][j] for v in vectors) / n
+            means.append(mean)
+        
+        cov = [[0.0] * dim for _ in range(dim)]
+        for j in range(dim):
+            for k in range(dim):
+                cov[j][k] = sum(
+                    (vectors[i][1][j] - means[j]) * (vectors[i][1][k] - means[k])
+                    for i in range(n)
+                ) / n
+        
+        det = self._det(cov)
+        
+        if abs(det) < 1e-10:
+            return [], [{"item": v[0], "distance": 0} for v in vectors]
+        
+        cov_inv = self._inverse(cov)
+        
+        outliers = []
+        distances = []
+        
+        for item, vector in vectors:
+            diff = [vector[j] - means[j] for j in range(dim)]
+            
+            mahal_dist_sq = sum(
+                diff[i] * sum(cov_inv[i][j] * diff[j] for j in range(dim))
+                for i in range(dim)
             )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Isolation outlier error: {e}")
-
-    def _isolation_path(self, value: float, data: List[float], sample_size: int) -> int:
-        """Simulate isolation path length."""
-        import random
-        sample = random.sample(data, min(sample_size, len(data)))
-        if not sample:
-            return 0
-        min_val, max_val = min(sample), max(sample)
-        if min_val == max_val:
-            return 1
-        return 1 + self._isolation_path(value, sample, sample_size // 2) if len(sample) > 1 else 1
+            
+            mahal_dist = math.sqrt(mahal_dist_sq)
+            
+            distances.append({"item": item, "distance": mahal_dist})
+            
+            if mahal_dist > threshold:
+                outliers.append(item)
+        
+        return outliers, sorted(distances, key=lambda x: x["distance"], reverse=True)
+    
+    def _det(self, matrix: List[List[float]]) -> float:
+        n = len(matrix)
+        if n == 1:
+            return matrix[0][0]
+        if n == 2:
+            return matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0]
+        
+        d = 0
+        for j in range(n):
+            sub = [row[:j] + row[j+1:] for row in matrix[1:]]
+            d += ((-1) ** j) * matrix[0][j] * self._det(sub)
+        
+        return d
+    
+    def _inverse(self, matrix: List[List[float]]) -> List[List[float]]:
+        n = len(matrix)
+        if n == 1:
+            return [[1.0 / matrix[0][0]]] if matrix[0][0] != 0 else [[0]]
+        
+        aug = [row + [float(i == j) for j in range(n)] for i, row in enumerate(matrix)]
+        
+        for i in range(n):
+            pivot = aug[i][i]
+            if abs(pivot) < 1e-10:
+                for j in range(i + 1, n):
+                    if abs(aug[j][i]) > 1e-10:
+                        aug[i], aug[j] = aug[j], aug[i]
+                        pivot = aug[i][i]
+                        break
+            
+            if abs(pivot) > 1e-10:
+                for j in range(2 * n):
+                    aug[i][j] /= pivot
+            
+            for j in range(n):
+                if i != j:
+                    factor = aug[j][i]
+                    for k in range(2 * n):
+                        aug[j][k] -= factor * aug[i][k]
+        
+        return [row[n:] for row in aug]
