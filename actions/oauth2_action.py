@@ -1,255 +1,293 @@
-"""OAuth2 action module for RabAI AutoClick.
+"""OAuth2 authentication action module.
 
-Provides OAuth2 operations:
-- OAuth2AuthorizeAction: Generate authorization URL
-- OAuth2TokenAction: Exchange code for token
-- OAuth2RefreshAction: Refresh access token
-- OAuth2RevokeAction: Revoke token
+Provides OAuth2 client credentials and authorization code flow support
+for API authentication with token refresh capabilities.
 """
 
 from __future__ import annotations
 
-import sys
-import os
+import time
+import hashlib
+import hmac
+import base64
 import urllib.parse
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Optional
+from dataclasses import dataclass, field
+from enum import Enum
+import logging
 
-import os as _os
-_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class OAuth2AuthorizeAction(BaseAction):
-    """Generate OAuth2 authorization URL."""
-    action_type = "oauth2_authorize"
-    display_name = "OAuth2授权"
-    description = "生成OAuth2授权URL"
-    version = "1.0"
+class GrantType(Enum):
+    """OAuth2 grant types."""
+    CLIENT_CREDENTIALS = "client_credentials"
+    AUTHORIZATION_CODE = "authorization_code"
+    REFRESH_TOKEN = "refresh_token"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute authorization URL generation."""
-        client_id = params.get('client_id', '')
-        redirect_uri = params.get('redirect_uri', '')
-        scope = params.get('scope', '')
-        state = params.get('state', '')
-        response_type = params.get('response_type', 'code')
-        output_var = params.get('output_var', 'auth_url')
 
-        if not client_id or not redirect_uri:
-            return ActionResult(success=False, message="client_id and redirect_uri are required")
+@dataclass
+class OAuth2Token:
+    """Represents an OAuth2 token response."""
+    access_token: str
+    token_type: str = "Bearer"
+    expires_in: int = 3600
+    refresh_token: Optional[str] = None
+    scope: Optional[str] = None
+    issued_at: float = field(default_factory=time.time)
+
+    @property
+    def is_expired(self) -> bool:
+        """Check if token is expired."""
+        return time.time() >= (self.issued_at + self.expires_in - 60)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert token to dictionary."""
+        return {
+            "access_token": self.access_token,
+            "token_type": self.token_type,
+            "expires_in": self.expires_in,
+            "refresh_token": self.refresh_token,
+            "scope": self.scope,
+        }
+
+
+class OAuth2Client:
+    """OAuth2 client with token management."""
+
+    def __init__(
+        self,
+        client_id: str,
+        client_secret: str,
+        token_url: str,
+        authorize_url: Optional[str] = None,
+        redirect_uri: Optional[str] = None,
+    ):
+        """Initialize OAuth2 client.
+
+        Args:
+            client_id: OAuth2 client ID
+            client_secret: OAuth2 client secret
+            token_url: Token endpoint URL
+            authorize_url: Authorization endpoint URL
+            redirect_uri: Redirect URI for authorization code flow
+        """
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.token_url = token_url
+        self.authorize_url = authorize_url
+        self.redirect_uri = redirect_uri
+        self._token: Optional[OAuth2Token] = None
+        self._token_refresh_callbacks: list[Callable[[OAuth2Token], None]] = []
+
+    def set_token(self, token: OAuth2Token) -> None:
+        """Set current token."""
+        self._token = token
+        for callback in self._token_refresh_callbacks:
+            callback(token)
+
+    def get_token(self) -> Optional[OAuth2Token]:
+        """Get current token."""
+        return self._token
+
+    def on_token_refresh(self, callback: Callable[[OAuth2Token], None]) -> None:
+        """Register token refresh callback."""
+        self._token_refresh_callbacks.append(callback)
+
+    def build_authorization_url(
+        self,
+        scope: Optional[str] = None,
+        state: Optional[str] = None,
+        code_challenge: bool = True,
+    ) -> tuple[str, Optional[str]]:
+        """Build authorization URL for authorization code flow.
+
+        Args:
+            scope: Requested scopes
+            state: State parameter for CSRF protection
+            code_challenge: Whether to use PKCE code challenge
+
+        Returns:
+            Tuple of (authorization_url, code_verifier)
+        """
+        if not self.authorize_url:
+            raise ValueError("authorize_url not configured")
+
+        params: dict[str, str] = {
+            "response_type": "code",
+            "client_id": self.client_id,
+            "redirect_uri": self.redirect_uri or "",
+        }
+
+        if scope:
+            params["scope"] = scope
+        if state:
+            params["state"] = state
+
+        code_verifier: Optional[str] = None
+        if code_challenge:
+            code_verifier = self._generate_code_verifier()
+            code_challenge_digest = hashlib.sha256(code_verifier.encode()).digest()
+            code_challenge_b64 = base64.urlsafe_b64encode(code_challenge_digest).rstrip(b"=").decode()
+            params["code_challenge"] = code_challenge_b64
+            params["code_challenge_method"] = "S256"
+
+        auth_url = f"{self.authorize_url}?{urllib.parse.urlencode(params)}"
+        return auth_url, code_verifier
+
+    def _generate_code_verifier(self) -> str:
+        """Generate PKCE code verifier."""
+        random_bytes = __import__("secrets").token_bytes(32)
+        return base64.urlsafe_b64encode(random_bytes).rstrip(b"=").decode()
+
+    def exchange_code_for_token(
+        self,
+        code: str,
+        code_verifier: Optional[str] = None,
+    ) -> OAuth2Token:
+        """Exchange authorization code for access token.
+
+        Args:
+            code: Authorization code
+            code_verifier: PKCE code verifier
+
+        Returns:
+            OAuth2Token object
+        """
+        data: dict[str, str] = {
+            "grant_type": GrantType.AUTHORIZATION_CODE.value,
+            "code": code,
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+        }
+
+        if self.redirect_uri:
+            data["redirect_uri"] = self.redirect_uri
+        if code_verifier:
+            data["code_verifier"] = code_verifier
+
+        response_data = self._make_token_request(data)
+        token = self._parse_token_response(response_data)
+        self.set_token(token)
+        return token
+
+    def refresh_access_token(self, refresh_token: str) -> OAuth2Token:
+        """Refresh access token using refresh token.
+
+        Args:
+            refresh_token: Refresh token
+
+        Returns:
+            New OAuth2Token object
+        """
+        data: dict[str, str] = {
+            "grant_type": GrantType.REFRESH_TOKEN.value,
+            "refresh_token": refresh_token,
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+        }
+
+        response_data = self._make_token_request(data)
+        token = self._parse_token_response(response_data)
+        self.set_token(token)
+        return token
+
+    def client_credentials_grant(self, scope: Optional[str] = None) -> OAuth2Token:
+        """Request token using client credentials grant.
+
+        Args:
+            scope: Requested scopes
+
+        Returns:
+            OAuth2Token object
+        """
+        data: dict[str, str] = {
+            "grant_type": GrantType.CLIENT_CREDENTIALS.value,
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+        }
+
+        if scope:
+            data["scope"] = scope
+
+        response_data = self._make_token_request(data)
+        token = self._parse_token_response(response_data)
+        self.set_token(token)
+        return token
+
+    def _make_token_request(self, data: dict[str, str]) -> dict[str, Any]:
+        """Make token request to authorization server.
+
+        Args:
+            data: Request body data
+
+        Returns:
+            Parsed JSON response
+        """
+        import json as json_module
 
         try:
-            resolved_client_id = context.resolve_value(client_id) if context else client_id
-            resolved_redirect = context.resolve_value(redirect_uri) if context else redirect_uri
-            resolved_scope = context.resolve_value(scope) if context else scope
-
-            import secrets
-            state = state or secrets.token_urlsafe(16)
-
-            params_dict = {
-                'client_id': resolved_client_id,
-                'redirect_uri': resolved_redirect,
-                'response_type': response_type,
-                'state': state,
-            }
-
-            if resolved_scope:
-                params_dict['scope'] = resolved_scope
-
-            auth_url = f"https://example.com/oauth/authorize?{urllib.parse.urlencode(params_dict)}"
-
-            result = {
-                'url': auth_url,
-                'state': state,
-                'client_id': resolved_client_id,
-                'redirect_uri': resolved_redirect,
-            }
-
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Generated auth URL with state: {state[:10]}..."
+            import urllib.request
+            req = urllib.request.Request(
+                self.token_url,
+                data=urllib.parse.urlencode(data).encode(),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
+            with urllib.request.urlopen(req, timeout=30) as response:
+                return json_module.loads(response.read().decode())
         except Exception as e:
-            return ActionResult(success=False, message=f"OAuth2 authorize error: {e}")
+            logger.error(f"OAuth2 token request failed: {e}")
+            raise
+
+    def _parse_token_response(self, data: dict[str, Any]) -> OAuth2Token:
+        """Parse token response data."""
+        return OAuth2Token(
+            access_token=data["access_token"],
+            token_type=data.get("token_type", "Bearer"),
+            expires_in=data.get("expires_in", 3600),
+            refresh_token=data.get("refresh_token"),
+            scope=data.get("scope"),
+        )
+
+    def get_authorized_header(self) -> dict[str, str]:
+        """Get authorization header with current token.
+
+        Returns:
+            Dict with Authorization header
+
+        Raises:
+            ValueError: If no token available
+        """
+        if not self._token:
+            raise ValueError("No token available. Authenticate first.")
+        if self._token.is_expired and self._token.refresh_token:
+            self.refresh_access_token(self._token.refresh_token)
+        return {"Authorization": f"{self._token.token_type} {self._token.access_token}"}
 
 
-class OAuth2TokenAction(BaseAction):
-    """Exchange authorization code for token."""
-    action_type = "oauth2_token"
-    display_name = "OAuth2令牌"
-    description = "交换授权码获取令牌"
-    version = "1.0"
+def create_oauth2_client(
+    client_id: str,
+    client_secret: str,
+    token_url: str,
+    authorize_url: Optional[str] = None,
+    redirect_uri: Optional[str] = None,
+) -> OAuth2Client:
+    """Create OAuth2 client instance.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute token exchange."""
-        code = params.get('code', '')
-        client_id = params.get('client_id', '')
-        client_secret = params.get('client_secret', '')
-        redirect_uri = params.get('redirect_uri', '')
-        token_url = params.get('token_url', 'https://example.com/oauth/token')
-        output_var = params.get('output_var', 'token_result')
+    Args:
+        client_id: OAuth2 client ID
+        client_secret: OAuth2 client secret
+        token_url: Token endpoint URL
+        authorize_url: Authorization endpoint URL
+        redirect_uri: Redirect URI
 
-        if not code or not client_id:
-            return ActionResult(success=False, message="code and client_id are required")
-
-        try:
-            import requests
-
-            resolved_code = context.resolve_value(code) if context else code
-            resolved_client_id = context.resolve_value(client_id) if context else client_id
-            resolved_secret = context.resolve_value(client_secret) if context else client_secret
-            resolved_redirect = context.resolve_value(redirect_uri) if context else redirect_uri
-            resolved_token_url = context.resolve_value(token_url) if context else token_url
-
-            response = requests.post(
-                resolved_token_url,
-                data={
-                    'grant_type': 'authorization_code',
-                    'code': resolved_code,
-                    'client_id': resolved_client_id,
-                    'client_secret': resolved_secret,
-                    'redirect_uri': resolved_redirect,
-                },
-                timeout=30
-            )
-
-            if response.ok:
-                token_data = response.json()
-                result = {
-                    'access_token': token_data.get('access_token', ''),
-                    'token_type': token_data.get('token_type', 'Bearer'),
-                    'expires_in': token_data.get('expires_in', 0),
-                    'refresh_token': token_data.get('refresh_token', ''),
-                    'scope': token_data.get('scope', ''),
-                }
-                return ActionResult(
-                    success=True,
-                    data={output_var: result},
-                    message=f"Token received: {result['token_type']}"
-                )
-            else:
-                return ActionResult(
-                    success=False,
-                    data={output_var: {'error': response.text}},
-                    message=f"Token exchange failed: {response.status_code}"
-                )
-        except Exception as e:
-            return ActionResult(success=False, message=f"OAuth2 token error: {e}")
-
-
-class OAuth2RefreshAction(BaseAction):
-    """Refresh access token."""
-    action_type = "oauth2_refresh"
-    display_name = "OAuth2刷新"
-    description = "刷新访问令牌"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute token refresh."""
-        refresh_token = params.get('refresh_token', '')
-        client_id = params.get('client_id', '')
-        client_secret = params.get('client_secret', '')
-        scope = params.get('scope', '')
-        token_url = params.get('token_url', 'https://example.com/oauth/token')
-        output_var = params.get('output_var', 'refresh_result')
-
-        if not refresh_token or not client_id:
-            return ActionResult(success=False, message="refresh_token and client_id are required")
-
-        try:
-            import requests
-
-            resolved_refresh = context.resolve_value(refresh_token) if context else refresh_token
-            resolved_client_id = context.resolve_value(client_id) if context else client_id
-            resolved_secret = context.resolve_value(client_secret) if context else client_secret
-            resolved_scope = context.resolve_value(scope) if context else scope
-            resolved_token_url = context.resolve_value(token_url) if context else token_url
-
-            data = {
-                'grant_type': 'refresh_token',
-                'refresh_token': resolved_refresh,
-                'client_id': resolved_client_id,
-                'client_secret': resolved_secret,
-            }
-
-            if resolved_scope:
-                data['scope'] = resolved_scope
-
-            response = requests.post(
-                resolved_token_url,
-                data=data,
-                timeout=30
-            )
-
-            if response.ok:
-                token_data = response.json()
-                result = {
-                    'access_token': token_data.get('access_token', ''),
-                    'expires_in': token_data.get('expires_in', 0),
-                    'refresh_token': token_data.get('refresh_token', resolved_refresh),
-                }
-                return ActionResult(
-                    success=True,
-                    data={output_var: result},
-                    message="Token refreshed successfully"
-                )
-            else:
-                return ActionResult(
-                    success=False,
-                    data={output_var: {'error': response.text}},
-                    message=f"Token refresh failed: {response.status_code}"
-                )
-        except Exception as e:
-            return ActionResult(success=False, message=f"OAuth2 refresh error: {e}")
-
-
-class OAuth2RevokeAction(BaseAction):
-    """Revoke OAuth2 token."""
-    action_type = "oauth2_revoke"
-    display_name = "OAuth2撤销"
-    description = "撤销OAuth2令牌"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute token revocation."""
-        token = params.get('token', '')
-        client_id = params.get('client_id', '')
-        client_secret = params.get('client_secret', '')
-        revoke_url = params.get('revoke_url', 'https://example.com/oauth/revoke')
-        output_var = params.get('output_var', 'revoke_result')
-
-        if not token:
-            return ActionResult(success=False, message="token is required")
-
-        try:
-            import requests
-
-            resolved_token = context.resolve_value(token) if context else token
-            resolved_client_id = context.resolve_value(client_id) if context else client_id
-            resolved_secret = context.resolve_value(client_secret) if context else client_secret
-            resolved_revoke_url = context.resolve_value(revoke_url) if context else revoke_url
-
-            response = requests.post(
-                resolved_revoke_url,
-                data={
-                    'token': resolved_token,
-                    'client_id': resolved_client_id,
-                    'client_secret': resolved_secret,
-                },
-                timeout=30
-            )
-
-            result = {
-                'revoked': response.ok,
-                'status_code': response.status_code,
-            }
-
-            return ActionResult(
-                success=response.ok,
-                data={output_var: result},
-                message="Token revoked" if response.ok else "Token revocation failed"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"OAuth2 revoke error: {e}")
+    Returns:
+        OAuth2Client instance
+    """
+    return OAuth2Client(
+        client_id=client_id,
+        client_secret=client_secret,
+        token_url=token_url,
+        authorize_url=authorize_url,
+        redirect_uri=redirect_uri,
+    )
