@@ -1,572 +1,321 @@
 """
 Automation State Machine Action Module.
 
-Implements a flexible state machine for workflow orchestration
-with guards, actions, history, and event-driven transitions.
-
-Author: RabAi Team
+Hierarchical state machine for complex automation workflows
+with guards, actions, transitions, and history tracking.
 """
 
-from __future__ import annotations
-
-import json
-import sys
-import os
-import time
-import threading
-import uuid
-from collections import deque
 from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple
+import logging
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
 class TransitionType(Enum):
-    """Types of state transitions."""
-    NORMAL = "normal"
-    GUARDED = "guarded"
-    FORCED = "forced"
-    TIMEOUT = "timeout"
-
-
-class StateMachineEvent(Enum):
-    """Events that can trigger transitions."""
-    START = "start"
-    NEXT = "next"
-    PREV = "prev"
-    RESET = "reset"
-    CUSTOM = "custom"
-
-
-@dataclass
-class State:
-    """A state in the state machine."""
-    name: str
-    entry_action: Optional[str] = None
-    exit_action: Optional[str] = None
-    do_action: Optional[str] = None
-    timeout_seconds: Optional[float] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    """State transition types."""
+    EXTERNAL = "external"
+    INTERNAL = "internal"
 
 
 @dataclass
 class Transition:
-    """A transition between states."""
-    from_state: str
-    to_state: str
+    """
+    State transition definition.
+
+    Attributes:
+        source: Source state identifier.
+        target: Target state identifier.
+        event: Event that triggers this transition.
+        guard: Optional guard condition function.
+        action: Optional action to execute on transition.
+        transition_type: External or internal transition.
+    """
+    source: str
+    target: str
     event: str
-    guard: Optional[str] = None
-    action: Optional[str] = None
-    transition_type: TransitionType = TransitionType.NORMAL
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    guard: Optional[Callable[[], bool]] = None
+    action: Optional[Callable[[], Any]] = None
+    transition_type: TransitionType = TransitionType.EXTERNAL
+
+
+@dataclass
+class State:
+    """
+    State definition.
+
+    Attributes:
+        name: State identifier.
+        entry_action: Action to execute on state entry.
+        exit_action: Action to execute on state exit.
+        do_action: Action to execute while in state.
+    """
+    name: str
+    entry_action: Optional[Callable[[], Any]] = None
+    exit_action: Optional[Callable[[], Any]] = None
+    do_action: Optional[Callable[[], Any]] = None
 
 
 @dataclass
 class StateHistoryEntry:
-    """An entry in the state history."""
-    timestamp: float
+    """Record of a state change."""
     from_state: Optional[str]
     to_state: str
     event: str
-    transition_type: TransitionType
-    duration_seconds: float
-    metadata: Dict[str, Any]
+    timestamp: float
+    transition_duration: float = 0.0
 
 
-@dataclass
-class StateMachineSnapshot:
-    """A snapshot of the state machine state."""
-    instance_id: str
-    current_state: str
-    previous_state: Optional[str]
-    context: Dict[str, Any]
-    started_at: float
-    last_updated: float
-    history: List[Dict[str, Any]]
-
-
-class StateMachine:
-    """A state machine instance."""
-    
-    def __init__(
-        self,
-        instance_id: str,
-        states: Dict[str, State],
-        transitions: List[Transition],
-        initial_state: str,
-        context: Optional[Dict[str, Any]] = None
-    ):
-        self.instance_id = instance_id
-        self.states = states
-        self.transitions = transitions
-        self._current_state = initial_state
-        self._previous_state: Optional[str] = None
-        self._context = context or {}
-        self._history: deque = deque(maxlen=1000)
-        self._started_at = time.time()
-        self._last_updated = time.time()
-        self._transition_index: Dict[Tuple[str, str], Transition] = {}
-        self._lock = threading.RLock()
-        
-        for t in transitions:
-            key = (t.from_state, t.event)
-            self._transition_index[key] = t
-    
-    @property
-    def current_state(self) -> str:
-        with self._lock:
-            return self._current_state
-    
-    def can_transition(self, event: str) -> bool:
-        """Check if a transition is possible."""
-        with self._lock:
-            key = (self._current_state, event)
-            if key not in self._transition_index:
-                return False
-            transition = self._transition_index[key]
-            if transition.guard:
-                return self._evaluate_guard(transition.guard)
-            return True
-    
-    def _evaluate_guard(self, guard: str) -> bool:
-        """Evaluate a guard condition."""
-        try:
-            if guard.startswith("lambda ") or "(" in guard:
-                return bool(eval(guard, {"context": self._context}))
-            return bool(self._context.get(guard, True))
-        except Exception:
-            return False
-    
-    def transition(self, event: str, event_data: Optional[Dict[str, Any]] = None) -> Tuple[bool, Optional[str], Optional[str]]:
-        """Attempt to transition state machine."""
-        with self._lock:
-            key = (self._current_state, event)
-            if key not in self._transition_index:
-                return False, None, f"No transition from {self._current_state} on event {event}"
-            
-            transition = self._transition_index[key]
-            
-            if transition.guard and not self._evaluate_guard(transition.guard):
-                return False, None, f"Guard condition failed: {transition.guard}"
-            
-            prev_state = self._current_state
-            prev_time = self._last_updated
-            
-            entry_action = transition.action
-            
-            self._previous_state = prev_state
-            self._current_state = transition.to_state
-            self._last_updated = time.time()
-            
-            duration = self._last_updated - prev_time
-            
-            history_entry = StateHistoryEntry(
-                timestamp=self._last_updated,
-                from_state=prev_state,
-                to_state=transition.to_state,
-                event=event,
-                transition_type=transition.transition_type,
-                duration_seconds=duration,
-                metadata=event_data or {}
-            )
-            self._history.append(history_entry)
-            
-            return True, transition.to_state, None
-    
-    def get_snapshot(self) -> StateMachineSnapshot:
-        """Get a snapshot of current state."""
-        with self._lock:
-            return StateMachineSnapshot(
-                instance_id=self.instance_id,
-                current_state=self._current_state,
-                previous_state=self._previous_state,
-                context=dict(self._context),
-                started_at=self._started_at,
-                last_updated=self._last_updated,
-                history=[
-                    {
-                        "timestamp": h.timestamp,
-                        "from_state": h.from_state,
-                        "to_state": h.to_state,
-                        "event": h.event,
-                        "transition_type": h.transition_type.value,
-                        "duration_seconds": h.duration_seconds
-                    }
-                    for h in self._history
-                ]
-            )
-
-
-class AutomationStateMachineAction(BaseAction):
-    """Automation state machine action.
-    
-    Implements workflow orchestration using a flexible state machine
-    with guards, actions, history tracking, and event-driven transitions.
+class AutomationStateMachineAction:
     """
-    action_type = "automation_state_machine"
-    display_name = "自动化状态机"
-    description = "工作流状态机编排"
-    
-    def __init__(self):
-        super().__init__()
-        self._machines: Dict[str, StateMachine] = {}
-        self._lock = threading.RLock()
-        self._action_handlers: Dict[str, Callable] = {}
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute a state machine operation.
-        
-        Args:
-            context: The execution context.
-            params: Dictionary containing:
-                - operation: Operation (create/transition/snapshot/history/query/stop)
-                - machine_id: State machine instance ID
-                - states: State definitions (for create)
-                - transitions: Transition definitions (for create)
-                - initial_state: Initial state (for create)
-                - event: Event to trigger
-                - event_data: Event payload
-                - context: Machine context
-                
-        Returns:
-            ActionResult with operation results.
+    Hierarchical state machine for automation workflows.
+
+    Example:
+        sm = AutomationStateMachineAction("workflow")
+        sm.add_state("idle", entry_action=init_handler)
+        sm.add_state("running", do_action=work_handler)
+        sm.add_transition("idle", "running", "start")
+        sm.send_event("start")
+    """
+
+    def __init__(self, name: str = "state_machine"):
         """
-        start_time = time.time()
-        
-        operation = params.get("operation", "create")
-        
-        if operation == "create":
-            return self._create_machine(params, start_time)
-        elif operation == "transition":
-            return self._transition_machine(params, start_time)
-        elif operation == "snapshot":
-            return self._get_snapshot(params, start_time)
-        elif operation == "history":
-            return self._get_history(params, start_time)
-        elif operation == "query":
-            return self._query_machine(params, start_time)
-        elif operation == "stop":
-            return self._stop_machine(params, start_time)
-        elif operation == "reset":
-            return self._reset_machine(params, start_time)
-        else:
-            return ActionResult(
-                success=False,
-                message=f"Unknown operation: {operation}",
-                duration=time.time() - start_time
-            )
-    
-    def _create_machine(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Create a new state machine."""
-        machine_id = params.get("machine_id", str(uuid.uuid4()))
-        states_def = params.get("states", {})
-        transitions_def = params.get("transitions", [])
-        initial_state = params.get("initial_state", "initial")
-        init_context = params.get("context", {})
-        
-        states = {}
-        for name, state_def in states_def.items():
-            if isinstance(state_def, dict):
-                states[name] = State(
-                    name=name,
-                    entry_action=state_def.get("entry_action"),
-                    exit_action=state_def.get("exit_action"),
-                    do_action=state_def.get("do_action"),
-                    timeout_seconds=state_def.get("timeout_seconds"),
-                    metadata=state_def.get("metadata", {})
-                )
+        Initialize state machine action.
+
+        Args:
+            name: State machine identifier.
+        """
+        self.name = name
+        self.states: dict[str, State] = {}
+        self.transitions: list[Transition] = []
+        self.initial_state: Optional[str] = None
+        self.current_state: Optional[str] = None
+        self._history: list[StateHistoryEntry] = []
+        self._state_enter_time: float = 0.0
+        self._event_queue: list[str] = []
+
+    def add_state(
+        self,
+        name: str,
+        entry_action: Optional[Callable] = None,
+        exit_action: Optional[Callable] = None,
+        do_action: Optional[Callable] = None,
+        initial: bool = False
+    ) -> "AutomationStateMachineAction":
+        """
+        Add a state to the state machine.
+
+        Args:
+            name: State identifier.
+            entry_action: Action on state entry.
+            exit_action: Action on state exit.
+            do_action: Action while in state.
+            initial: Set as initial state if True.
+
+        Returns:
+            Self for method chaining.
+        """
+        state = State(
+            name=name,
+            entry_action=entry_action,
+            exit_action=exit_action,
+            do_action=do_action
+        )
+        self.states[name] = state
+
+        if initial or self.initial_state is None:
+            self.initial_state = name
+
+        logger.debug(f"Added state: {name}")
+        return self
+
+    def add_transition(
+        self,
+        source: str,
+        target: str,
+        event: str,
+        guard: Optional[Callable] = None,
+        action: Optional[Callable] = None,
+        transition_type: TransitionType = TransitionType.EXTERNAL
+    ) -> "AutomationStateMachineAction":
+        """
+        Add a transition between states.
+
+        Args:
+            source: Source state name.
+            target: Target state name.
+            event: Event name that triggers transition.
+            guard: Optional guard condition.
+            action: Optional transition action.
+            transition_type: External or internal.
+
+        Returns:
+            Self for method chaining.
+        """
+        if source not in self.states:
+            raise ValueError(f"Source state '{source}' does not exist")
+        if target not in self.states:
+            raise ValueError(f"Target state '{target}' does not exist")
+
+        transition = Transition(
+            source=source,
+            target=target,
+            event=event,
+            guard=guard,
+            action=action,
+            transition_type=transition_type
+        )
+
+        self.transitions.append(transition)
+        logger.debug(f"Added transition: {source} --[{event}]--> {target}")
+        return self
+
+    def send_event(self, event: str) -> bool:
+        """
+        Send an event to trigger a transition.
+
+        Args:
+            event: Event name.
+
+        Returns:
+            True if transition occurred, False otherwise.
+        """
+        import time
+
+        if self.current_state is None:
+            if self.initial_state:
+                self.current_state = self.initial_state
+                self._state_enter_time = time.time()
+                self._execute_state_action(self.current_state, "entry")
             else:
-                states[name] = State(name=name)
-        
-        transitions = []
-        for t_def in transitions_def:
-            if isinstance(t_def, dict):
-                transitions.append(Transition(
-                    from_state=t_def["from_state"],
-                    to_state=t_def["to_state"],
-                    event=t_def["event"],
-                    guard=t_def.get("guard"),
-                    action=t_def.get("action"),
-                    transition_type=TransitionType(t_def.get("type", "normal")),
-                    metadata=t_def.get("metadata", {})
-                ))
-        
-        if initial_state not in states:
-            return ActionResult(
-                success=False,
-                message=f"Initial state not found: {initial_state}",
-                duration=time.time() - start_time
-            )
-        
-        machine = StateMachine(
-            instance_id=machine_id,
-            states=states,
-            transitions=transitions,
-            initial_state=initial_state,
-            context=init_context
-        )
-        
-        with self._lock:
-            self._machines[machine_id] = machine
-        
-        return ActionResult(
-            success=True,
-            message=f"State machine created: {machine_id}",
-            data={
-                "machine_id": machine_id,
-                "initial_state": initial_state,
-                "states": list(states.keys()),
-                "transitions": len(transitions)
-            },
-            duration=time.time() - start_time
-        )
-    
-    def _transition_machine(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Trigger a transition in a state machine."""
-        machine_id = params.get("machine_id")
-        event = params.get("event", "next")
-        event_data = params.get("event_data", {})
-        
-        if not machine_id:
-            return ActionResult(
-                success=False,
-                message="Missing required parameter: machine_id",
-                duration=time.time() - start_time
-            )
-        
-        with self._lock:
-            if machine_id not in self._machines:
-                return ActionResult(
-                    success=False,
-                    message=f"Machine not found: {machine_id}",
-                    duration=time.time() - start_time
+                logger.error("No initial state defined")
+                return False
+
+        matching_transitions = [
+            t for t in self.transitions
+            if t.source == self.current_state and t.event == event
+        ]
+
+        for transition in matching_transitions:
+            if transition.guard and not transition.guard():
+                logger.debug(f"Guard failed for transition {self.current_state} --[{event}]--> {transition.target}")
+                continue
+
+            previous_state = self.current_state
+            enter_time = time.time()
+
+            self._execute_state_action(previous_state, "exit")
+
+            if transition.action:
+                try:
+                    transition.action()
+                except Exception as e:
+                    logger.error(f"Transition action failed: {e}")
+
+            self.current_state = transition.target
+            self._state_enter_time = time.time()
+            self._execute_state_action(transition.target, "entry")
+
+            transition_duration = time.time() - enter_time
+
+            self._history.append(StateHistoryEntry(
+                from_state=previous_state,
+                to_state=transition.target,
+                event=event,
+                timestamp=enter_time,
+                transition_duration=transition_duration
+            ))
+
+            logger.info(f"State machine: {previous_state} --[{event}]--> {transition.target}")
+            return True
+
+        logger.debug(f"No matching transition for event '{event}' in state '{self.current_state}'")
+        return False
+
+    def _execute_state_action(self, state_name: str, action_type: str) -> None:
+        """Execute state entry, exit, or do action."""
+        state = self.states.get(state_name)
+        if not state:
+            return
+
+        action = None
+        if action_type == "entry":
+            action = state.entry_action
+        elif action_type == "exit":
+            action = state.exit_action
+        elif action_type == "do":
+            action = state.do_action
+
+        if action:
+            try:
+                action()
+            except Exception as e:
+                logger.error(f"State action failed ({action_type}): {e}")
+
+    def get_current_state(self) -> Optional[str]:
+        """Get current state name."""
+        return self.current_state
+
+    def get_history(self, limit: int = 100) -> list[StateHistoryEntry]:
+        """Get recent state history."""
+        return self._history[-limit:]
+
+    def get_allowed_events(self) -> list[str]:
+        """Get list of events that can be triggered from current state."""
+        return [
+            t.event for t in self.transitions
+            if t.source == self.current_state
+        ]
+
+    def is_in_state(self, state_name: str) -> bool:
+        """Check if currently in specified state."""
+        return self.current_state == state_name
+
+    def reset(self) -> None:
+        """Reset state machine to initial state."""
+        if self.initial_state:
+            self.current_state = self.initial_state
+            import time
+            self._state_enter_time = time.time()
+            self._execute_state_action(self.current_state, "entry")
+            logger.info(f"State machine reset to '{self.initial_state}'")
+
+    def get_state_info(self) -> dict:
+        """Get information about all states and transitions."""
+        return {
+            "name": self.name,
+            "current_state": self.current_state,
+            "initial_state": self.initial_state,
+            "states": list(self.states.keys()),
+            "allowed_events": self.get_allowed_events(),
+            "history_length": len(self._history)
+        }
+
+    def create_submachine(self, name: str, states: list[str], initial: str) -> "AutomationStateMachineAction":
+        """
+        Create a sub-state machine for hierarchical states.
+
+        Args:
+            name: Sub-machine identifier.
+            states: List of state names.
+            initial: Initial state for sub-machine.
+
+        Returns:
+            New sub-state machine instance.
+        """
+        sub_sm = AutomationStateMachineAction(f"{self.name}.{name}")
+
+        for state in states:
+            if state in self.states:
+                sub_sm.add_state(
+                    name=state,
+                    entry_action=self.states[state].entry_action,
+                    exit_action=self.states[state].exit_action,
+                    do_action=self.states[state].do_action
                 )
-            machine = self._machines[machine_id]
-        
-        success, new_state, error = machine.transition(event, event_data)
-        
-        if success:
-            return ActionResult(
-                success=True,
-                message=f"Transitioned to state: {new_state}",
-                data={
-                    "machine_id": machine_id,
-                    "previous_state": machine._previous_state,
-                    "current_state": new_state,
-                    "event": event
-                },
-                duration=time.time() - start_time
-            )
-        else:
-            return ActionResult(
-                success=False,
-                message=error or "Transition failed",
-                data={
-                    "machine_id": machine_id,
-                    "current_state": machine.current_state
-                },
-                duration=time.time() - start_time
-            )
-    
-    def _get_snapshot(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Get a snapshot of a state machine."""
-        machine_id = params.get("machine_id")
-        
-        if not machine_id:
-            return ActionResult(
-                success=False,
-                message="Missing required parameter: machine_id",
-                duration=time.time() - start_time
-            )
-        
-        with self._lock:
-            if machine_id not in self._machines:
-                return ActionResult(
-                    success=False,
-                    message=f"Machine not found: {machine_id}",
-                    duration=time.time() - start_time
-                )
-            machine = self._machines[machine_id]
-        
-        snapshot = machine.get_snapshot()
-        
-        return ActionResult(
-            success=True,
-            message=f"Snapshot retrieved for {machine_id}",
-            data={
-                "instance_id": snapshot.instance_id,
-                "current_state": snapshot.current_state,
-                "previous_state": snapshot.previous_state,
-                "context": snapshot.context,
-                "started_at": snapshot.started_at,
-                "last_updated": snapshot.last_updated,
-                "history_length": len(snapshot.history)
-            },
-            duration=time.time() - start_time
-        )
-    
-    def _get_history(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Get transition history for a state machine."""
-        machine_id = params.get("machine_id")
-        limit = params.get("limit", 100)
-        
-        if not machine_id:
-            return ActionResult(
-                success=False,
-                message="Missing required parameter: machine_id",
-                duration=time.time() - start_time
-            )
-        
-        with self._lock:
-            if machine_id not in self._machines:
-                return ActionResult(
-                    success=False,
-                    message=f"Machine not found: {machine_id}",
-                    duration=time.time() - start_time
-                )
-            machine = self._machines[machine_id]
-        
-        history = list(machine._history)[-limit:]
-        
-        return ActionResult(
-            success=True,
-            message=f"History retrieved: {len(history)} entries",
-            data={
-                "machine_id": machine_id,
-                "current_state": machine.current_state,
-                "history": [
-                    {
-                        "timestamp": h.timestamp,
-                        "from_state": h.from_state,
-                        "to_state": h.to_state,
-                        "event": h.event,
-                        "transition_type": h.transition_type.value,
-                        "duration_seconds": h.duration_seconds
-                    }
-                    for h in history
-                ]
-            },
-            duration=time.time() - start_time
-        )
-    
-    def _query_machine(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Query state machine information."""
-        machine_id = params.get("machine_id")
-        
-        with self._lock:
-            if machine_id:
-                if machine_id not in self._machines:
-                    return ActionResult(
-                        success=False,
-                        message=f"Machine not found: {machine_id}",
-                        duration=time.time() - start_time
-                    )
-                machines = {machine_id: self._machines[machine_id]}
-            else:
-                machines = self._machines
-        
-        result = {}
-        for mid, machine in machines.items():
-            result[mid] = {
-                "instance_id": machine.instance_id,
-                "current_state": machine.current_state,
-                "previous_state": machine._previous_state,
-                "states": list(machine.states.keys()),
-                "context_keys": list(machine._context.keys()),
-                "started_at": machine._started_at,
-                "last_updated": machine._last_updated,
-                "transition_count": len(machine._history)
-            }
-        
-        return ActionResult(
-            success=True,
-            message=f"Found {len(result)} machines",
-            data={"machines": result, "count": len(result)},
-            duration=time.time() - start_time
-        )
-    
-    def _stop_machine(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Stop and remove a state machine."""
-        machine_id = params.get("machine_id")
-        
-        if not machine_id:
-            return ActionResult(
-                success=False,
-                message="Missing required parameter: machine_id",
-                duration=time.time() - start_time
-            )
-        
-        with self._lock:
-            if machine_id not in self._machines:
-                return ActionResult(
-                    success=False,
-                    message=f"Machine not found: {machine_id}",
-                    duration=time.time() - start_time
-                )
-            del self._machines[machine_id]
-        
-        return ActionResult(
-            success=True,
-            message=f"Machine stopped: {machine_id}",
-            duration=time.time() - start_time
-        )
-    
-    def _reset_machine(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Reset a state machine to initial state."""
-        machine_id = params.get("machine_id")
-        initial_state = params.get("initial_state", "initial")
-        
-        if not machine_id:
-            return ActionResult(
-                success=False,
-                message="Missing required parameter: machine_id",
-                duration=time.time() - start_time
-            )
-        
-        with self._lock:
-            if machine_id not in self._machines:
-                return ActionResult(
-                    success=False,
-                    message=f"Machine not found: {machine_id}",
-                    duration=time.time() - start_time
-                )
-            machine = self._machines[machine_id]
-            
-            if initial_state not in machine.states:
-                return ActionResult(
-                    success=False,
-                    message=f"State not found: {initial_state}",
-                    duration=time.time() - start_time
-                )
-            
-            machine._current_state = initial_state
-            machine._previous_state = None
-            machine._last_updated = time.time()
-            machine._history.clear()
-        
-        return ActionResult(
-            success=True,
-            message=f"Machine reset to: {initial_state}",
-            data={"machine_id": machine_id, "current_state": initial_state},
-            duration=time.time() - start_time
-        )
-    
-    def validate_params(self, params: Dict[str, Any]) -> Tuple[bool, str]:
-        """Validate state machine parameters."""
-        operation = params.get("operation", "create")
-        if operation == "create":
-            if "states" not in params:
-                return False, "Missing required parameter: states"
-            if "transitions" not in params:
-                return False, "Missing required parameter: transitions"
-        elif operation in ("transition", "snapshot", "history", "stop", "reset"):
-            if "machine_id" not in params:
-                return False, f"Missing required parameter: machine_id"
-        return True, ""
-    
-    def get_required_params(self) -> List[str]:
-        """Return required parameters."""
-        return ["operation"]
+
+        sub_sm.initial_state = initial
+        sub_sm.current_state = initial
+
+        return sub_sm

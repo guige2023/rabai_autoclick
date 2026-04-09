@@ -1,295 +1,376 @@
-"""API Gateway action module for RabAI AutoClick.
+"""
+API Gateway Action Module.
 
-Provides API gateway functionality: routing, load balancing,
-rate limiting, and request/response transformation.
+Unified API gateway with request routing, load balancing,
+rate limiting, authentication, and response caching.
 """
 
-import json
+import asyncio
+import hashlib
 import time
-import sys
-import os
-from typing import Any, Dict, List, Optional
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
+from enum import Enum
+import logging
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class ApiGatewayRouterAction(BaseAction):
-    """Route API requests to backends based on rules.
+class LoadBalanceStrategy(Enum):
+    """Load balancing strategies."""
+    ROUND_ROBIN = "round_robin"
+    RANDOM = "random"
+    LEAST_CONNECTIONS = "least_connections"
+    IP_HASH = "ip_hash"
 
-    Pattern-based routing with header manipulation
-    and backend selection.
+
+@dataclass
+class Upstream:
     """
-    action_type = "api_gateway_router"
-    display_name = "API网关路由"
-    description = "基于规则将API请求路由到后端"
+    Upstream server configuration.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Route API request.
+    Attributes:
+        url: Full URL of upstream server.
+        weight: Weight for weighted load balancing.
+        max_fails: Max failures before marking unhealthy.
+        fail_timeout: Time to wait before retrying failed upstream.
+        is_healthy: Current health status.
+    """
+    url: str
+    weight: int = 1
+    max_fails: int = 3
+    fail_timeout: float = 30.0
+    is_healthy: bool = True
+    failures: int = field(default=0, init=False)
+    connections: int = field(default=0, init=False)
+
+
+@dataclass
+class RateLimitRule:
+    """
+    Rate limiting rule configuration.
+
+    Attributes:
+        path: URL path pattern to match.
+        limit: Maximum requests allowed.
+        window: Time window in seconds.
+    """
+    path: str
+    limit: int
+    window: float
+
+
+@dataclass
+class GatewayRoute:
+    """
+    Gateway route configuration.
+
+    Attributes:
+        path_prefix: URL path prefix to match.
+        upstreams: List of upstream servers.
+        auth_required: Whether authentication is required.
+        rate_limit: Optional rate limit rule.
+        cache_ttl: Response cache TTL in seconds.
+        methods: Allowed HTTP methods.
+    """
+    path_prefix: str
+    upstreams: list[Upstream]
+    auth_required: bool = False
+    rate_limit: Optional[RateLimitRule] = None
+    cache_ttl: float = 0.0
+    methods: list[str] = field(default_factory=lambda: ["GET", "POST", "PUT", "DELETE"])
+
+
+@dataclass
+class GatewayConfig:
+    """Gateway configuration container."""
+    host: str = "0.0.0.0"
+    port: int = 8080
+    load_balance: LoadBalanceStrategy = LoadBalanceStrategy.ROUND_ROBIN
+    default_timeout: float = 30.0
+    routes: list[GatewayRoute] = field(default_factory=list)
+
+
+class APIGatewayAction:
+    """
+    API Gateway for routing, load balancing, and managing API requests.
+
+    Example:
+        gateway = APIGatewayAction()
+        gateway.add_route("/api/users", ["http://user1:8000", "http://user2:8000"])
+        await gateway.start()
+    """
+
+    def __init__(self, config: Optional[GatewayConfig] = None):
+        """
+        Initialize API gateway action.
 
         Args:
-            context: Execution context.
-            params: Dict with keys: request, routes,
-                   default_backend, sticky_session.
+            config: Gateway configuration. Uses defaults if None.
+        """
+        self.config = config or GatewayConfig()
+        self._route_map: dict[str, GatewayRoute] = {}
+        self._upstream_index: dict[str, int] = {}
+        self._request_counts: dict[str, list[tuple[float, int]]] = {}
+        self._cache: dict[str, tuple[Any, float]] = {}
+        self._active_connections: int = 0
+
+        for route in self.config.routes:
+            self._route_map[route.path_prefix] = route
+            self._upstream_index[route.path_prefix] = 0
+
+    def add_route(
+        self,
+        path_prefix: str,
+        upstream_urls: list[str],
+        auth_required: bool = False,
+        rate_limit: Optional[RateLimitRule] = None,
+        cache_ttl: float = 0.0
+    ) -> GatewayRoute:
+        """
+        Add a route to the gateway.
+
+        Args:
+            path_prefix: URL path prefix to match.
+            upstream_urls: List of upstream server URLs.
+            auth_required: Whether auth is required.
+            rate_limit: Optional rate limit rule.
+            cache_ttl: Response cache TTL in seconds.
 
         Returns:
-            ActionResult with routed response.
+            Created GatewayRoute object.
         """
-        start_time = time.time()
-        try:
-            request_url = params.get('request_url', '')
-            request_method = params.get('request_method', 'GET').upper()
-            request_headers = params.get('request_headers', {})
-            request_body = params.get('request_body')
-            routes = params.get('routes', [])
-            default_backend = params.get('default_backend')
-            sticky_session = params.get('sticky_session', False)
+        upstreams = [Upstream(url=url) for url in upstream_urls]
+        route = GatewayRoute(
+            path_prefix=path_prefix,
+            upstreams=upstreams,
+            auth_required=auth_required,
+            rate_limit=rate_limit,
+            cache_ttl=cache_ttl
+        )
 
-            if not request_url:
-                return ActionResult(
-                    success=False,
-                    message="request_url is required",
-                    duration=time.time() - start_time,
-                )
+        self._route_map[path_prefix] = route
+        self._upstream_index[path_prefix] = 0
+        self._request_counts[path_prefix] = []
 
-            # Find matching route
-            matched_backend = default_backend
-            route_params = {}
-            for route in routes:
-                path_pattern = route.get('path_pattern', '')
-                header_conditions = route.get('headers', {})
+        logger.info(f"Added route: {path_prefix} -> {upstream_urls}")
+        return route
 
-                if self._match_path(request_url, path_pattern):
-                    if self._match_headers(request_headers, header_conditions):
-                        matched_backend = route.get('backend', default_backend)
-                        route_params = self._extract_params(request_url, path_pattern)
-                        break
+    def _select_upstream(self, route: GatewayRoute, client_ip: Optional[str] = None) -> Upstream:
+        """Select an upstream based on load balancing strategy."""
+        healthy = [u for u in route.upstreams if u.is_healthy]
 
-            if not matched_backend:
-                return ActionResult(
-                    success=False,
-                    message="No matching route found",
-                    duration=time.time() - start_time,
-                )
+        if not healthy:
+            logger.warning("No healthy upstreams available, using all anyway")
+            healthy = route.upstreams
 
-            # Build backend URL
-            backend_url = matched_backend
-            if not backend_url.endswith('/'):
-                backend_url += '/'
-            path = request_url.split('?', 1)[0]
-            backend_url += path.lstrip('/')
+        strategy = self.config.load_balance
 
-            # Add route params as query params
-            if route_params:
-                qs = '&'.join(f"{k}={v}" for k, v in route_params.items())
-                backend_url = backend_url + ('?' if '?' not in backend_url else '&') + qs
+        if strategy == LoadBalanceStrategy.ROUND_ROBIN:
+            idx = self._upstream_index.get(route.path_prefix, 0) % len(healthy)
+            self._upstream_index[route.path_prefix] = idx + 1
+            return healthy[idx]
 
-            # Forward request
-            body_bytes = None
-            if request_body:
-                if isinstance(request_body, str):
-                    body_bytes = request_body.encode('utf-8')
-                else:
-                    body_bytes = json.dumps(request_body).encode('utf-8')
+        elif strategy == LoadBalanceStrategy.RANDOM:
+            return healthy[int(time.time() * 1000) % len(healthy)]
 
-            headers = {**request_headers}
-            if request_body:
-                headers.setdefault('Content-Type', 'application/json')
+        elif strategy == LoadBalanceStrategy.LEAST_CONNECTIONS:
+            return min(healthy, key=lambda u: u.connections)
 
-            req = Request(backend_url, data=body_bytes, headers=headers, method=request_method)
-            try:
-                with urlopen(req, timeout=30) as resp:
-                    response_body = resp.read()
-                    response_data = None
-                    try:
-                        response_data = json.loads(response_body)
-                    except Exception:
-                        response_data = response_body.decode('utf-8', errors='ignore')
+        elif strategy == LoadBalanceStrategy.IP_HASH and client_ip:
+            hash_val = int(hashlib.md5(client_ip.encode()).hexdigest(), 16)
+            return healthy[hash_val % len(healthy)]
 
-                    duration = time.time() - start_time
-                    return ActionResult(
-                        success=True,
-                        message=f"Routed to {matched_backend}",
-                        data={
-                            'backend': matched_backend,
-                            'backend_url': backend_url,
-                            'status': resp.status,
-                            'response': response_data,
-                        },
-                        duration=duration,
-                    )
-            except HTTPError as e:
-                duration = time.time() - start_time
-                return ActionResult(
-                    success=False,
-                    message=f"Backend error: {e.code}",
-                    data={
-                        'backend': matched_backend,
-                        'status': e.code,
-                        'error': e.read().decode('utf-8', errors='ignore') if e.fp else str(e),
-                    },
-                    duration=duration,
-                )
+        return healthy[0]
 
-        except Exception as e:
-            duration = time.time() - start_time
-            return ActionResult(
-                success=False,
-                message=f"Gateway router error: {str(e)}",
-                duration=duration,
-            )
+    def _check_rate_limit(self, route: GatewayRoute, client_id: str) -> bool:
+        """
+        Check if request is within rate limit.
 
-    def _match_path(self, url: str, pattern: str) -> bool:
-        """Match URL against path pattern."""
-        import re
-        regex = pattern.replace('{', '(?P<').replace('}', '>[^/]+)')
-        regex = '^' + regex.replace('*', '[^/]*') + '$'
-        return bool(re.match(regex, url))
+        Args:
+            route: Gateway route with rate limit rule.
+            client_id: Client identifier for tracking.
 
-    def _match_headers(self, headers: Dict, conditions: Dict) -> bool:
-        """Check if headers match conditions."""
-        for key, value in conditions.items():
-            if headers.get(key) != value:
-                return False
+        Returns:
+            True if within limit, False if exceeded.
+        """
+        if not route.rate_limit:
+            return True
+
+        now = time.time()
+        window = route.rate_limit.window
+        limit = route.rate_limit.limit
+        key = f"{route.path_prefix}:{client_id}"
+
+        if key not in self._request_counts:
+            self._request_counts[key] = []
+
+        self._request_counts[key] = [
+            (t, count) for t, count in self._request_counts[key]
+            if now - t < window
+        ]
+
+        total_requests = sum(count for _, count in self._request_counts[key])
+
+        if total_requests >= limit:
+            logger.warning(f"Rate limit exceeded for {client_id} on {route.path_prefix}")
+            return False
+
+        if self._request_counts[key]:
+            self._request_counts[key][-1] = (self._request_counts[key][-1][0],
+                                              self._request_counts[key][-1][1] + 1)
+        else:
+            self._request_counts[key].append((now, 1))
+
         return True
 
-    def _extract_params(self, url: str, pattern: str) -> Dict:
-        """Extract path parameters."""
-        import re
-        params = {}
-        regex = pattern.replace('{', '(?P<').replace('}', '>[^/]+)')
-        regex = '^' + regex + '$'
-        match = re.match(regex, url.split('?')[0])
-        if match:
-            params = match.groupdict()
-        return params
+    def _get_cache(self, route: GatewayRoute, key: str) -> Optional[Any]:
+        """Get cached response if available and fresh."""
+        if route.cache_ttl <= 0:
+            return None
 
+        cache_key = f"{route.path_prefix}:{key}"
+        if cache_key in self._cache:
+            value, expires = self._cache[cache_key]
+            if time.time() < expires:
+                return value
+            del self._cache[cache_key]
 
-class ApiGatewayLoadBalancerAction(BaseAction):
-    """Load balance requests across multiple backends.
+        return None
 
-    Supports round-robin, least-connections, and
-    weighted distribution.
-    """
-    action_type = "api_gateway_load_balancer"
-    display_name = "API网关负载均衡"
-    description = "跨多个后端负载均衡请求"
+    def _set_cache(self, route: GatewayRoute, key: str, value: Any) -> None:
+        """Cache a response."""
+        if route.cache_ttl <= 0:
+            return
 
-    def execute(
+        cache_key = f"{route.path_prefix}:{key}"
+        expires = time.time() + route.cache_ttl
+        self._cache[cache_key] = (value, expires)
+
+    async def forward_request(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Balance request across backends.
+        path: str,
+        method: str,
+        headers: dict,
+        body: Optional[bytes] = None,
+        client_ip: Optional[str] = None
+    ) -> dict:
+        """
+        Forward a request to appropriate upstream.
 
         Args:
-            context: Execution context.
-            params: Dict with keys: backends, strategy (round_robin/least_conn/weighted),
-                   request_url, request_method, request_headers.
+            path: Request path.
+            method: HTTP method.
+            headers: Request headers.
+            body: Optional request body.
+            client_ip: Client IP address for rate limiting.
 
         Returns:
-            ActionResult with backend-selected response.
+            Response dict with status, headers, body.
+
+        Raises:
+            ValueError: If no route matches or rate limit exceeded.
         """
-        start_time = time.time()
+        matched_route = None
+        for prefix, route in self._route_map.items():
+            if path.startswith(prefix):
+                matched_route = route
+                break
+
+        if not matched_route:
+            raise ValueError(f"No route found for path: {path}")
+
+        if method not in matched_route.methods:
+            raise ValueError(f"Method {method} not allowed for route {matched_route.path_prefix}")
+
+        client_id = client_ip or headers.get("X-Client-ID", "anonymous")
+
+        if not self._check_rate_limit(matched_route, client_id):
+            raise ValueError("Rate limit exceeded")
+
+        if matched_route.auth_required:
+            if "Authorization" not in headers:
+                raise ValueError("Authentication required")
+
+        cache_key = f"{method}:{path}"
+        cached = self._get_cache(matched_route, cache_key)
+        if cached:
+            logger.info(f"Cache hit for {path}")
+            return cached
+
+        upstream = self._select_upstream(matched_route, client_ip)
+        upstream.connections += 1
+        self._active_connections += 1
+
         try:
-            backends = params.get('backends', [])
-            strategy = params.get('strategy', 'round_robin')
-            request_url = params.get('request_url', '')
-            request_method = params.get('request_method', 'GET').upper()
-            request_headers = params.get('request_headers', {})
-            request_body = params.get('request_body')
+            import aiohttp
 
-            if not backends:
-                return ActionResult(
-                    success=False,
-                    message="At least one backend is required",
-                    duration=time.time() - start_time,
-                )
+            async with aiohttp.ClientSession() as session:
+                url = f"{upstream.url}{path}"
 
-            # Initialize state
-            if not hasattr(context, '_gateway_state'):
-                context._gateway_state = {
-                    'round_robin_index': 0,
-                    'connections': {},
-                }
-            state = context._gateway_state
+                async with session.request(
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    data=body,
+                    timeout=aiohttp.ClientTimeout(total=self.config.default_timeout)
+                ) as response:
+                    response_body = await response.read()
+                    result = {
+                        "status": response.status,
+                        "headers": dict(response.headers),
+                        "body": response_body
+                    }
 
-            # Select backend
-            if strategy == 'round_robin':
-                idx = state['round_robin_index'] % len(backends)
-                state['round_robin_index'] += 1
-                selected = backends[idx]
-            elif strategy == 'least_conn':
-                connections = state['connections']
-                min_conn = float('inf')
-                selected = backends[0]
-                for backend in backends:
-                    conn_count = connections.get(backend.get('url', backend), 0)
-                    if conn_count < min_conn:
-                        min_conn = conn_count
-                        selected = backend
-                backend_url = selected.get('url', selected) if isinstance(selected, dict) else selected
-                state['connections'][backend_url] = state['connections'].get(backend_url, 0) + 1
-            else:
-                selected = backends[0]
-
-            if isinstance(selected, dict):
-                backend_url = selected.get('url', '')
-            else:
-                backend_url = selected
-
-            # Forward request to selected backend
-            full_url = backend_url
-            if not full_url.endswith('/') and request_url:
-                full_url += '/'
-            full_url += request_url.lstrip('/')
-
-            body_bytes = None
-            if request_body:
-                if isinstance(request_body, str):
-                    body_bytes = request_body.encode('utf-8')
-                else:
-                    body_bytes = json.dumps(request_body).encode('utf-8')
-
-            headers = {**request_headers}
-            if request_body:
-                headers.setdefault('Content-Type', 'application/json')
-
-            req = Request(full_url, data=body_bytes, headers=headers, method=request_method)
-            try:
-                with urlopen(req, timeout=30) as resp:
-                    response_data = json.loads(resp.read())
-                    duration = time.time() - start_time
-                    return ActionResult(
-                        success=True,
-                        message=f"Balanced to {backend_url}",
-                        data={
-                            'backend': backend_url,
-                            'strategy': strategy,
-                            'status': resp.status,
-                            'response': response_data,
-                        },
-                        duration=duration,
-                    )
-            except HTTPError as e:
-                duration = time.time() - start_time
-                return ActionResult(
-                    success=False,
-                    message=f"Backend error: {e.code}",
-                    data={'backend': backend_url, 'status': e.code},
-                    duration=duration,
-                )
+                    self._set_cache(matched_route, cache_key, result)
+                    return result
 
         except Exception as e:
-            duration = time.time() - start_time
-            return ActionResult(
-                success=False,
-                message=f"Load balancer error: {str(e)}",
-                duration=duration,
-            )
+            logger.error(f"Upstream request failed: {e}")
+            upstream.failures += 1
+
+            if upstream.failures >= upstream.max_fails:
+                upstream.is_healthy = False
+                logger.warning(f"Upstream {upstream.url} marked unhealthy")
+
+                await asyncio.sleep(upstream.fail_timeout)
+                upstream.is_healthy = True
+                upstream.failures = 0
+
+            raise
+
+        finally:
+            upstream.connections -= 1
+            self._active_connections -= 1
+
+    def get_stats(self) -> dict:
+        """Get gateway statistics."""
+        return {
+            "active_connections": self._active_connections,
+            "routes": len(self._route_map),
+            "cached_responses": len(self._cache),
+            "upstreams": {
+                route.path_prefix: [
+                    {
+                        "url": u.url,
+                        "healthy": u.is_healthy,
+                        "connections": u.connections
+                    }
+                    for u in route.upstreams
+                ]
+                for route in self.config.routes
+            }
+        }
+
+    def health_check(self) -> dict:
+        """Get overall gateway health status."""
+        all_healthy = all(
+            any(u.is_healthy for u in route.upstreams)
+            for route in self.config.routes
+        )
+
+        return {
+            "status": "healthy" if all_healthy else "degraded",
+            "total_routes": len(self._route_map),
+            "active_connections": self._active_connections
+        }
