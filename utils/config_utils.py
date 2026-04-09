@@ -1,191 +1,305 @@
-"""Configuration management utilities: env vars, JSON/YAML config, validation."""
+"""Configuration management utilities.
 
-from __future__ import annotations
+Provides config loading, validation, and environment
+handling for application settings.
+"""
 
-import json
 import os
-import time
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
-
-__all__ = [
-    "ConfigSource",
-    "Config",
-    "load_config",
-    "ConfigManager",
-    "env",
-]
+from typing import Any, Callable, Dict, List, Optional, Union
 
 
 @dataclass
-class ConfigSource:
-    """A configuration source."""
+class ConfigSchema:
+    """Schema definition for configuration validation."""
     name: str
-    priority: int = 0
-    get: Callable[[str], str | None] = field(default=lambda _: None)
+    type: type
+    default: Any = None
+    required: bool = False
+    validator: Optional[Callable[[Any], bool]] = None
+    description: str = ""
 
 
 class Config:
-    """Configuration container with environment variable and file support."""
+    """Configuration container with validation.
 
-    def __init__(self) -> None:
-        self._values: dict[str, Any] = {}
-        self._sources: list[ConfigSource] = []
+    Example:
+        config = Config()
+        config.set("debug", True)
+        config.set("port", 8080)
+        if config.get("debug"):
+            print("Debug mode")
+    """
 
-    def add_source(self, source: ConfigSource) -> None:
-        self._sources.append(source)
-        self._sources.sort(key=lambda s: s.priority)
+    def __init__(self, data: Optional[Dict[str, Any]] = None) -> None:
+        self._data: Dict[str, Any] = data or {}
+        self._schemas: Dict[str, ConfigSchema] = {}
 
-    def set(self, key: str, value: Any) -> None:
-        self._values[key] = value
+    def set_schema(self, schema: ConfigSchema) -> None:
+        """Register configuration schema."""
+        self._schemas[schema.name] = schema
 
-    def get(
+    def set(self, key: str, value: Any, validate: bool = True) -> None:
+        """Set configuration value."""
+        if validate and key in self._schemas:
+            self._validate(key, value)
+
+        self._data[key] = value
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get configuration value."""
+        return self._data.get(key, default)
+
+    def _validate(self, key: str, value: Any) -> None:
+        """Validate value against schema."""
+        schema = self._schemas.get(key)
+        if not schema:
+            return
+
+        if schema.validator and not schema.validator(value):
+            raise ValueError(f"Validation failed for {key}: {value}")
+
+        if schema.type and not isinstance(value, schema.type):
+            if not (schema.type == int and isinstance(value, float) and value.is_integer()):
+                raise TypeError(f"{key} must be {schema.type.__name__}, got {type(value).__name__}")
+
+    def has(self, key: str) -> bool:
+        """Check if key exists."""
+        return key in self._data
+
+    def remove(self, key: str) -> bool:
+        """Remove key from configuration."""
+        if key in self._data:
+            del self._data[key]
+            return True
+        return False
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Export configuration as dict."""
+        return dict(self._data)
+
+    def update(self, data: Dict[str, Any]) -> None:
+        """Update multiple values."""
+        for key, value in data.items():
+            self.set(key, value)
+
+
+class EnvConfig(Config):
+    """Configuration loaded from environment variables.
+
+    Example:
+        config = EnvConfig(prefix="APP_")
+        config.load_env(["PORT", "DEBUG", "DATABASE_URL"])
+        port = config.get("PORT", default=8080)
+    """
+
+    def __init__(self, prefix: str = "", separator: str = "_") -> None:
+        super().__init__()
+        self.prefix = prefix
+        self.separator = separator
+
+    def load_env(
         self,
-        key: str,
-        default: Any = None,
-        type_fn: Callable[[str], Any] | type | None = None,
-    ) -> Any:
-        value = None
-        for source in self._sources:
-            raw = source.get(key)
-            if raw is not None:
-                value = raw
-                break
-        if value is None:
-            value = os.environ.get(key)
+        keys: List[str],
+        types: Optional[Dict[str, type]] = None,
+    ) -> None:
+        """Load values from environment variables.
 
-        if value is None:
-            return default
+        Args:
+            keys: List of environment variable names.
+            types: Optional mapping of key to type.
+        """
+        types = types or {}
+        for key in keys:
+            env_var = self.prefix + key
+            value = os.environ.get(env_var)
 
-        if type_fn is not None:
-            if callable(type_fn) and not isinstance(type_fn, type):
-                value = type_fn(value)
-            elif isinstance(type_fn, type):
-                if type_fn == bool:
-                    value = value.lower() in ("true", "1", "yes", "on")
-                elif type_fn in (int, float, str):
-                    value = type_fn(value)
+            if value is None:
+                continue
+
+            value_type = types.get(key, str)
+            try:
+                if value_type == bool:
+                    self.set(key, value.lower() in ("true", "1", "yes"))
+                elif value_type == int:
+                    self.set(key, int(value))
+                elif value_type == float:
+                    self.set(key, float(value))
                 else:
-                    value = type_fn(value)
-        return value
+                    self.set(key, value)
+            except (ValueError, TypeError):
+                pass
 
-    def __getitem__(self, key: str) -> Any:
-        v = self.get(key)
-        if v is None:
-            raise KeyError(key)
-        return v
+    def require_env(self, keys: List[str]) -> None:
+        """Load required environment variables.
 
-    def __contains__(self, key: str) -> bool:
-        return self.get(key) is not None
+        Raises:
+            EnvironmentError: If any required variable is missing.
+        """
+        missing = []
+        for key in keys:
+            env_var = self.prefix + key
+            if os.environ.get(env_var) is None:
+                missing.append(env_var)
 
-    def to_dict(self) -> dict[str, Any]:
-        return dict(self._values)
+        if missing:
+            raise EnvironmentError(f"Missing required environment variables: {', '.join(missing)}")
 
 
-def env(key: str, default: Any = None, type_fn: type | None = None) -> Any:
-    """Quick access to environment variables with type coercion."""
-    return Config().get(key, default, type_fn)
+def load_json_config(path: Union[str, Path]) -> Dict[str, Any]:
+    """Load configuration from JSON file.
+
+    Example:
+        config = load_json_config("config.json")
+    """
+    path = Path(path)
+    if not path.exists():
+        return {}
+
+    with open(path, "r") as f:
+        return json.load(f)
+
+
+def save_json_config(config: Dict[str, Any], path: Union[str, Path]) -> None:
+    """Save configuration to JSON file.
+
+    Example:
+        save_json_config({"debug": True}, "config.json")
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(path, "w") as f:
+        json.dump(config, f, indent=2)
+
+
+class ConfigSource:
+    """Base class for configuration sources."""
+
+    def load(self) -> Dict[str, Any]:
+        """Load configuration."""
+        raise NotImplementedError
+
+    def save(self, config: Dict[str, Any]) -> None:
+        """Save configuration."""
+        raise NotImplementedError
+
+
+class JSONConfigSource(ConfigSource):
+    """JSON file configuration source."""
+
+    def __init__(self, path: Union[str, Path]) -> None:
+        self.path = Path(path)
+
+    def load(self) -> Dict[str, Any]:
+        return load_json_config(self.path)
+
+    def save(self, config: Dict[str, Any]) -> None:
+        save_json_config(config, self.path)
 
 
 class ConfigManager:
-    """Manages multiple config files with hot reload support."""
+    """Multi-source configuration manager.
+
+    Example:
+        manager = ConfigManager()
+        manager.add_source(JSONConfigSource("defaults.json"))
+        manager.add_source(EnvConfig(prefix="APP_"))
+        config = manager.load()
+    """
 
     def __init__(self) -> None:
-        self._configs: dict[str, dict[str, Any]] = {}
-        self._file_mtimes: dict[str, float] = {}
-        self._parsers: dict[str, Callable[[str], dict[str, Any]]] = {
-            ".json": self._parse_json,
-            ".yaml": self._parse_yaml,
-            ".yml": self._parse_yaml,
-            ".env": self._parse_env,
-        }
+        self._sources: List[ConfigSource] = []
 
-    def load(self, path: str | Path) -> None:
-        path = str(path)
-        self._configs[path] = self._read_file(path)
-        self._file_mtimes[path] = Path(path).stat().st_mtime
+    def add_source(self, source: ConfigSource, priority: int = 0) -> None:
+        """Add configuration source with priority.
 
-    def get(self, path: str | Path, key: str, default: Any = None) -> Any:
-        p = str(path)
-        if p not in self._configs:
-            self.load(p)
-        return self._configs.get(p, {}).get(key, default)
+        Higher priority sources override lower ones.
+        """
+        self._sources.append((priority, source))
+        self._sources.sort(key=lambda x: x[0], reverse=True)
 
-    def reload_if_changed(self) -> list[str]:
-        changed: list[str] = []
-        for path, last_mtime in list(self._file_mtimes.items()):
+    def load(self) -> Dict[str, Any]:
+        """Load merged configuration from all sources."""
+        config: Dict[str, Any] = {}
+
+        for _, source in self._sources:
+            source_config = source.load()
+            config.update(source_config)
+
+        return config
+
+    def save(self, config: Dict[str, Any]) -> None:
+        """Save configuration to all writable sources."""
+        for _, source in self._sources:
             try:
-                current_mtime = Path(path).stat().st_mtime
-                if current_mtime > last_mtime:
-                    self._configs[path] = self._read_file(path)
-                    self._file_mtimes[path] = current_mtime
-                    changed.append(path)
-            except FileNotFoundError:
+                source.save(config)
+            except (NotImplementedError, OSError):
                 pass
-        return changed
-
-    def _read_file(self, path: str) -> dict[str, Any]:
-        p = Path(path)
-        suffix = p.suffix.lower()
-
-        parser = self._parsers.get(suffix, self._parse_json)
-        return parser(path)
-
-    def _parse_json(self, path: str) -> dict[str, Any]:
-        try:
-            with open(path) as f:
-                return json.load(f)
-        except Exception:
-            return {}
-
-    def _parse_yaml(self, path: str) -> dict[str, Any]:
-        try:
-            import yaml
-            with open(path) as f:
-                return yaml.safe_load(f) or {}
-        except Exception:
-            return {}
-
-    def _parse_env(self, path: str) -> dict[str, Any]:
-        result = {}
-        try:
-            with open(path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        result[k.strip()] = v.strip().strip("\"'")
-        except Exception:
-            pass
-        return result
 
 
-def load_config(
-    path: str | Path,
-    env_prefix: str = "",
-) -> dict[str, Any]:
-    """Load config from file and override with environment variables."""
-    p = Path(path)
-    config: dict[str, Any] = {}
+@dataclass
+class FeatureToggle:
+    """Feature toggle configuration."""
+    name: str
+    enabled: bool = False
+    description: str = ""
+    rollout_percentage: int = 0
 
-    if p.suffix == ".json":
-        with open(p) as f:
-            config = json.load(f) or {}
-    elif p.suffix in (".yaml", ".yml"):
-        try:
-            import yaml
-            with open(p) as f:
-                config = yaml.safe_load(f) or {}
-        except Exception:
-            pass
 
-    if env_prefix:
-        for key in list(config.keys()):
-            env_key = f"{env_prefix}_{key.upper()}"
-            if env_key in os.environ:
-                config[key] = os.environ[env_key]
+class FeatureToggles:
+    """Manage feature toggles.
 
-    return config
+    Example:
+        toggles = FeatureToggles()
+        toggles.add("new_ui", enabled=True)
+        if toggles.is_enabled("new_ui"):
+            show_new_ui()
+    """
+
+    def __init__(self) -> None:
+        self._toggles: Dict[str, FeatureToggle] = {}
+
+    def add(
+        self,
+        name: str,
+        enabled: bool = False,
+        description: str = "",
+        rollout_percentage: int = 0,
+    ) -> None:
+        """Add a feature toggle."""
+        self._toggles[name] = FeatureToggle(
+            name=name,
+            enabled=enabled,
+            description=description,
+            rollout_percentage=rollout_percentage,
+        )
+
+    def enable(self, name: str) -> None:
+        """Enable a feature."""
+        if name in self._toggles:
+            self._toggles[name].enabled = True
+
+    def disable(self, name: str) -> None:
+        """Disable a feature."""
+        if name in self._toggles:
+            self._toggles[name].enabled = False
+
+    def is_enabled(self, name: str) -> bool:
+        """Check if feature is enabled."""
+        if name not in self._toggles:
+            return False
+        return self._toggles[name].enabled
+
+    def remove(self, name: str) -> bool:
+        """Remove a feature toggle."""
+        if name in self._toggles:
+            del self._toggles[name]
+            return True
+        return False
+
+    def list_all(self) -> List[FeatureToggle]:
+        """List all feature toggles."""
+        return list(self._toggles.values())
