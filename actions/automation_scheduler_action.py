@@ -1,504 +1,525 @@
 """
 Automation Task Scheduler Module.
 
-Provides cron-style scheduling with priority queues, rate limiting,
-and distributed lock support for task coordination.
+Provides advanced scheduling capabilities for automation tasks
+including cron expressions, interval-based scheduling,
+priority queues, and distributed task coordination.
 """
 
-from __future__ import annotations
-
-import asyncio
-import time
+from typing import (
+    Dict, List, Optional, Any, Callable, Set,
+    Tuple, Union, TypeVar
+)
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from datetime import datetime, timedelta
-from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Set
-from urllib.parse import urlparse
+import time
+import threading
 import logging
-import hashlib
+from collections import deque
+import re
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 class ScheduleType(Enum):
     """Type of scheduling strategy."""
-    CRON = "cron"
-    INTERVAL = "interval"
-    ONE_TIME = "one_time"
-    DELAYED = "delayed"
+    INTERVAL = auto()
+    CRON = auto()
+    ONE_TIME = auto()
+    MANUAL = auto()
 
 
 class TaskPriority(Enum):
     """Task priority levels."""
-    CRITICAL = 0
-    HIGH = 1
-    NORMAL = 2
-    LOW = 3
+    LOW = 0
+    NORMAL = 1
+    HIGH = 2
+    CRITICAL = 3
+
+
+class TaskStatus(Enum):
+    """Task execution status."""
+    PENDING = auto()
+    RUNNING = auto()
+    COMPLETED = auto()
+    FAILED = auto()
+    CANCELLED = auto()
+    TIMEOUT = auto()
 
 
 @dataclass
 class ScheduledTask:
-    """Container for a scheduled task."""
+    """Represents a scheduled automation task."""
     task_id: str
+    name: str
     func: Callable[..., Any]
-    args: tuple = field(default_factory=tuple)
+    args: Tuple[Any, ...] = field(default_factory=tuple)
     kwargs: Dict[str, Any] = field(default_factory=dict)
-    schedule_type: ScheduleType = ScheduleType.DELAYED
+    
+    schedule_type: ScheduleType = ScheduleType.MANUAL
     priority: TaskPriority = TaskPriority.NORMAL
-    next_run: float = 0.0
-    interval: float = 0.0
-    cron_expr: Optional[str] = None
-    max_retries: int = 3
-    timeout: float = 60.0
-    enabled: bool = True
-    tags: Set[str] = field(default_factory=set)
+    
+    # For interval scheduling
+    interval_seconds: Optional[float] = None
+    
+    # For cron scheduling
+    cron_expression: Optional[str] = None
+    
+    # For one-time scheduling
+    run_at: Optional[datetime] = None
+    
+    # Execution settings
+    timeout: Optional[float] = None
+    retry_count: int = 0
+    retry_delay: float = 1.0
+    
+    # Status tracking
+    status: TaskStatus = TaskStatus.PENDING
+    last_run: Optional[datetime] = None
+    next_run: Optional[datetime] = None
+    run_count: int = 0
+    error: Optional[str] = None
+    
     metadata: Dict[str, Any] = field(default_factory=dict)
     
-    def __lt__(self, other: ScheduledTask) -> bool:
-        """Compare tasks by priority and next run time."""
-        if self.priority != other.priority:
-            return self.priority.value < other.priority.value
-        return self.next_run < other.next_run
+    def __lt__(self, other: "ScheduledTask") -> bool:
+        """Compare tasks by priority for queue ordering."""
+        return self.priority.value > other.priority.value
 
 
 @dataclass
 class ExecutionResult:
-    """Result of a task execution."""
+    """Result of task execution."""
     task_id: str
-    started_at: float
-    completed_at: float
-    success: bool
+    status: TaskStatus
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    duration_ms: Optional[float] = None
     result: Any = None
     error: Optional[str] = None
     retry_count: int = 0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "status": self.status.name,
+            "duration_ms": self.duration_ms,
+            "error": self.error,
+            "retry_count": self.retry_count
+        }
+
+
+class CronParser:
+    """Parses and handles cron expressions."""
+    
+    CRON_PATTERN = re.compile(
+        r"^([0-9,\-\*\/]+)\s+([0-9,\-\*\/]+)\s+([0-9,\-\*\/]+)\s+([0-9,\-\*\/]+)\s+([0-9,\-\*\/]+)$"
+    )
+    
+    FIELD_RANGES = {
+        0: (0, 59),      # minute
+        1: (0, 23),      # hour
+        2: (1, 31),      # day of month
+        3: (1, 12),      # month
+        4: (0, 6),       # day of week
+    }
+    
+    @classmethod
+    def parse(cls, expression: str) -> Optional[List[Set[int]]]:
+        """
+        Parse cron expression to field value sets.
+        
+        Args:
+            expression: Cron expression (e.g., "*/5 * * * *")
+            
+        Returns:
+            List of 5 sets for minute, hour, day, month, weekday
+        """
+        match = cls.CRON_PATTERN.match(expression.strip())
+        if not match:
+            return None
+        
+        fields = []
+        for i, field_str in enumerate(match.groups()):
+            values = cls._parse_field(field_str, cls.FIELD_RANGES[i])
+            fields.append(values)
+        
+        return fields
+    
+    @classmethod
+    def _parse_field(cls, field_str: str, valid_range: Tuple[int, int]) -> Set[int]:
+        """Parse single cron field."""
+        values = set()
+        min_val, max_val = valid_range
+        
+        for part in field_str.split(","):
+            if "/" in part:
+                # Step value
+                base, step = part.split("/")
+                step = int(step)
+                if base == "*":
+                    start, end = min_val, max_val
+                elif "-" in base:
+                    start, end = map(int, base.split("-"))
+                else:
+                    start = int(base)
+                    end = max_val
+                
+                for v in range(start, end + 1, step):
+                    if min_val <= v <= max_val:
+                        values.add(v)
+            
+            elif "-" in part:
+                # Range
+                start, end = map(int, part.split("-"))
+                for v in range(start, end + 1):
+                    values.add(v)
+            
+            elif part == "*":
+                values.update(range(min_val, max_val + 1))
+            
+            else:
+                v = int(part)
+                if min_val <= v <= max_val:
+                    values.add(v)
+        
+        return values
+    
+    @classmethod
+    def matches(cls, expression: str, when: Optional[datetime] = None) -> bool:
+        """Check if cron expression matches datetime."""
+        when = when or datetime.now()
+        fields = cls.parse(expression)
+        
+        if not fields:
+            return False
+        
+        return (
+            when.minute in fields[0] and
+            when.hour in fields[1] and
+            when.day in fields[2] and
+            when.month in fields[3] and
+            when.weekday() in fields[4]
+        )
 
 
 class TaskScheduler:
     """
-    Task scheduler with cron, interval, and one-time scheduling support.
+    Advanced task scheduler for automation workflows.
     
-    Example:
-        scheduler = TaskScheduler()
-        
-        # Add interval task
-        scheduler.add_interval_task(
-            task_id="heartbeat",
-            func=send_heartbeat,
-            interval=60.0,
-            priority=TaskPriority.HIGH
-        )
-        
-        # Add cron task
-        scheduler.add_cron_task(
-            task_id="daily_report",
-            func=generate_report,
-            cron_expr="0 8 * * *"
-        )
-        
-        await scheduler.start()
+    Supports multiple scheduling strategies, priority queues,
+    task dependencies, and execution monitoring.
     """
     
-    def __init__(
-        self,
-        max_concurrent: int = 10,
-        lock_timeout: float = 30.0,
-        enable_distributed_lock: bool = False,
-        lock_backend: Optional[Any] = None,
-    ) -> None:
-        """
-        Initialize the task scheduler.
-        
-        Args:
-            max_concurrent: Maximum concurrent task executions.
-            lock_timeout: Lock acquisition timeout in seconds.
-            enable_distributed_lock: Enable distributed locking.
-            lock_backend: Backend for distributed locks (Redis, etc.).
-        """
-        self.max_concurrent = max_concurrent
-        self.lock_timeout = lock_timeout
-        self.enable_distributed_lock = enable_distributed_lock
-        self.lock_backend = lock_backend
-        
-        self._tasks: Dict[str, ScheduledTask] = {}
-        self._task_queue: List[ScheduledTask] = []
-        self._running_tasks: Set[str] = set()
-        self._execution_history: List[ExecutionResult] = []
+    def __init__(self) -> None:
+        self.tasks: Dict[str, ScheduledTask] = {}
+        self.execution_history: deque = deque(maxlen=1000)
         self._running = False
-        self._lock = asyncio.Lock()
-        
-    def add_interval_task(
-        self,
-        task_id: str,
-        func: Callable[..., Any],
-        interval: float,
-        args: tuple = (),
-        kwargs: Optional[Dict[str, Any]] = None,
-        priority: TaskPriority = TaskPriority.NORMAL,
-        max_retries: int = 3,
-        timeout: float = 60.0,
-        tags: Optional[Set[str]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> str:
+        self._lock = threading.RLock()
+        self._scheduler_thread: Optional[threading.Thread] = None
+        self._worker_threads: List[threading.Thread] = []
+        self._max_workers = 4
+    
+    def add_task(self, task: ScheduledTask) -> None:
         """
-        Add a task that runs at fixed intervals.
+        Add a task to the scheduler.
         
         Args:
-            task_id: Unique task identifier.
-            func: Callable to execute.
-            interval: Interval in seconds.
-            args: Positional arguments for func.
-            kwargs: Keyword arguments for func.
-            priority: Task priority.
-            max_retries: Maximum retry attempts.
-            timeout: Execution timeout in seconds.
-            tags: Optional tags for grouping.
-            metadata: Optional metadata.
-            
-        Returns:
-            Task ID.
+            task: ScheduledTask to add
         """
-        if interval <= 0:
-            raise ValueError(f"Interval must be positive: {interval}")
-            
-        task = ScheduledTask(
-            task_id=task_id,
-            func=func,
-            args=args,
-            kwargs=kwargs or {},
-            schedule_type=ScheduleType.INTERVAL,
-            priority=priority,
-            next_run=time.time() + interval,
-            interval=interval,
-            max_retries=max_retries,
-            timeout=timeout,
-            tags=tags or set(),
-            metadata=metadata or {},
-        )
-        
-        self._tasks[task_id] = task
-        self._rebuild_queue()
-        logger.info(f"Added interval task: {task_id} (interval={interval}s)")
-        return task_id
-        
-    def add_cron_task(
-        self,
-        task_id: str,
-        func: Callable[..., Any],
-        cron_expr: str,
-        args: tuple = (),
-        kwargs: Optional[Dict[str, Any]] = None,
-        priority: TaskPriority = TaskPriority.NORMAL,
-        max_retries: int = 3,
-        timeout: float = 60.0,
-    ) -> str:
-        """
-        Add a task with cron expression scheduling.
-        
-        Args:
-            task_id: Unique task identifier.
-            func: Callable to execute.
-            cron_expr: Cron expression (minute hour day month weekday).
-            args: Positional arguments for func.
-            kwargs: Keyword arguments for func.
-            priority: Task priority.
-            max_retries: Maximum retry attempts.
-            timeout: Execution timeout in seconds.
-            
-        Returns:
-            Task ID.
-        """
-        next_run = self._parse_cron_next_run(cron_expr)
-        
-        task = ScheduledTask(
-            task_id=task_id,
-            func=func,
-            args=args,
-            kwargs=kwargs or {},
-            schedule_type=ScheduleType.CRON,
-            priority=priority,
-            next_run=next_run,
-            cron_expr=cron_expr,
-            max_retries=max_retries,
-            timeout=timeout,
-        )
-        
-        self._tasks[task_id] = task
-        self._rebuild_queue()
-        logger.info(f"Added cron task: {task_id} (expr={cron_expr})")
-        return task_id
-        
-    def add_delayed_task(
-        self,
-        task_id: str,
-        func: Callable[..., Any],
-        delay: float,
-        args: tuple = (),
-        kwargs: Optional[Dict[str, Any]] = None,
-        priority: TaskPriority = TaskPriority.NORMAL,
-    ) -> str:
-        """
-        Add a one-time delayed task.
-        
-        Args:
-            task_id: Unique task identifier.
-            func: Callable to execute.
-            delay: Delay in seconds before execution.
-            args: Positional arguments for func.
-            kwargs: Keyword arguments for func.
-            priority: Task priority.
-            
-        Returns:
-            Task ID.
-        """
-        task = ScheduledTask(
-            task_id=task_id,
-            func=func,
-            args=args,
-            kwargs=kwargs or {},
-            schedule_type=ScheduleType.DELAYED,
-            priority=priority,
-            next_run=time.time() + delay,
-        )
-        
-        self._tasks[task_id] = task
-        self._rebuild_queue()
-        logger.info(f"Added delayed task: {task_id} (delay={delay}s)")
-        return task_id
-        
+        with self._lock:
+            self.tasks[task.task_id] = task
+            self._calculate_next_run(task)
+            logger.info(f"Added task: {task.name} ({task.task_id})")
+    
     def remove_task(self, task_id: str) -> bool:
-        """
-        Remove a scheduled task.
-        
-        Args:
-            task_id: Task identifier.
-            
-        Returns:
-            True if task was removed.
-        """
-        if task_id in self._tasks:
-            del self._tasks[task_id]
-            self._rebuild_queue()
-            logger.info(f"Removed task: {task_id}")
-            return True
-        return False
-        
-    def pause_task(self, task_id: str) -> bool:
-        """Pause a task temporarily."""
-        if task_id in self._tasks:
-            self._tasks[task_id].enabled = False
-            self._rebuild_queue()
-            return True
-        return False
-        
-    def resume_task(self, task_id: str) -> bool:
-        """Resume a paused task."""
-        if task_id in self._tasks:
-            self._tasks[task_id].enabled = True
-            self._rebuild_queue()
-            return True
-        return False
-        
+        """Remove task from scheduler."""
+        with self._lock:
+            if task_id in self.tasks:
+                del self.tasks[task_id]
+                return True
+            return False
+    
     def get_task(self, task_id: str) -> Optional[ScheduledTask]:
         """Get task by ID."""
-        return self._tasks.get(task_id)
-        
-    def list_tasks(self, tags: Optional[Set[str]] = None) -> List[ScheduledTask]:
+        return self.tasks.get(task_id)
+    
+    def schedule_interval(
+        self,
+        task_id: str,
+        name: str,
+        func: Callable,
+        interval_seconds: float,
+        args: Tuple[Any, ...] = (),
+        kwargs: Optional[Dict[str, Any]] = None,
+        priority: TaskPriority = TaskPriority.NORMAL,
+        timeout: Optional[float] = None,
+        start_now: bool = True
+    ) -> ScheduledTask:
         """
-        List all scheduled tasks.
+        Schedule task to run at fixed interval.
         
         Args:
-            tags: Optional filter by tags.
+            task_id: Unique task identifier
+            name: Human-readable name
+            func: Function to execute
+            interval_seconds: Interval between executions
+            args: Positional arguments
+            kwargs: Keyword arguments
+            priority: Task priority
+            timeout: Optional execution timeout
+            start_now: Whether to run immediately first
             
         Returns:
-            List of tasks.
+            Created ScheduledTask
         """
-        tasks = list(self._tasks.values())
-        if tags:
-            tasks = [t for t in tasks if t.tags & tags]
-        return sorted(tasks, key=lambda t: (t.priority.value, t.next_run))
-        
-    async def start(self) -> None:
-        """Start the scheduler."""
-        self._running = True
-        logger.info("Task scheduler started")
-        
-        while self._running:
-            try:
-                await self._process_next()
-            except Exception as e:
-                logger.error(f"Scheduler error: {e}")
-                
-    async def stop(self) -> None:
-        """Stop the scheduler."""
-        self._running = False
-        logger.info("Task scheduler stopped")
-        
-    async def _process_next(self) -> None:
-        """Process the next scheduled task."""
-        async with self._lock:
-            if not self._task_queue:
-                await asyncio.sleep(0.1)
-                return
-                
-            # Check concurrent limit
-            if len(self._running_tasks) >= self.max_concurrent:
-                await asyncio.sleep(0.1)
-                return
-                
-            task = self._task_queue[0]
-            now = time.time()
-            
-            if task.next_run > now:
-                # Wait until next task is due
-                wait_time = min(task.next_run - now, 1.0)
-                await asyncio.sleep(wait_time)
-                return
-                
-            # Remove from queue
-            self._task_queue.pop(0)
-            
-            if not task.enabled:
-                return
-                
-            # Acquire lock if distributed locking enabled
-            if self.enable_distributed_lock:
-                acquired = await self._acquire_distributed_lock(task.task_id)
-                if not acquired:
-                    # Reschedule
-                    task.next_run = time.time() + task.interval if task.interval else now + 60
-                    self._rebuild_queue()
-                    return
-                    
-            # Execute task
-            self._running_tasks.add(task.task_id)
-            
-        # Run outside lock
-        try:
-            await self._execute_task(task)
-        finally:
-            async with self._lock:
-                self._running_tasks.discard(task.task_id)
-                if self.enable_distributed_lock:
-                    await self._release_distributed_lock(task.task_id)
-                    
-            # Reschedule recurring tasks
-            async with self._lock:
-                if task.schedule_type in (ScheduleType.INTERVAL, ScheduleType.CRON):
-                    if task.schedule_type == ScheduleType.INTERVAL:
-                        task.next_run = time.time() + task.interval
-                    else:
-                        task.next_run = self._parse_cron_next_run(task.cron_expr)
-                    self._rebuild_queue()
-                    
-    async def _execute_task(self, task: ScheduledTask) -> ExecutionResult:
-        """Execute a scheduled task."""
-        started_at = time.time()
-        result = ExecutionResult(
-            task_id=task.task_id,
-            started_at=started_at,
-            completed_at=0,
-            success=False,
-            retry_count=0,
+        kwargs = kwargs or {}
+        task = ScheduledTask(
+            task_id=task_id,
+            name=name,
+            func=func,
+            args=args,
+            kwargs=kwargs,
+            schedule_type=ScheduleType.INTERVAL,
+            interval_seconds=interval_seconds,
+            priority=priority,
+            timeout=timeout
         )
         
-        for attempt in range(task.max_retries + 1):
-            try:
-                if asyncio.iscoroutinefunction(task.func):
-                    result.result = await asyncio.wait_for(
-                        task.func(*task.args, **task.kwargs),
-                        timeout=task.timeout
-                    )
-                else:
-                    result.result = await asyncio.wait_for(
-                        asyncio.to_thread(task.func, *task.args, **task.kwargs),
-                        timeout=task.timeout
-                    )
-                result.success = True
-                break
-            except asyncio.TimeoutError:
-                result.error = f"Task timed out after {task.timeout}s"
-                logger.warning(f"Task {task.task_id} timed out (attempt {attempt + 1})")
-            except Exception as e:
-                result.error = str(e)
-                logger.warning(f"Task {task.task_id} failed: {e} (attempt {attempt + 1})")
-                result.retry_count = attempt + 1
-                
-        result.completed_at = time.time()
-        self._execution_history.append(result)
+        if start_now:
+            task.next_run = datetime.now()
+        else:
+            task.next_run = datetime.now() + timedelta(seconds=interval_seconds)
         
-        # Keep history bounded
-        if len(self._execution_history) > 1000:
-            self._execution_history = self._execution_history[-500:]
-            
-        return result
-        
-    def _rebuild_queue(self) -> None:
-        """Rebuild the priority queue."""
-        self._task_queue = sorted(
-            [t for t in self._tasks.values() if t.enabled],
-            key=lambda t: (t.priority.value, t.next_run)
+        self.add_task(task)
+        return task
+    
+    def schedule_cron(
+        self,
+        task_id: str,
+        name: str,
+        func: Callable,
+        cron_expression: str,
+        args: Tuple[Any, ...] = (),
+        kwargs: Optional[Dict[str, Any]] = None
+    ) -> ScheduledTask:
+        """Schedule task using cron expression."""
+        kwargs = kwargs or {}
+        task = ScheduledTask(
+            task_id=task_id,
+            name=name,
+            func=func,
+            args=args,
+            kwargs=kwargs,
+            schedule_type=ScheduleType.CRON,
+            cron_expression=cron_expression
         )
         
-    def _parse_cron_next_run(self, cron_expr: Optional[str]) -> float:
-        """Parse cron expression and calculate next run time."""
-        if not cron_expr:
-            return time.time()
-            
-        # Simple cron parser (minute hour day month weekday)
-        parts = cron_expr.split()
-        if len(parts) != 5:
-            raise ValueError(f"Invalid cron expression: {cron_expr}")
-            
+        self._calculate_next_run(task)
+        self.add_task(task)
+        return task
+    
+    def schedule_once(
+        self,
+        task_id: str,
+        name: str,
+        func: Callable,
+        run_at: datetime,
+        args: Tuple[Any, ...] = (),
+        kwargs: Optional[Dict[str, Any]] = None
+    ) -> ScheduledTask:
+        """Schedule task to run once at specific time."""
+        kwargs = kwargs or {}
+        task = ScheduledTask(
+            task_id=task_id,
+            name=name,
+            func=func,
+            args=args,
+            kwargs=kwargs,
+            schedule_type=ScheduleType.ONE_TIME,
+            run_at=run_at
+        )
+        
+        task.next_run = run_at
+        self.add_task(task)
+        return task
+    
+    def _calculate_next_run(self, task: ScheduledTask) -> None:
+        """Calculate next run time for task."""
         now = datetime.now()
         
-        # Very simple: if minute specified, use it
-        try:
-            minute = int(parts[0]) if parts[0] != "*" else now.minute
-            hour = int(parts[1]) if parts[1] != "*" else now.hour
-            
-            next_run = now.replace(minute=minute, second=0, microsecond=0)
-            if hour < now.hour or (hour == now.hour and minute <= now.minute):
-                next_run += timedelta(days=1)
-            elif hour > now.hour:
-                next_run = next_run.replace(hour=hour)
+        if task.schedule_type == ScheduleType.INTERVAL:
+            if task.interval_seconds:
+                task.next_run = now + timedelta(seconds=task.interval_seconds)
+        
+        elif task.schedule_type == ScheduleType.CRON:
+            if task.cron_expression:
+                # Find next matching time
+                for minutes in range(1440):  # Check next 24 hours
+                    candidate = now + timedelta(minutes=minutes)
+                    if CronParser.matches(task.cron_expression, candidate):
+                        task.next_run = candidate
+                        break
+        
+        elif task.schedule_type == ScheduleType.ONE_TIME:
+            if task.run_at and task.run_at > now:
+                task.next_run = task.run_at
+    
+    def execute_task(self, task: ScheduledTask) -> ExecutionResult:
+        """Execute a single task."""
+        result = ExecutionResult(
+            task_id=task.task_id,
+            status=TaskStatus.RUNNING,
+            started_at=datetime.now()
+        )
+        
+        task.status = TaskStatus.RUNNING
+        task.last_run = datetime.now()
+        
+        for attempt in range(task.retry_count + 1):
+            try:
+                if task.timeout:
+                    # Execute with timeout
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(task.func, *task.args, **task.kwargs)
+                        result.result = future.result(timeout=task.timeout)
+                else:
+                    result.result = task.func(*task.args, **task.kwargs)
                 
-            return next_run.timestamp()
-        except ValueError:
-            return time.time() + 3600
+                result.status = TaskStatus.COMPLETED
+                task.status = TaskStatus.COMPLETED
+                break
             
-    async def _acquire_distributed_lock(self, task_id: str) -> bool:
-        """Acquire distributed lock for task."""
-        if not self.lock_backend:
-            return True
-            
-        lock_key = f"scheduler:lock:{task_id}"
-        try:
-            result = await self.lock_backend.set(
-                lock_key, "1", nx=True, ex=int(self.lock_timeout)
-            )
-            return bool(result)
-        except Exception as e:
-            logger.error(f"Failed to acquire lock: {e}")
-            return True  # Proceed without lock
-            
-    async def _release_distributed_lock(self, task_id: str) -> None:
-        """Release distributed lock for task."""
-        if not self.lock_backend:
+            except Exception as e:
+                logger.warning(f"Task {task.task_id} attempt {attempt + 1} failed: {e}")
+                result.error = str(e)
+                
+                if attempt < task.retry_count:
+                    time.sleep(task.retry_delay)
+                    result.retry_count = attempt + 1
+                else:
+                    result.status = TaskStatus.FAILED
+                    task.status = TaskStatus.FAILED
+                    task.error = str(e)
+        
+        result.completed_at = datetime.now()
+        if result.started_at and result.completed_at:
+            result.duration_ms = (
+                result.completed_at - result.started_at
+            ).total_seconds() * 1000
+        
+        task.run_count += 1
+        self.execution_history.append(result)
+        
+        # Schedule next run for recurring tasks
+        if task.schedule_type in (ScheduleType.INTERVAL, ScheduleType.CRON):
+            self._calculate_next_run(task)
+        elif task.schedule_type == ScheduleType.ONE_TIME:
+            task.status = TaskStatus.COMPLETED
+        
+        return result
+    
+    def start(self) -> None:
+        """Start the scheduler."""
+        if self._running:
             return
+        
+        self._running = True
+        self._scheduler_thread = threading.Thread(target=self._run_scheduler, daemon=True)
+        self._scheduler_thread.start()
+        
+        logger.info("Scheduler started")
+    
+    def stop(self) -> None:
+        """Stop the scheduler."""
+        self._running = False
+        
+        if self._scheduler_thread:
+            self._scheduler_thread.join(timeout=5)
+        
+        logger.info("Scheduler stopped")
+    
+    def _run_scheduler(self) -> None:
+        """Main scheduler loop."""
+        while self._running:
+            now = datetime.now()
             
-        lock_key = f"scheduler:lock:{task_id}"
-        try:
-            await self.lock_backend.delete(lock_key)
-        except Exception as e:
-            logger.error(f"Failed to release lock: {e}")
+            # Find tasks ready to run
+            ready_tasks = []
+            with self._lock:
+                for task in self.tasks.values():
+                    if task.next_run and task.next_run <= now:
+                        if task.status != TaskStatus.RUNNING:
+                            ready_tasks.append(task)
             
-    def get_execution_history(
-        self,
-        task_id: Optional[str] = None,
-        limit: int = 100,
-    ) -> List[ExecutionResult]:
-        """Get execution history."""
-        history = self._execution_history
-        if task_id:
-            history = [h for h in history if h.task_id == task_id]
-        return history[-limit:]
+            # Sort by priority
+            ready_tasks.sort()
+            
+            # Execute ready tasks
+            for task in ready_tasks[:self._max_workers]:
+                thread = threading.Thread(
+                    target=lambda t: self.execute_task(t),
+                    args=(task,),
+                    daemon=True
+                )
+                thread.start()
+            
+            # Check every second
+            time.sleep(1)
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get scheduler status."""
+        status_counts = {}
+        for task in self.tasks.values():
+            name = task.status.name
+            status_counts[name] = status_counts.get(name, 0) + 1
+        
+        return {
+            "running": self._running,
+            "total_tasks": len(self.tasks),
+            "task_status": status_counts,
+            "history_size": len(self.execution_history)
+        }
+
+
+# Entry point for direct execution
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    
+    def sample_task(name: str) -> str:
+        logger.info(f"Running task: {name}")
+        return f"{name} completed"
+    
+    scheduler = TaskScheduler()
+    
+    # Schedule interval task
+    scheduler.schedule_interval(
+        task_id="task1",
+        name="Sample Interval Task",
+        func=sample_task,
+        interval_seconds=5,
+        args=("Interval Task",),
+        start_now=True
+    )
+    
+    # Schedule cron task
+    scheduler.schedule_cron(
+        task_id="task2",
+        name="Sample Cron Task",
+        func=sample_task,
+        cron_expression="*/10 * * * *",
+        args=("Cron Task",)
+    )
+    
+    scheduler.start()
+    
+    # Run for 20 seconds
+    time.sleep(20)
+    
+    scheduler.stop()
+    
+    print(f"\nStatus: {scheduler.get_status()}")
