@@ -1,255 +1,377 @@
-"""API pagination action module for RabAI AutoClick.
+"""API pagination utilities for handling paginated API responses.
 
-Provides comprehensive API pagination with support for
-multiple pagination styles and automatic data collection.
+Supports cursor-based, offset-based, and link-header pagination.
 """
 
-import time
-import sys
-import os
-from typing import Any, Dict, List, Optional, Callable
-from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
-import json
+from __future__ import annotations
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+import logging
+from dataclasses import dataclass, field
+from typing import Any, Callable, Generic, TypeVar
+from urllib.parse import parse_qs, urlparse
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
-class ApiPaginationAction(BaseAction):
-    """API pagination action for fetching paginated data.
-    
-    Supports offset, cursor, page, link header, and token-based
-    pagination with configurable limits and rate limiting.
+@dataclass
+class Page:
+    """A single page of results."""
+
+    items: list[Any]
+    page_number: int | None = None
+    total_pages: int | None = None
+    total_count: int | None = None
+    has_next: bool = False
+    has_prev: bool = False
+    next_cursor: str | None = None
+    prev_cursor: str | None = None
+    next_url: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PaginationConfig:
+    """Configuration for pagination behavior."""
+
+    page_size: int = 100
+    max_pages: int | None = None
+    max_total: int | None = None
+    timeout_seconds: float = 30.0
+    retry_attempts: int = 3
+    retry_delay: float = 1.0
+
+
+class CursorPaginator(Generic[T]):
+    """Cursor-based pagination handler.
+
+    Args:
+        fetch_fn: Async function that fetches a page given cursor and size.
+        config: Pagination configuration.
     """
-    action_type = "api_pagination"
-    display_name = "API分页器"
-    description = "API分页数据获取"
-    
-    def execute(
+
+    def __init__(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute pagination fetch.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                url: Base URL
-                method: HTTP method
-                headers: Request headers
-                pagination_type: offset|cursor|page|link|token
-                max_pages: Maximum pages to fetch
-                max_items: Maximum total items
-                offset_key: Param name for offset
-                limit_key: Param name for limit
-                cursor_key: Param name for cursor
-                page_key: Param name for page
-                limit: Items per page
-                data_key: JSON path to data array in response
-                next_key: JSON path to next cursor/page token.
-        
-        Returns:
-            ActionResult with all fetched items.
-        """
-        url = params.get('url', '')
-        method = params.get('method', 'GET')
-        headers = params.get('headers', {})
-        pagination_type = params.get('pagination_type', 'offset')
-        max_pages = params.get('max_pages', 100)
-        max_items = params.get('max_items', 100000)
-        limit = params.get('limit', 100)
-        data_key = params.get('data_key', 'data')
-        next_key = params.get('next_key', 'next_cursor')
-        timeout = params.get('timeout', 30)
-        delay = params.get('delay', 0)
-        
-        if not url:
-            return ActionResult(success=False, message="URL is required")
-        
-        all_items = []
-        page = 0
-        offset = 0
-        cursor = None
-        next_cursor = None
-        
-        while page < max_pages and len(all_items) < max_items:
-            page_url = self._build_page_url(
-                url, pagination_type, offset, cursor, page + 1,
-                params.get('offset_key', 'offset'),
-                params.get('limit_key', 'limit'),
-                params.get('cursor_key', 'cursor'),
-                params.get('page_key', 'page'),
-                limit
+        fetch_fn: Callable[[str | None, int], Any],
+        config: PaginationConfig | None = None,
+    ) -> None:
+        self.fetch_fn = fetch_fn
+        self.config = config or PaginationConfig()
+        self._total_fetched = 0
+
+    async def fetch_all(self) -> list[T]:
+        """Fetch all pages and return combined results."""
+        results: list[T] = []
+        cursor: str | None = None
+
+        while True:
+            if self.config.max_total and self._total_fetched >= self.config.max_total:
+                break
+
+            page_size = self.config.page_size
+            if self.config.max_total:
+                page_size = min(page_size, self.config.max_total - self._total_fetched)
+
+            try:
+                page = await self.fetch_fn(cursor, page_size)
+            except Exception as e:
+                logger.error("Page fetch failed: %s", e)
+                break
+
+            items = page.get("items", page.get("data", []))
+            results.extend(items)
+            self._total_fetched += len(items)
+
+            cursor = page.get("next_cursor", page.get("cursor", page.get("next_page_token")))
+            if not cursor:
+                break
+
+            if self.config.max_pages and len(results) // self.config.page_size >= self.config.max_pages:
+                break
+
+        return results
+
+    async def fetch_pages(self):
+        """Async generator yielding pages."""
+        cursor: str | None = None
+        page_num = 0
+
+        while True:
+            if self.config.max_total and self._total_fetched >= self.config.max_total:
+                break
+
+            page_size = self.config.page_size
+            if self.config.max_total:
+                page_size = min(page_size, self.config.max_total - self._total_fetched)
+
+            try:
+                page = await self.fetch_fn(cursor, page_size)
+            except Exception as e:
+                logger.error("Page fetch failed at page %d: %s", page_num, e)
+                break
+
+            items = page.get("items", page.get("data", []))
+            self._total_fetched += len(items)
+
+            page_obj = Page(
+                items=items,
+                page_number=page_num,
+                next_cursor=page.get("next_cursor"),
+                prev_cursor=page.get("prev_cursor"),
+                raw=page,
             )
-            
-            response = self._fetch_page(page_url, method, headers, timeout)
-            
-            if not response['success']:
-                return ActionResult(
-                    success=False,
-                    message=f"Failed to fetch page {page + 1}: {response.get('error')}",
-                    data={
-                        'items': all_items,
-                        'pages_fetched': page,
-                        'total_items': len(all_items)
-                    }
-                )
-            
-            data = response.get('data', {})
-            items = self._extract_items(data, data_key)
-            
-            if not items:
+
+            yield page_obj
+
+            cursor = page_obj.next_cursor
+            if not cursor:
                 break
-            
-            all_items.extend(items)
-            page += 1
-            
-            if len(all_items) >= max_items:
-                all_items = all_items[:max_items]
+
+            page_num += 1
+            if self.config.max_pages and page_num >= self.config.max_pages:
                 break
-            
-            next_token = self._extract_next_token(data, next_key, pagination_type)
-            
-            if next_token is None:
+
+
+class OffsetPaginator(Generic[T]):
+    """Offset-based (page number) pagination handler."""
+
+    def __init__(
+        self,
+        fetch_fn: Callable[[int, int], Any],
+        config: PaginationConfig | None = None,
+    ) -> None:
+        self.fetch_fn = fetch_fn
+        self.config = config or PaginationConfig()
+        self._total_fetched = 0
+
+    async def fetch_all(self) -> list[T]:
+        """Fetch all pages and return combined results."""
+        results: list[T] = []
+        offset = 0
+        page_num = 0
+
+        while True:
+            if self.config.max_total and self._total_fetched >= self.config.max_total:
                 break
-            
-            if pagination_type == 'offset':
-                offset += len(items)
-            elif pagination_type in ('cursor', 'token'):
-                cursor = next_token
-            elif pagination_type == 'link':
-                url = next_token
-                if not url:
+
+            page_size = self.config.page_size
+            if self.config.max_total:
+                page_size = min(page_size, self.config.max_total - self._total_fetched)
+
+            try:
+                page = await self.fetch_fn(offset, page_size)
+            except Exception as e:
+                logger.error("Page fetch failed at offset %d: %s", offset, e)
+                break
+
+            items = page.get("items", page.get("data", page.get("results", [])))
+            results.extend(items)
+            self._total_fetched += len(items)
+
+            total = page.get("total", page.get("total_count"))
+            if total is not None:
+                if offset + page_size >= total:
                     break
-            
-            if delay > 0 and page < max_pages:
-                time.sleep(delay)
-        
-        return ActionResult(
-            success=True,
-            message=f"Fetched {len(all_items)} items across {page} pages",
-            data={
-                'items': all_items,
-                'total_items': len(all_items),
-                'pages_fetched': page,
-                'has_more': page >= max_pages or len(all_items) >= max_items
-            }
-        )
-    
-    def _build_page_url(
+            elif not items:
+                break
+
+            offset += page_size
+            page_num += 1
+
+            if self.config.max_pages and page_num >= self.config.max_pages:
+                break
+
+        return results
+
+    async def fetch_pages(self):
+        """Async generator yielding pages."""
+        offset = 0
+        page_num = 0
+
+        while True:
+            if self.config.max_total and self._total_fetched >= self.config.max_total:
+                break
+
+            page_size = self.config.page_size
+            if self.config.max_total:
+                page_size = min(page_size, self.config.max_total - self._total_fetched)
+
+            try:
+                page = await self.fetch_fn(offset, page_size)
+            except Exception as e:
+                logger.error("Page fetch failed at offset %d: %s", offset, e)
+                break
+
+            items = page.get("items", page.get("data", page.get("results", [])))
+            total = page.get("total", page.get("total_count"))
+            total_pages = page.get("total_pages")
+
+            self._total_fetched += len(items)
+
+            page_obj = Page(
+                items=items,
+                page_number=page_num,
+                total_pages=total_pages,
+                total_count=total,
+                has_next=(offset + page_size) < (total or float("inf")),
+                has_prev=offset > 0,
+                raw=page,
+            )
+
+            yield page_obj
+
+            if not page_obj.has_next:
+                break
+
+            offset += page_size
+            page_num += 1
+
+            if self.config.max_pages and page_num >= self.config.max_pages:
+                break
+
+
+class LinkHeaderPaginator(Generic[T]):
+    """Link-header based pagination (GitHub-style)."""
+
+    def __init__(
         self,
-        base_url: str,
-        pagination_type: str,
-        offset: int,
-        cursor: Optional[str],
-        page_num: int,
-        offset_key: str,
-        limit_key: str,
-        cursor_key: str,
-        page_key: str,
-        limit: int
-    ) -> str:
-        """Build URL for next page."""
-        if '?' in base_url:
-            sep = '&'
-        else:
-            sep = '?'
-        
-        if pagination_type == 'offset':
-            return f"{base_url}{sep}{offset_key}={offset}&{limit_key}={limit}"
-        elif pagination_type == 'cursor':
-            if cursor:
-                return f"{base_url}{sep}{cursor_key}={cursor}&{limit_key}={limit}"
-            return f"{base_url}{sep}{limit_key}={limit}"
-        elif pagination_type == 'page':
-            return f"{base_url}{sep}{page_key}={page_num}&{limit_key}={limit}"
-        elif pagination_type == 'link':
-            return base_url
-        
-        return base_url
-    
-    def _fetch_page(
-        self,
-        url: str,
-        method: str,
-        headers: Dict[str, str],
-        timeout: int
-    ) -> Dict[str, Any]:
-        """Fetch a single page."""
-        data = None
-        
-        try:
-            req = Request(url, method=method, headers=headers)
-            with urlopen(req, timeout=timeout) as response:
-                body = response.read()
-                return {
-                    'success': True,
-                    'data': json.loads(body.decode('utf-8', errors='replace')),
-                    'status': response.status,
-                    'headers': dict(response.headers)
-                }
-        except HTTPError as e:
-            body = e.read() if e.fp else b''
-            return {
-                'success': False,
-                'error': f"HTTP {e.code}: {e.reason}",
-                'status': e.code,
-                'data': body.decode('utf-8', errors='replace') if body else ''
-            }
-        except URLError as e:
-            return {
-                'success': False,
-                'error': str(e.reason)
-            }
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    def _extract_items(self, data: Any, data_key: str) -> List[Any]:
-        """Extract items from response data."""
-        if not data_key:
-            return data if isinstance(data, list) else []
-        
-        parts = data_key.split('.')
-        current = data
-        
-        for part in parts:
-            if isinstance(current, dict):
-                current = current.get(part, [])
-            else:
-                return []
-        
-        return current if isinstance(current, list) else []
-    
-    def _extract_next_token(
-        self,
-        data: Dict,
-        next_key: str,
-        pagination_type: str
-    ) -> Optional[str]:
-        """Extract next cursor/token from response."""
-        if pagination_type == 'link':
-            headers = data.get('headers', {}) if isinstance(data, dict) else {}
-            link_header = headers.get('Link', '') or headers.get('link', '')
-            
-            if not link_header:
-                return None
-            
-            import re
-            match = re.search(r'<([^>]+)>;\s*rel="next"', link_header)
-            return match.group(1) if match else None
-        
-        parts = next_key.split('.')
-        current = data
-        
-        for part in parts:
-            if isinstance(current, dict):
-                current = current.get(part)
-            else:
-                return None
-        
-        return str(current) if current else None
+        fetch_fn: Callable[[str | None], Any],
+        config: PaginationConfig | None = None,
+    ) -> None:
+        self.fetch_fn = fetch_fn
+        self.config = config or PaginationConfig()
+        self._total_fetched = 0
+
+    def _parse_link_header(self, header: str | None) -> dict[str, str]:
+        """Parse Link header into dict of rel -> URL."""
+        if not header:
+            return {}
+        links = {}
+        for part in header.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            url, rel = part.split(";")
+            url = url.strip()[1:-1]
+            rel = rel.strip().replace('rel="', "").replace('"', "")
+            links[rel] = url
+        return links
+
+    def _extract_cursor_from_url(self, url: str) -> str | None:
+        """Extract cursor/page token from URL."""
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query)
+        for key in ("cursor", "page_token", "after", "page"):
+            if key in query:
+                return query[key][0]
+        return None
+
+    async def fetch_all(self) -> list[T]:
+        """Fetch all pages and return combined results."""
+        results: list[T] = []
+        url: str | None = None
+        page_num = 0
+
+        while True:
+            try:
+                response = await self.fetch_fn(url)
+            except Exception as e:
+                logger.error("Page fetch failed: %s", e)
+                break
+
+            items = response.get("items", response.get("data", response.get("results", [])))
+            results.extend(items)
+            self._total_fetched += len(items)
+
+            link_header = response.get("link_header", response.get("links", ""))
+            links = self._parse_link_header(link_header)
+
+            if self.config.max_pages and page_num >= self.config.max_pages:
+                break
+
+            if "next" not in links:
+                break
+
+            url = links["next"]
+            page_num += 1
+
+            if self.config.max_total and self._total_fetched >= self.config.max_total:
+                break
+
+        return results
+
+    async def fetch_pages(self):
+        """Async generator yielding pages."""
+        url: str | None = None
+        page_num = 0
+
+        while True:
+            try:
+                response = await self.fetch_fn(url)
+            except Exception as e:
+                logger.error("Page fetch failed at page %d: %s", page_num, e)
+                break
+
+            items = response.get("items", response.get("data", response.get("results", [])))
+            self._total_fetched += len(items)
+
+            link_header = response.get("link_header", response.get("links", ""))
+            links = self._parse_link_header(link_header)
+
+            next_url = links.get("next")
+            prev_url = links.get("prev")
+
+            page_obj = Page(
+                items=items,
+                page_number=page_num,
+                next_url=next_url,
+                prev_url=prev_url,
+                next_cursor=self._extract_cursor_from_url(next_url) if next_url else None,
+                prev_cursor=self._extract_cursor_from_url(prev_url) if prev_url else None,
+                has_next="next" in links,
+                has_prev="prev" in links,
+                raw=response,
+            )
+
+            yield page_obj
+
+            if not next_url:
+                break
+
+            url = next_url
+            page_num += 1
+
+            if self.config.max_pages and page_num >= self.config.max_pages:
+                break
+
+            if self.config.max_total and self._total_fetched >= self.config.max_total:
+                break
+
+
+def auto_detect_paginator(
+    fetch_fn: Callable[..., Any],
+    config: PaginationConfig | None = None,
+) -> CursorPaginator | OffsetPaginator | LinkHeaderPaginator:
+    """Auto-detect pagination type based on fetch function signature.
+
+    Args:
+        fetch_fn: Page fetch function.
+        config: Pagination configuration.
+
+    Returns:
+        Appropriate paginator instance.
+    """
+    import inspect
+
+    sig = inspect.signature(fetch_fn)
+    params = list(sig.parameters.keys())
+
+    if "url" in params or "link" in params:
+        return LinkHeaderPaginator(fetch_fn, config)
+    elif "cursor" in params or "page_token" in params:
+        return CursorPaginator(fetch_fn, config)
+    elif "offset" in params or "page" in params:
+        return OffsetPaginator(fetch_fn, config)
+    else:
+        return OffsetPaginator(fetch_fn, config)

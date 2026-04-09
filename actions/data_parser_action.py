@@ -1,492 +1,341 @@
-"""Data Parser Action Module.
+"""Data parser utilities for structured data parsing.
 
-Provides data parsing capabilities for various formats
-including JSON, XML, CSV, and custom formats.
+Supports JSON, CSV, TSV, INI, XML, and custom formats.
 """
 
-from typing import Any, Dict, List, Optional, Callable, Union, TextIO
+from __future__ import annotations
+
+import configparser
+import csv
+import io
+import json
+import logging
+import re
 from dataclasses import dataclass, field
 from enum import Enum
-import json
-import csv
-import re
-import xml.etree.ElementTree as ET
-from io import StringIO
-from datetime import datetime
+from typing import Any, Callable, Generator, TextIO
+
+logger = logging.getLogger(__name__)
 
 
-class ParseFormat(Enum):
-    """Supported parsing formats."""
+class ParseError(Exception):
+    """Raised when parsing fails."""
+
+    pass
+
+
+class DataFormat(Enum):
+    """Supported data formats."""
+
     JSON = "json"
-    XML = "xml"
     CSV = "csv"
     TSV = "tsv"
-    URL_ENCODED = "url_encoded"
-    FORM_DATA = "form_data"
-    YAML = "yaml"
     INI = "ini"
+    XML = "xml"
+    URL_ENCODED = "url_encoded"
+    MULTILINE = "multiline"
+    KEY_VALUE = "key_value"
 
 
 @dataclass
 class ParseResult:
-    """Result of parsing operation."""
+    """Result of a parse operation."""
+
     success: bool
     data: Any = None
-    error: Optional[str] = None
-    warnings: List[str] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    error: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class CSVConfig:
-    """Configuration for CSV parsing."""
+class CSVOptions:
+    """CSV parsing options."""
+
     delimiter: str = ","
     quotechar: str = '"'
-    escapechar: Optional[str] = None
+    escapechar: str | None = None
     has_header: bool = True
     skip_rows: int = 0
-    field_names: Optional[List[str]] = None
-    encoding: str = "utf-8"
-
-
-@dataclass
-class XMLConfig:
-    """Configuration for XML parsing."""
-    attribute_prefix: str = "@"
-    text_key: str = "#text"
-    list_items: bool = True
-    namespace_enabled: bool = False
+    column_types: list[type] | None = None
+    null_values: list[str] = field(default_factory=lambda: ["", "NA", "null", "None"])
 
 
 class JSONParser:
-    """Parses JSON data."""
+    """JSON parser with streaming and error handling."""
 
-    def __init__(self):
-        self._strict = True
-
-    def parse(
-        self,
-        json_str: str,
-        encoding: str = "utf-8",
-    ) -> ParseResult:
-        """Parse JSON string."""
+    @staticmethod
+    def parse(content: str | bytes, strict: bool = False) -> ParseResult:
+        """Parse JSON content."""
         try:
-            if isinstance(json_str, bytes):
-                json_str = json_str.decode(encoding)
-            data = json.loads(json_str)
+            data = json.loads(content, strict=strict)
             return ParseResult(success=True, data=data)
         except json.JSONDecodeError as e:
-            return ParseResult(
-                success=False,
-                error=f"JSON parse error: {str(e)}",
-            )
+            return ParseResult(success=False, error=str(e))
 
-    def parse_stream(
-        self,
-        lines: List[str],
-    ) -> ParseResult:
-        """Parse JSON lines (JSONL)."""
-        results = []
-        errors = []
-
-        for i, line in enumerate(lines):
+    @staticmethod
+    def parse_stream(content: str | bytes) -> Generator[Any, None, None]:
+        """Parse NDJSON (newline-delimited JSON) stream."""
+        if isinstance(content, str):
+            content = content.encode()
+        for line in content.decode().splitlines():
             line = line.strip()
-            if not line:
-                continue
+            if line:
+                yield json.loads(line)
 
-            try:
-                results.append(json.loads(line))
-            except json.JSONDecodeError as e:
-                errors.append(f"Line {i + 1}: {str(e)}")
-
-        if errors and not results:
-            return ParseResult(
-                success=False,
-                error=f"JSONL parse errors: {'; '.join(errors)}",
-            )
-
-        return ParseResult(
-            success=True,
-            data=results,
-            warnings=errors if errors else [],
-        )
-
-
-class XMLParser:
-    """Parses XML data."""
-
-    def __init__(self, config: Optional[XMLConfig] = None):
-        self.config = config or XMLConfig()
-
-    def parse(
-        self,
-        xml_str: str,
-    ) -> ParseResult:
-        """Parse XML string."""
+    @staticmethod
+    def parse_safe(content: str | bytes, default: Any = None) -> Any:
+        """Parse JSON with fallback to default on error."""
         try:
-            if isinstance(xml_str, bytes):
-                xml_str = xml_str.decode("utf-8")
+            return json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            return default
 
-            root = ET.fromstring(xml_str)
-            data = self._element_to_dict(root)
-
-            return ParseResult(success=True, data=data)
-        except ET.ParseError as e:
-            return ParseResult(
-                success=False,
-                error=f"XML parse error: {str(e)}",
-            )
-
-    def _element_to_dict(self, element: ET.Element) -> Any:
-        """Convert XML element to dictionary."""
-        result: Dict[str, Any] = {}
-
-        if element.attrib:
-            for key, value in element.attrib.items():
-                result[f"{self.config.attribute_prefix}{key}"] = value
-
-        if element.text and element.text.strip():
-            if len(element) == 0:
-                return element.text.strip()
-            result[self.config.text_key] = element.text.strip()
-
-        for child in element:
-            child_data = self._element_to_dict(child)
-
-            if child.tag in result:
-                if not isinstance(result[child.tag], list):
-                    result[child.tag] = [result[child.tag]]
-                result[child.tag].append(child_data)
-            else:
-                result[child.tag] = child_data
-
-        return result
-
-    def parse_file(
-        self,
-        file_path: str,
-    ) -> ParseResult:
-        """Parse XML file."""
-        try:
-            tree = ET.parse(file_path)
-            root = tree.getroot()
-            data = self._element_to_dict(root)
-            return ParseResult(success=True, data=data)
-        except Exception as e:
-            return ParseResult(
-                success=False,
-                error=f"XML file parse error: {str(e)}",
-            )
+    @staticmethod
+    def unparse(data: Any, indent: int | None = 2) -> str:
+        """Serialize data to JSON string."""
+        return json.dumps(data, indent=indent, ensure_ascii=False, default=str)
 
 
 class CSVParser:
-    """Parses CSV data."""
+    """CSV/TSV parser with flexible options."""
 
-    def __init__(self, config: Optional[CSVConfig] = None):
-        self.config = config or CSVConfig()
+    def __init__(self, options: CSVOptions | None = None) -> None:
+        self.options = options or CSVOptions()
 
-    def parse(
-        self,
-        csv_str: Union[str, bytes],
-    ) -> ParseResult:
-        """Parse CSV string."""
+    def parse(self, content: str | TextIO) -> ParseResult:
+        """Parse CSV content."""
         try:
-            if isinstance(csv_str, bytes):
-                csv_str = csv_str.decode(self.config.encoding)
+            if isinstance(content, str):
+                content = io.StringIO(content)
 
-            if self.config.skip_rows > 0:
-                lines = csv_str.splitlines()
-                csv_str = "\n".join(lines[self.config.skip_rows:])
-
-            reader = csv.reader(
-                StringIO(csv_str),
-                delimiter=self.config.delimiter,
-                quotechar=self.config.quotechar,
-                escapechar=self.config.escapechar,
-            )
+            reader = csv.reader(content, delimiter=self.options.delimiter, quotechar=self.options.quotechar, escapechar=self.options.escapechar)
 
             rows = list(reader)
 
-            if not rows:
-                return ParseResult(success=True, data=[])
+            for _ in range(self.options.skip_rows):
+                rows.pop(0)
 
-            if self.config.has_header:
-                field_names = self.config.field_names or rows[0]
-                data = [
-                    dict(zip(field_names, row))
-                    for row in rows[1:]
-                ]
+            if self.options.has_header and rows:
+                headers = rows.pop(0)
             else:
-                data = [row for row in rows]
+                headers = [f"col_{i}" for i in range(len(rows[0]))]
 
-            return ParseResult(success=True, data=data)
+            parsed_rows = []
+            for row in rows:
+                cleaned_row = []
+                for val in row:
+                    if val in self.options.null_values:
+                        cleaned_row.append(None)
+                    else:
+                        cleaned_row.append(val)
+                parsed_rows.append(dict(zip(headers, cleaned_row)))
 
-        except Exception as e:
-            return ParseResult(
-                success=False,
-                error=f"CSV parse error: {str(e)}",
-            )
+            if self.options.column_types:
+                for i, col_type in enumerate(self.options.column_types):
+                    if i < len(headers):
+                        col_name = headers[i]
+                        for row in parsed_rows:
+                            if col_name in row and row[col_name] is not None:
+                                try:
+                                    row[col_name] = col_type(row[col_name])
+                                except (ValueError, TypeError):
+                                    pass
 
-    def parse_with_header(
-        self,
-        csv_str: Union[str, bytes],
-        field_names: List[str],
-    ) -> ParseResult:
-        """Parse CSV with provided header."""
-        config = CSVConfig(field_names=field_names)
-        parser = CSVParser(config)
-        return parser.parse(csv_str)
+            return ParseResult(success=True, data=parsed_rows, metadata={"row_count": len(parsed_rows), "columns": headers})
+        except csv.Error as e:
+            return ParseResult(success=False, error=str(e))
 
-    def to_csv(
-        self,
-        data: List[Dict[str, Any]],
-        field_names: Optional[List[str]] = None,
-    ) -> str:
-        """Convert data to CSV string."""
+    def parse_dicts(self, content: str | TextIO) -> list[dict[str, Any]]:
+        """Parse CSV directly into list of dicts."""
+        result = self.parse(content)
+        if not result.success:
+            raise ParseError(result.error or "Unknown error")
+        return result.data
+
+    @staticmethod
+    def unparse(data: list[dict[str, Any]], output: str | TextIO | None = None, delimiter: str = ",", include_header: bool = True) -> str | None:
+        """Serialize list of dicts to CSV."""
         if not data:
             return ""
 
-        if field_names is None:
-            field_names = list(data[0].keys())
+        headers = list(data[0].keys())
+        output_io = io.StringIO() if output is None else output
+        writer = csv.DictWriter(output_io, fieldnames=headers, delimiter=delimiter)
 
-        output = StringIO()
-        writer = csv.DictWriter(
-            output,
-            fieldnames=field_names,
-            delimiter=self.config.delimiter,
-            quotechar=self.config.quotechar,
-        )
+        if include_header:
+            writer.writeheader()
 
-        writer.writeheader()
         writer.writerows(data)
 
-        return output.getvalue()
-
-
-class URLEncodedParser:
-    """Parses URL-encoded data."""
-
-    def parse(
-        self,
-        data: str,
-    ) -> ParseResult:
-        """Parse URL-encoded string."""
-        try:
-            from urllib.parse import parse_qs
-
-            parsed = parse_qs(data, strict_parsing=True)
-            result = {k: v[0] if len(v) == 1 else v for k, v in parsed.items()}
-
-            return ParseResult(success=True, data=result)
-
-        except Exception as e:
-            return ParseResult(
-                success=False,
-                error=f"URL-encoded parse error: {str(e)}",
-            )
-
-    def encode(
-        self,
-        data: Dict[str, Any],
-    ) -> str:
-        """Encode data as URL-encoded string."""
-        from urllib.parse import urlencode
-        return urlencode(data)
-
-
-class FormDataParser:
-    """Parses multipart form data."""
-
-    def parse(
-        self,
-        data: str,
-    ) -> ParseResult:
-        """Parse form data."""
-        result: Dict[str, Any] = {}
-        fields = data.split("&")
-
-        for field in fields:
-            if "=" in field:
-                key, value = field.split("=", 1)
-                from urllib.parse import unquote
-                key = unquote(key)
-                value = unquote(value)
-                result[key] = value
-
-        return ParseResult(success=True, data=result)
+        if output is None:
+            return output_io.getvalue()
+        return None
 
 
 class INIParser:
-    """Parses INI configuration files."""
+    """INI file parser with section support."""
 
-    def __init__(self):
-        self._pattern = re.compile(r'^\[([^\]]+)\]$')
-        self._kv_pattern = re.compile(r'^([^=]+)=(.*)$')
+    def __init__(self) -> None:
+        self.parser = configparser.ConfigParser()
 
-    def parse(
-        self,
-        ini_str: str,
-    ) -> ParseResult:
-        """Parse INI string."""
+    def parse(self, content: str) -> ParseResult:
+        """Parse INI content."""
         try:
-            result: Dict[str, Dict[str, str]] = {}
-            current_section = None
+            self.parser.read_string(content)
+            data = {section: dict(self.parser.items(section)) for section in self.parser.sections()}
+            return ParseResult(success=True, data=data, metadata={"sections": list(self.parser.sections())})
+        except configparser.Error as e:
+            return ParseResult(success=False, error=str(e))
 
-            for line in ini_str.splitlines():
-                line = line.strip()
+    def get(self, content: str, section: str, option: str, fallback: str | None = None) -> str | None:
+        """Get a single value from parsed INI."""
+        self.parse(content)
+        try:
+            return self.parser.get(section, option)
+        except (configparser.NoSectionError, configparser.NoOptionError):
+            return fallback
 
-                if not line or line.startswith("#") or line.startswith(";"):
-                    continue
+    @staticmethod
+    def unparse(data: dict[str, dict[str, Any]], output: str | None = None) -> str:
+        """Serialize dict of sections to INI format."""
+        parser = configparser.ConfigParser()
+        for section, options in data.items():
+            parser.add_section(section)
+            for key, value in options.items():
+                parser.set(section, key, str(value))
 
-                section_match = self._pattern.match(line)
-                if section_match:
-                    current_section = section_match.group(1)
-                    result[current_section] = {}
-                    continue
+        output_io = io.StringIO() if output is None else output
+        parser.write(output_io)
 
-                kv_match = self._kv_pattern.match(line)
-                if kv_match and current_section:
-                    key = kv_match.group(1).strip()
-                    value = kv_match.group(2).strip()
-                    result[current_section][key] = value
-
-            return ParseResult(success=True, data=result)
-
-        except Exception as e:
-            return ParseResult(
-                success=False,
-                error=f"INI parse error: {str(e)}",
-            )
-
-
-class DataParser:
-    """Main data parsing orchestrator."""
-
-    def __init__(self):
-        self.json_parser = JSONParser()
-        self.csv_parser = CSVParser()
-        self.xml_parser = XMLParser()
-        self.url_parser = URLEncodedParser()
-        self.form_parser = FormDataParser()
-        self.ini_parser = INIParser()
-
-    def parse(
-        self,
-        data: str,
-        format: Union[ParseFormat, str],
-    ) -> ParseResult:
-        """Parse data with specified format."""
-        if isinstance(format, str):
-            format = ParseFormat(format)
-
-        if format == ParseFormat.JSON:
-            return self.json_parser.parse(data)
-        elif format == ParseFormat.CSV:
-            return self.csv_parser.parse(data)
-        elif format == ParseFormat.TSV:
-            config = CSVParser(CSVConfig(delimiter="\t"))
-            return config.parse(data)
-        elif format == ParseFormat.XML:
-            return self.xml_parser.parse(data)
-        elif format == ParseFormat.URL_ENCODED:
-            return self.url_parser.parse(data)
-        elif format == ParseFormat.FORM_DATA:
-            return self.form_parser.parse(data)
-        elif format == ParseFormat.INI:
-            return self.ini_parser.parse(data)
-
-        return ParseResult(
-            success=False,
-            error=f"Unknown format: {format}",
-        )
-
-    def parse_auto(
-        self,
-        data: str,
-    ) -> ParseResult:
-        """Attempt to auto-detect format and parse."""
-        data = data.strip()
-
-        if data.startswith("{") or data.startswith("["):
-            return self.json_parser.parse(data)
-
-        if data.startswith("<"):
-            return self.xml_parser.parse(data)
-
-        if "=" in data and "&" in data:
-            return self.url_parser.parse(data)
-
-        if "\t" in data.split("\n")[0]:
-            return self.csv_parser.parse(data)
-
-        if "," in data.split("\n")[0]:
-            return self.csv_parser.parse(data)
-
-        if data.startswith("["):
-            return self.json_parser.parse(data)
-
-        return ParseResult(
-            success=False,
-            error="Could not detect data format",
-        )
+        if output is None:
+            return output_io.getvalue()
+        return ""
 
 
-class DataParserAction:
-    """High-level data parser action."""
+class URLEncodedParser:
+    """URL-encoded data parser (form data)."""
 
-    def __init__(self, parser: Optional[DataParser] = None):
-        self.parser = parser or DataParser()
+    @staticmethod
+    def parse(content: str) -> dict[str, str]:
+        """Parse URL-encoded string."""
+        from urllib.parse import parse_qs, unquote
 
-    def parse(
-        self,
-        data: str,
-        format: str,
-    ) -> Any:
-        """Parse data and return parsed result."""
-        result = self.parser.parse(data, format)
-        if not result.success:
-            raise ValueError(result.error)
-        return result.data
+        parsed = parse_qs(content, keep_blank_values=True)
+        return {k: v[0] if len(v) == 1 else v for k, v in parsed.items()}
 
-    def parse_auto(
-        self,
-        data: str,
-    ) -> Any:
-        """Auto-detect format and parse."""
-        result = self.parser.parse_auto(data)
-        if not result.success:
-            raise ValueError(result.error)
-        return result.data
+    @staticmethod
+    def unparse(data: dict[str, Any]) -> str:
+        """Serialize dict to URL-encoded string."""
+        from urllib.parse import urlencode
 
-    def to_json(
-        self,
-        data: Any,
-        indent: Optional[int] = None,
-    ) -> str:
-        """Convert data to JSON."""
-        return json.dumps(data, indent=indent, default=str)
-
-    def to_csv(
-        self,
-        data: List[Dict[str, Any]],
-        field_names: Optional[List[str]] = None,
-    ) -> str:
-        """Convert data to CSV."""
-        return self.parser.csv_parser.to_csv(data, field_names)
+        return urlencode(data, doseq=True)
 
 
-# Module exports
-__all__ = [
-    "DataParserAction",
-    "DataParser",
-    "JSONParser",
-    "CSVParser",
-    "XMLParser",
-    "URLEncodedParser",
-    "FormDataParser",
-    "INIParser",
-    "ParseFormat",
-    "ParseResult",
-    "CSVConfig",
-    "XMLConfig",
-]
+class KeyValueParser:
+    """Key-value pair parser for various formats."""
+
+    @staticmethod
+    def parse_lines(content: str, separator: str = ":", strip_values: bool = True) -> dict[str, str]:
+        """Parse key:value lines."""
+        result = {}
+        for line in content.strip().splitlines():
+            line = line.strip()
+            if separator in line:
+                key, _, value = line.partition(separator)
+                result[key.strip()] = value.strip() if strip_values else value
+        return result
+
+    @staticmethod
+    def parse_custom(content: str, pattern: str | None = None) -> dict[str, str]:
+        """Parse with custom regex pattern.
+
+        Args:
+            content: Text content.
+            pattern: Regex pattern with named groups 'key' and 'value'.
+        """
+        if pattern is None:
+            pattern = r"^(?P<key>[^:=]+)[:=]\s*(?P<value>.+)$"
+
+        result = {}
+        for match in re.finditer(pattern, content, re.MULTILINE):
+            result[match.group("key").strip()] = match.group("value").strip()
+        return result
+
+
+class MultilineParser:
+    """Multiline record parser (paragraph mode)."""
+
+    @staticmethod
+    def parse(content: str, separator: str = "\n\n", max_records: int | None = None) -> list[str]:
+        """Parse records separated by blank lines."""
+        records = content.split(separator)
+        if max_records:
+            records = records[:max_records]
+        return [r.strip() for r in records if r.strip()]
+
+    @staticmethod
+    def parse_with_marker(content: str, marker: str = "---", strip: bool = True) -> list[str]:
+        """Parse records separated by marker lines."""
+        marker_re = re.compile(rf"^\s*{re.escape(marker)}\s*$", re.MULTILINE)
+        parts = marker_re.split(content)
+        return [p.strip() if strip else p for p in parts if p.strip()]
+
+
+class ParserFactory:
+    """Factory for creating appropriate parser by format."""
+
+    _parsers: dict[DataFormat, Callable] = {
+        DataFormat.JSON: JSONParser,
+        DataFormat.CSV: CSVParser,
+        DataFormat.TSV: lambda: CSVParser(CSVOptions(delimiter="\t")),
+        DataFormat.INI: INIParser,
+        DataFormat.URL_ENCODED: URLEncodedParser,
+        DataFormat.MULTILINE: MultilineParser,
+        DataFormat.KEY_VALUE: KeyValueParser,
+    }
+
+    @classmethod
+    def get(cls, format: DataFormat) -> Any:
+        """Get parser instance for format."""
+        parser_cls = cls._parsers.get(format)
+        if parser_cls is None:
+            raise ValueError(f"No parser for format: {format}")
+        return parser_cls()
+
+    @classmethod
+    def detect_format(cls, content: str) -> DataFormat:
+        """Detect format from content characteristics."""
+        content = content.strip()
+
+        if content.startswith("{") or content.startswith("["):
+            return DataFormat.JSON
+
+        try:
+            json.loads(content)
+            return DataFormat.JSON
+        except json.JSONDecodeError:
+            pass
+
+        first_line = content.split("\n")[0]
+        if "\t" in first_line and "," not in first_line:
+            return DataFormat.TSV
+        if "," in first_line:
+            return DataFormat.CSV
+
+        if "=" in first_line or first_line.startswith("["):
+            return DataFormat.INI
+
+        if "=" in first_line and "&" in content:
+            return DataFormat.URL_ENCODED
+
+        return DataFormat.MULTILINE
+
+    @classmethod
+    def auto_parse(cls, content: str | bytes) -> ParseResult:
+        """Automatically detect format and parse."""
+        if isinstance(content, bytes):
+            content = content.decode("utf-8", errors="replace")
+
+        fmt = cls.detect_format(content)
+        parser = cls.get(fmt)
+        return parser.parse(content)
