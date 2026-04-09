@@ -1,170 +1,142 @@
-"""
-Animation curve builder utilities.
+"""Animation Curve Builder Utilities.
 
-Build custom animation timing curves for smooth UI transitions.
+Builds animation curves from keyframes and easing specifications.
+
+Example:
+    >>> from animation_curve_builder_utils import AnimationCurveBuilder
+    >>> builder = AnimationCurveBuilder()
+    >>> curve = builder.build_keyframe_curve([(0, 0), (0.5, 0.5), (1, 1)])
+    >>> value = curve.get_value_at(0.75)
 """
 
 from __future__ import annotations
 
 import math
-from typing import Callable
+from dataclasses import dataclass
+from typing import Callable, List, Tuple
 
 
-class CurveBuilder:
-    """Builder for custom animation curves."""
-    
-    def __init__(self):
-        self._control_points: list[tuple[float, float]] = []
-    
-    def add_point(self, x: float, y: float) -> "CurveBuilder":
-        """Add a control point (x and y should be 0-1)."""
-        self._control_points.append((max(0, min(1, x)), max(0, min(1, y))))
-        return self
-    
-    def clear(self) -> "CurveBuilder":
-        """Clear all control points."""
-        self._control_points.clear()
-        return self
-    
-    def build(self) -> Callable[[float], float]:
-        """Build the curve function."""
-        if not self._control_points:
-            return lambda t: t
-        
-        points = sorted(self._control_points)
-        
-        if points[0][0] > 0:
-            points.insert(0, (0.0, 0.0))
-        if points[-1][0] < 1:
-            points.append((1.0, 1.0))
-        
-        def curve(t: float) -> float:
-            t = max(0, min(1, t))
-            
-            for i in range(len(points) - 1):
-                x0, y0 = points[i]
-                x1, y1 = points[i + 1]
-                
-                if x0 <= t <= x1:
-                    local_t = (t - x0) / (x1 - x0) if x1 != x0 else 0
-                    return y0 + (y1 - y0) * self._ease(local_t)
-            
-            return t
-        
-        return curve
-    
-    def _ease(self, t: float) -> float:
-        """Default easing within segments."""
-        return t * t * (3 - 2 * t)
+@dataclass
+class Keyframe:
+    """An animation keyframe."""
+    time: float
+    value: float
+    easing: str = "ease_in_out"
 
 
-class CubicBezierBuilder:
-    """Builder for cubic Bezier curves."""
-    
-    def __init__(self):
-        self.p0 = (0.0, 0.0)
-        self.p1 = (0.0, 0.0)
-        self.p2 = (1.0, 1.0)
-        self.p3 = (1.0, 1.0)
-    
-    def set_start(self, x: float, y: float) -> "CubicBezierBuilder":
-        """Set start point (should be 0,0)."""
-        self.p0 = (x, y)
-        return self
-    
-    def set_control1(self, x: float, y: float) -> "CubicBezierBuilder":
-        """Set first control point."""
-        self.p1 = (x, y)
-        return self
-    
-    def set_control2(self, x: float, y: float) -> "CubicBezierBuilder":
-        """Set second control point."""
-        self.p2 = (x, y)
-        return self
-    
-    def set_end(self, x: float, y: float) -> "CubicBezierBuilder":
-        """Set end point (should be 1,1)."""
-        self.p3 = (x, y)
-        return self
-    
-    def build(self) -> Callable[[float], float]:
-        """Build the Bezier curve function."""
-        def bezier(t: float) -> float:
-            t = max(0, min(1, t))
-            mt = 1 - t
-            
-            x = (
-                mt * mt * mt * self.p0[1] +
-                3 * mt * mt * t * self.p1[1] +
-                3 * mt * t * t * self.p2[1] +
-                t * t * t * self.p3[1]
-            )
-            return x
-        
-        return bezier
+EasingFunc = Callable[[float], float]
 
 
-class ElasticCurve:
-    """Predefined elastic easing curves."""
-    
-    @staticmethod
-    def ease_in(t: float, amplitude: float = 1.0, period: float = 0.3) -> float:
-        """Elastic ease-in."""
-        if t == 0 or t == 1:
-            return t
-        return -(2 ** (10 * t - 10)) * math.sin((t * 10 - 10.75) * (2 * math.pi) / period) * amplitude
-    
-    @staticmethod
-    def ease_out(t: float, amplitude: float = 1.0, period: float = 0.3) -> float:
-        """Elastic ease-out."""
-        if t == 0 or t == 1:
-            return t
-        return (2 ** (-10 * t)) * math.sin((t * 10 - 0.75) * (2 * math.pi) / period) * amplitude + 1
-    
-    @staticmethod
-    def ease_in_out(t: float, amplitude: float = 1.0, period: float = 0.3) -> float:
-        """Elastic ease-in-out."""
-        if t == 0 or t == 1:
-            return t
-        
-        if t < 0.5:
-            return -((2 ** (20 * t - 10)) * math.sin((20 * t - 11.125) * (2 * math.pi) / period)) * amplitude / 2
-        return ((2 ** (-20 * t + 10)) * math.sin((20 * t - 11.125) * (2 * math.pi) / period)) * amplitude / 2 + 1
+class AnimationCurveBuilder:
+    """Builds animation curves from keyframes."""
+
+    EASING_FUNCTIONS: dict[str, EasingFunc] = {
+        "linear": lambda t: t,
+        "ease_in": lambda t: t * t,
+        "ease_out": lambda t: t * (2 - t),
+        "ease_in_out": lambda t: 0.5 * (1 - math.cos(math.pi * t)),
+        "ease_in_cubic": lambda t: t * t * t,
+        "ease_out_cubic": lambda t: (t - 1) ** 3 + 1,
+        "ease_in_out_cubic": lambda t: (
+            4 * t * t * t if t < 0.5 else (t - 1) * (2 * t - 2) ** 2 + 1
+        ),
+        "elastic": lambda t: (
+            math.sin(13 * math.pi / 2 * t) * 2 ** (-10 * t) + 1 if t > 0
+            else 0
+        ),
+        "bounce": lambda t: (
+            (1 - (2.75 * (1 - t) ** 2 - (1 - t) ** 3) * (1 - t)) if t < 0.5
+            else 1 - (2.75 * (t - 1) ** 2 - (t - 1) ** 3) * (1 - t)
+        ),
+    }
+
+    def build_keyframe_curve(
+        self, keyframes: List[Tuple[float, float]], easing: str = "ease_in_out"
+    ) -> AnimationCurve:
+        """Build a curve from keyframe tuples.
+
+        Args:
+            keyframes: List of (time, value) tuples.
+            easing: Default easing name.
+
+        Returns:
+            AnimationCurve instance.
+        """
+        kfs = [Keyframe(time=k[0], value=k[1], easing=easing) for k in keyframes]
+        kfs.sort(key=lambda k: k.time)
+        return AnimationCurve(kfs, self.EASING_FUNCTIONS)
+
+    def build_linear_curve(self, start: float, end: float) -> AnimationCurve:
+        """Build a linear curve between two values.
+
+        Args:
+            start: Start value.
+            end: End value.
+
+        Returns:
+            AnimationCurve instance.
+        """
+        return self.build_keyframe_curve([(0.0, start), (1.0, end)], "linear")
+
+    def build_step_curve(self, start: float, end: float, steps: int = 1) -> AnimationCurve:
+        """Build a stepped curve.
+
+        Args:
+            start: Start value.
+            end: End value.
+            steps: Number of steps.
+
+        Returns:
+            AnimationCurve instance.
+        """
+        keyframes = [(0.0, start)]
+        for i in range(1, steps + 1):
+            t = i / steps
+            keyframes.append((t, end if i == steps else start))
+        return AnimationCurve(
+            [Keyframe(time=k[0], value=k[1], easing="linear") for k in keyframes],
+            self.EASING_FUNCTIONS,
+        )
 
 
-class BackCurve:
-    """Predefined back easing curves."""
-    
-    @staticmethod
-    def ease_in(t: float, overshoot: float = 1.70158) -> float:
-        """Back ease-in."""
-        return t * t * ((overshoot + 1) * t - overshoot)
-    
-    @staticmethod
-    def ease_out(t: float, overshoot: float = 1.70158) -> float:
-        """Back ease-out."""
-        return 1 + (t - 1) ** 2 * ((overshoot + 1) * (t - 1) + overshoot)
-    
-    @staticmethod
-    def ease_in_out(t: float, overshoot: float = 1.70158) -> float:
-        """Back ease-in-out."""
-        if t < 0.5:
-            return (t * t * ((overshoot * 1.525 + 1) * t - overshoot * 1.525)) * 2
-        return ((t * 2 - 2) ** 2 * ((overshoot * 1.525 + 1) * (t * 2 - 2) + overshoot * 1.525) + 2) / 2
+class AnimationCurve:
+    """An animation curve defined by keyframes."""
 
+    def __init__(self, keyframes: List[Keyframe], easing_funcs: dict[str, EasingFunc]):
+        """Initialize curve.
 
-class StepCurve:
-    """Step easing for discrete animations."""
-    
-    @staticmethod
-    def steps(count: int, position: str = "end") -> Callable[[float], float]:
-        """Create a step function."""
-        def step(t: float) -> float:
-            if position == "start":
-                return math.ceil(t * count) / count
-            elif position == "middle":
-                return math.floor(t * count + 0.5) / count
-            else:
-                return math.floor(t * count + 0.9999999999) / count
-        
-        return step
+        Args:
+            keyframes: Sorted list of keyframes.
+            easing_funcs: Dict of easing function names to functions.
+        """
+        self.keyframes = keyframes
+        self.easing_funcs = easing_funcs
+
+    def get_value_at(self, time: float) -> float:
+        """Get interpolated value at time.
+
+        Args:
+            time: Time value (0.0 to 1.0).
+
+        Returns:
+            Interpolated value.
+        """
+        if not self.keyframes:
+            return 0.0
+        if len(self.keyframes) == 1:
+            return self.keyframes[0].value
+
+        if time <= self.keyframes[0].time:
+            return self.keyframes[0].value
+        if time >= self.keyframes[-1].time:
+            return self.keyframes[-1].value
+
+        for i in range(len(self.keyframes) - 1):
+            k0, k1 = self.keyframes[i], self.keyframes[i + 1]
+            if k0.time <= time <= k1.time:
+                t = (time - k0.time) / (k1.time - k0.time)
+                easing = self.easing_funcs.get(k0.easing, self.easing_funcs["linear"])
+                eased_t = easing(t)
+                return k0.value + (k1.value - k0.value) * eased_t
+
+        return self.keyframes[-1].value
