@@ -10,11 +10,12 @@ from typing import Dict, Any, Optional
 
 try:
     from PyQt5.QtWidgets import QApplication
-    from PyQt5.QtCore import QObject
+    from PyQt5.QtCore import QObject, pyqtSignal
     PYQT_AVAILABLE = True
 except ImportError:
     PYQT_AVAILABLE = False
     QObject = object
+    pyqtSignal = None
 
 
 @dataclass
@@ -260,12 +261,14 @@ class ThemeManager(QObject if PYQT_AVAILABLE else object):
     Supports built-in themes and custom themes via JSON.
     """
     
-    theme_changed = None  # Signal placeholder for PyQt
+    if PYQT_AVAILABLE:
+        theme_changed = pyqtSignal(str)
+    else:
+        theme_changed = None
     
     def __init__(self, parent=None):
         if PYQT_AVAILABLE:
             super().__init__(parent)
-            self.theme_changed = pyqtSignal(str)
         
         self._current_theme_name = "light"
         self._current_theme = LIGHT_THEME
@@ -783,6 +786,4 @@ def get_theme_manager() -> ThemeManager:
 
 
 # PyQt signal for theme changes
-if PYQT_AVAILABLE:
-    from PyQt5.QtCore import pyqtSignal
-    ThemeManager.theme_changed = pyqtSignal(str)
+# Note: Signal is defined as class attribute above
