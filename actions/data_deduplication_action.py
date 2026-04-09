@@ -1,322 +1,320 @@
-"""
-Data Deduplication Action Module
+"""Data deduplication action for removing duplicate records.
 
-Provides data deduplication capabilities for various data types.
-Supports exact match, fuzzy match, and rule-based deduplication.
-
-Author: rabai_autoclick team
-Version: 1.0.0
+Provides various deduplication strategies including
+exact match, fuzzy match, and subset matching.
 """
 
-from __future__ import annotations
-
-import hashlib
-from collections import deque
+import logging
+import time
 from dataclasses import dataclass, field
-from difflib import SequenceMatcher
-from typing import Any, Callable, Optional, TypeVar, Generic
-from datetime import datetime
+from enum import Enum
+from typing import Any, Callable, Optional
 
-T = TypeVar('T')
+logger = logging.getLogger(__name__)
 
 
-class DeduplicationStrategy:
-    """Strategy for deduplication."""
+class DeduplicationStrategy(Enum):
     EXACT = "exact"
     FUZZY = "fuzzy"
-    RULE_BASED = "rule_based"
-    COMBINED = "combined"
+    SUBSET = "subset"
+    SEMANTIC = "semantic"
 
 
 @dataclass
-class DedupConfig:
-    """Configuration for deduplication."""
-    strategy: str = "exact"
-    fuzzy_threshold: float = 0.85
-    key_extractor: Optional[Callable[[Any], Any]] = None
-    hash_fields: Optional[list[str]] = None
-    max_memory_items: int = 10000
-
-
-@dataclass
-class DedupResult:
-    """Result of a deduplication operation."""
-    original_count: int
-    deduplicated_count: int
-    duplicates_removed: int
-    duplicate_groups: list[list[Any]] = field(default_factory=list)
-    duration_ms: float = 0.0
-
-
-class HashGenerator:
-    """Generate hashes for deduplication."""
-    
-    @staticmethod
-    def hash_string(s: str) -> str:
-        """Hash a string."""
-        return hashlib.sha256(s.encode()).hexdigest()
-    
-    @staticmethod
-    def hash_dict(d: dict, fields: Optional[list[str]] = None) -> str:
-        """Hash a dictionary."""
-        if fields:
-            d = {k: v for k, v in d.items() if k in fields}
-        sorted_items = sorted(str(k) + ":" + str(v) for k, v in d.items())
-        content = "|".join(sorted_items)
-        return hashlib.sha256(content.encode()).hexdigest()
-    
-    @staticmethod
-    def hash_object(obj: Any, key_fn: Optional[Callable] = None) -> str:
-        """Hash any object."""
-        if key_fn:
-            key = key_fn(obj)
-        else:
-            key = str(obj)
-        return HashGenerator.hash_string(key)
-
-
-class FuzzyMatcher:
-    """Fuzzy matching for deduplication."""
-    
-    def __init__(self, threshold: float = 0.85):
-        self.threshold = threshold
-    
-    def similarity(self, s1: str, s2: str) -> float:
-        """Calculate similarity between two strings."""
-        return SequenceMatcher(None, s1, s2).ratio()
-    
-    def is_duplicate(self, s1: str, s2: str) -> bool:
-        """Check if two strings are duplicates."""
-        return self.similarity(s1, s2) >= self.threshold
-    
-    def find_duplicates_in_list(self, items: list[str]) -> list[list[int]]:
-        """Find groups of duplicate indices in a list of strings."""
-        n = len(items)
-        parent = list(range(n))
-        
-        def find(x):
-            if parent[x] != x:
-                parent[x] = find(parent[x])
-            return parent[x]
-        
-        def union(x, y):
-            px, py = find(x), find(y)
-            if px != py:
-                parent[px] = py
-        
-        for i in range(n):
-            for j in range(i + 1, n):
-                if self.is_duplicate(items[i], items[j]):
-                    union(i, j)
-        
-        groups: dict[int, list[int]] = {}
-        for i in range(n):
-            root = find(i)
-            if root not in groups:
-                groups[root] = []
-            groups[root].append(i)
-        
-        return list(groups.values())
+class DuplicateGroup:
+    group_id: str
+    record_ids: list[str]
+    similarity: float
+    representative_id: Optional[str] = None
 
 
 class DataDeduplicationAction:
+    """Remove duplicate records from datasets.
+
+    Args:
+        default_strategy: Default deduplication strategy.
+        similarity_threshold: Similarity threshold for fuzzy matching.
     """
-    Data deduplication action.
-    
-    Removes duplicate data using various strategies.
-    
-    Example:
-        dedup = DataDeduplicationAction()
-        
-        result = dedup.deduplicate(
-            data=records,
-            key_fn=lambda r: r["id"]
-        )
-    """
-    
-    def __init__(self, config: Optional[DedupConfig] = None):
-        self.config = config or DedupConfig()
-        self._seen_hashes: set[str] = deque(maxlen=self.config.max_memory_items)
-        self._fuzzy_matcher = FuzzyMatcher(threshold=self.config.fuzzy_threshold)
+
+    def __init__(
+        self,
+        default_strategy: DeduplicationStrategy = DeduplicationStrategy.EXACT,
+        similarity_threshold: float = 0.85,
+    ) -> None:
+        self._default_strategy = default_strategy
+        self._similarity_threshold = similarity_threshold
+        self._duplicate_groups: list[DuplicateGroup] = []
         self._stats = {
-            "total_items": 0,
+            "total_checked": 0,
             "duplicates_found": 0,
-            "items_removed": 0
+            "records_removed": 0,
         }
-    
-    def _extract_key(self, item: Any) -> Any:
-        """Extract deduplication key from an item."""
-        if self.config.key_extractor:
-            return self.config.key_extractor(item)
-        if isinstance(item, dict):
-            if self.config.hash_fields:
-                return HashGenerator.hash_dict(item, self.config.hash_fields)
-            return HashGenerator.hash_dict(item)
-        return str(item)
-    
-    def _compute_hash(self, item: Any) -> str:
-        """Compute hash for an item."""
-        key = self._extract_key(item)
-        return HashGenerator.hash_string(str(key))
-    
-    def is_duplicate(self, item: Any) -> bool:
-        """Check if an item is a duplicate."""
-        h = self._compute_hash(item)
-        if h in self._seen_hashes:
-            return True
-        self._seen_hashes.add(h)
-        return False
-    
+
+    def find_duplicates(
+        self,
+        records: list[dict[str, Any]],
+        key_fields: list[str],
+        strategy: Optional[DeduplicationStrategy] = None,
+    ) -> list[DuplicateGroup]:
+        """Find duplicate records.
+
+        Args:
+            records: List of records.
+            key_fields: Fields to use for comparison.
+            strategy: Deduplication strategy.
+
+        Returns:
+            List of duplicate groups.
+        """
+        strategy = strategy or self._default_strategy
+
+        if strategy == DeduplicationStrategy.EXACT:
+            return self._find_exact_duplicates(records, key_fields)
+        elif strategy == DeduplicationStrategy.FUZZY:
+            return self._find_fuzzy_duplicates(records, key_fields)
+        elif strategy == DeduplicationStrategy.SUBSET:
+            return self._find_subset_duplicates(records, key_fields)
+
+        return []
+
+    def _find_exact_duplicates(
+        self,
+        records: list[dict[str, Any]],
+        key_fields: list[str],
+    ) -> list[DuplicateGroup]:
+        """Find exact duplicate records.
+
+        Args:
+            records: List of records.
+            key_fields: Fields to use for comparison.
+
+        Returns:
+            List of duplicate groups.
+        """
+        seen: dict[str, list[str]] = {}
+        duplicate_groups: list[DuplicateGroup] = []
+
+        for i, record in enumerate(records):
+            key = self._compute_key(record, key_fields)
+            if key in seen:
+                seen[key].append(str(i))
+            else:
+                seen[key] = [str(i)]
+
+        for key, record_ids in seen.items():
+            if len(record_ids) > 1:
+                group = DuplicateGroup(
+                    group_id=f"exact_{key[:16]}",
+                    record_ids=record_ids,
+                    similarity=1.0,
+                    representative_id=record_ids[0],
+                )
+                duplicate_groups.append(group)
+
+        self._duplicate_groups = duplicate_groups
+        self._stats["duplicates_found"] = sum(len(g.record_ids) for g in duplicate_groups)
+        return duplicate_groups
+
+    def _find_fuzzy_duplicates(
+        self,
+        records: list[dict[str, Any]],
+        key_fields: list[str],
+    ) -> list[DuplicateGroup]:
+        """Find fuzzy duplicate records.
+
+        Args:
+            records: List of records.
+            key_fields: Fields to use for comparison.
+
+        Returns:
+            List of duplicate groups.
+        """
+        duplicate_groups: list[DuplicateGroup] = []
+        assigned: set[str] = set()
+
+        for i, record in enumerate(records):
+            record_id = str(i)
+            if record_id in assigned:
+                continue
+
+            current_key = self._compute_key(record, key_fields)
+            similar: list[str] = [record_id]
+
+            for j, other in enumerate(records[i + 1:], start=i + 1):
+                other_id = str(j)
+                if other_id in assigned:
+                    continue
+
+                other_key = self._compute_key(other, key_fields)
+                similarity = self._compute_similarity(current_key, other_key)
+
+                if similarity >= self._similarity_threshold:
+                    similar.append(other_id)
+                    assigned.add(other_id)
+
+            if len(similar) > 1:
+                assigned.add(record_id)
+                group = DuplicateGroup(
+                    group_id=f"fuzzy_{len(duplicate_groups)}",
+                    record_ids=similar,
+                    similarity=self._similarity_threshold,
+                    representative_id=similar[0],
+                )
+                duplicate_groups.append(group)
+
+        self._duplicate_groups = duplicate_groups
+        self._stats["duplicates_found"] = sum(len(g.record_ids) for g in duplicate_groups)
+        return duplicate_groups
+
+    def _find_subset_duplicates(
+        self,
+        records: list[dict[str, Any]],
+        key_fields: list[str],
+    ) -> list[DuplicateGroup]:
+        """Find records that are subsets of others.
+
+        Args:
+            records: List of records.
+            key_fields: Fields to use for comparison.
+
+        Returns:
+            List of duplicate groups.
+        """
+        duplicate_groups: list[DuplicateGroup] = []
+
+        for i, record in enumerate(records):
+            record_id = str(i)
+            key = self._compute_key(record, key_fields)
+
+            for j, other in enumerate(records[i + 1:], start=i + 1):
+                other_key = self._compute_key(other, key_fields)
+
+                if self._is_subset(key, other_key):
+                    group = DuplicateGroup(
+                        group_id=f"subset_{i}_{j}",
+                        record_ids=[record_id, str(j)],
+                        similarity=0.8,
+                        representative_id=str(j),
+                    )
+                    duplicate_groups.append(group)
+
+        self._duplicate_groups = duplicate_groups
+        self._stats["duplicates_found"] = sum(len(g.record_ids) for g in duplicate_groups)
+        return duplicate_groups
+
     def deduplicate(
         self,
-        data: list[Any],
-        key_fn: Optional[Callable[[Any], Any]] = None
-    ) -> DedupResult:
-        """
-        Deduplicate a list of items.
-        
+        records: list[dict[str, Any]],
+        key_fields: list[str],
+        strategy: Optional[DeduplicationStrategy] = None,
+        keep: str = "first",
+    ) -> list[dict[str, Any]]:
+        """Remove duplicates from records.
+
         Args:
-            data: List of items to deduplicate
-            key_fn: Optional function to extract deduplication key
-            
+            records: List of records.
+            key_fields: Fields to use for comparison.
+            strategy: Deduplication strategy.
+            keep: Which record to keep ('first', 'last').
+
         Returns:
-            DedupResult with statistics and duplicate groups
+            Deduplicated records.
         """
-        start_time = datetime.now()
-        original_count = len(data)
-        self._stats["total_items"] += original_count
-        
-        if key_fn:
-            self.config.key_extractor = key_fn
-        
-        if self.config.strategy == "exact":
-            return self._deduplicate_exact(data)
-        elif self.config.strategy == "fuzzy":
-            return self._deduplicate_fuzzy(data)
-        elif self.config.strategy == "rule_based":
-            return self._deduplicate_rule_based(data)
-        else:
-            return self._deduplicate_combined(data)
-    
-    def _deduplicate_exact(self, data: list[Any]) -> DedupResult:
-        """Deduplicate using exact matching."""
-        seen = {}
-        unique_items = []
-        duplicate_groups = []
-        
-        for item in data:
-            key = self._extract_key(item)
-            if key in seen:
-                seen[key].append(item)
-            else:
-                seen[key] = [item]
-                unique_items.append(item)
-        
-        for key, items in seen.items():
-            if len(items) > 1:
-                duplicate_groups.append(items)
-        
-        duplicates_removed = original_count - len(unique_items)
-        self._stats["duplicates_found"] += len(duplicate_groups)
-        self._stats["items_removed"] += duplicates_removed
-        
-        duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-        
-        return DedupResult(
-            original_count=len(data),
-            deduplicated_count=len(unique_items),
-            duplicates_removed=duplicates_removed,
-            duplicate_groups=duplicate_groups,
-            duration_ms=duration_ms
-        )
-    
-    def _deduplicate_fuzzy(self, data: list[Any]) -> DedupResult:
-        """Deduplicate using fuzzy matching."""
-        if not all(isinstance(item, str) for item in data):
-            data = [str(item) for item in data]
-        
-        duplicate_indices = self._fuzzy_matcher.find_duplicates_in_list(data)
-        
-        indices_to_remove = set()
-        duplicate_groups = []
-        
-        for group in duplicate_indices:
-            keep_idx = group[0]
-            remove_indices = group[1:]
-            indices_to_remove.update(remove_indices)
-            duplicate_groups.append([data[i] for i in group])
-        
-        unique_items = [item for i, item in enumerate(data) if i not in indices_to_remove]
-        
-        duplicates_removed = len(data) - len(unique_items)
-        duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-        
-        return DedupResult(
-            original_count=len(data),
-            deduplicated_count=len(unique_items),
-            duplicates_removed=duplicates_removed,
-            duplicate_groups=duplicate_groups,
-            duration_ms=duration_ms
-        )
-    
-    def _deduplicate_rule_based(self, data: list[Any]) -> DedupResult:
-        """Deduplicate using rule-based matching."""
-        return self._deduplicate_exact(data)
-    
-    def _deduplicate_combined(self, data: list[Any]) -> DedupResult:
-        """Deduplicate using combined strategies."""
-        result = self._deduplicate_exact(data)
-        if result.duplicate_groups:
-            str_items = [str(item) for item in data]
-            fuzzy_indices = self._fuzzy_matcher.find_duplicates_in_list(str_items)
-            
-            additional_removals = set()
-            for group in fuzzy_indices:
-                if len(group) > 1:
-                    additional_removals.update(group[1:])
-            
-            result.duplicates_removed += len(additional_removals)
-            result.deduplicated_count = result.original_count - result.duplicates_removed
-        
+        duplicate_groups = self.find_duplicates(records, key_fields, strategy)
+
+        indices_to_remove: set[int] = set()
+        for group in duplicate_groups:
+            keep_idx = 0 if keep == "first" else len(group.record_ids) - 1
+            for idx, record_id in enumerate(group.record_ids):
+                if idx != keep_idx:
+                    indices_to_remove.add(int(record_id))
+
+        self._stats["records_removed"] = len(indices_to_remove)
+
+        result = [r for i, r in enumerate(records) if i not in indices_to_remove]
         return result
-    
+
+    def _compute_key(
+        self,
+        record: dict[str, Any],
+        key_fields: list[str],
+    ) -> str:
+        """Compute a comparison key for a record.
+
+        Args:
+            record: Record.
+            key_fields: Fields to use.
+
+        Returns:
+            Comparison key string.
+        """
+        values = [str(record.get(f, "")) for f in key_fields]
+        return "|".join(values).lower()
+
+    def _compute_similarity(self, key1: str, key2: str) -> float:
+        """Compute similarity between two keys.
+
+        Args:
+            key1: First key.
+            key2: Second key.
+
+        Returns:
+            Similarity score (0-1).
+        """
+        if key1 == key2:
+            return 1.0
+
+        words1 = set(key1.split())
+        words2 = set(key2.split())
+
+        if not words1 or not words2:
+            return 0.0
+
+        intersection = len(words1 & words2)
+        union = len(words1 | words2)
+
+        return intersection / union if union > 0 else 0.0
+
+    def _is_subset(self, key1: str, key2: str) -> bool:
+        """Check if key1 is a subset of key2.
+
+        Args:
+            key1: Potential subset key.
+            key2: Superset key.
+
+        Returns:
+            True if key1 is subset of key2.
+        """
+        words1 = set(key1.split())
+        words2 = set(key2.split())
+        return words1.issubset(words2) and words1 != words2
+
+    def get_duplicate_groups(self) -> list[DuplicateGroup]:
+        """Get found duplicate groups.
+
+        Returns:
+            List of duplicate groups.
+        """
+        return self._duplicate_groups
+
     def get_stats(self) -> dict[str, Any]:
-        """Get deduplication statistics."""
+        """Get deduplication statistics.
+
+        Returns:
+            Dictionary with stats.
+        """
         return {
             **self._stats,
-            "memory_items": len(self._seen_hashes),
-            "duplicate_rate": (
-                self._stats["items_removed"] / self._stats["total_items"]
-                if self._stats["total_items"] > 0 else 0
-            )
+            "default_strategy": self._default_strategy.value,
+            "similarity_threshold": self._similarity_threshold,
+            "duplicate_groups": len(self._duplicate_groups),
         }
-    
-    def clear(self) -> None:
-        """Clear seen items cache."""
-        self._seen_hashes.clear()
 
-
-class StreamingDedup(DataDeduplicationAction):
-    """Streaming deduplication for large datasets."""
-    
-    def __init__(self, config: Optional[DedupConfig] = None):
-        super().__init__(config)
-        self._seen_count = 0
-        self._dup_count = 0
-    
-    def process_item(self, item: Any) -> bool:
-        """
-        Process a single item.
-        
-        Returns:
-            True if item is unique (not a duplicate), False if duplicate
-        """
-        if self.is_duplicate(item):
-            self._dup_count += 1
-            return False
-        self._seen_count += 1
-        return True
-    
-    def process_batch(self, items: list[Any]) -> list[Any]:
-        """Process a batch of items, returning only unique ones."""
-        return [item for item in items if self.process_item(item)]
+    def reset_stats(self) -> None:
+        """Reset statistics counters."""
+        self._stats = {
+            "total_checked": 0,
+            "duplicates_found": 0,
+            "records_removed": 0,
+        }
+        self._duplicate_groups.clear()
