@@ -1,371 +1,284 @@
-"""
-API Gateway and Reverse Proxy Module.
+"""API gateway action for routing and managing API requests.
 
 Provides request routing, authentication, rate limiting,
-caching, and protocol transformation for API automation.
-
-Author: AutoGen
+and response transformation for API gateways.
 """
-from __future__ import annotations
 
-import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import time
-from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from enum import Enum, auto
-from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
+from enum import Enum
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 
-class LoadBalancingStrategy(Enum):
-    ROUND_ROBIN = auto()
-    LEAST_CONNECTIONS = auto()
-    IP_HASH = auto()
-    WEIGHTED = auto()
+class AuthType(Enum):
+    NONE = "none"
+    API_KEY = "api_key"
+    BEARER = "bearer"
+    HMAC = "hmac"
 
 
 @dataclass
-class RouteConfig:
-    path_pattern: str
-    upstream_url: str
-    methods: FrozenSet[str] = field(default_factory=frozenset)
-    auth_required: bool = False
-    rate_limit: Optional[int] = None
-    cache_ttl: int = 0
-    timeout: float = 30.0
-    strip_prefix: bool = False
+class Route:
+    path: str
+    method: str
+    handler: Callable
+    auth_type: AuthType = AuthType.NONE
+    rate_limit: Optional[float] = None
 
 
 @dataclass
-class GatewayRequest:
+class RequestContext:
     method: str
     path: str
-    headers: Dict[str, str]
-    query_params: Dict[str, List[str]]
-    body: Optional[bytes]
-    client_ip: str
-    timestamp: float = field(default_factory=time.time)
+    headers: dict[str, str]
+    query_params: dict[str, str]
+    body: Optional[dict[str, Any]] = None
+    auth_token: Optional[str] = None
+    client_ip: Optional[str] = None
 
 
 @dataclass
-class GatewayResponse:
+class ResponseData:
     status_code: int
-    headers: Dict[str, str]
-    body: Optional[bytes]
-    from_cache: bool = False
-    latency_ms: float = 0.0
+    headers: dict[str, str]
+    body: Any
 
 
-@dataclass
-class RateLimitConfig:
-    requests_per_second: int = 100
-    burst_size: int = 200
-    per_client: bool = True
+class APIGatewayAction:
+    """API gateway with routing, auth, and rate limiting.
 
-
-class TokenBucket:
-    def __init__(self, rate: float, capacity: int):
-        self.rate = rate
-        self.capacity = capacity
-        self.tokens = float(capacity)
-        self.last_update = time.time()
-
-    def consume(self, tokens: int = 1) -> bool:
-        now = time.time()
-        elapsed = now - self.last_update
-        self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
-        self.last_update = now
-
-        if self.tokens >= tokens:
-            self.tokens -= tokens
-            return True
-        return False
-
-
-class ResponseCache:
-    def __init__(self, default_ttl: int = 60):
-        self.default_ttl = default_ttl
-        self._cache: Dict[str, Tuple[bytes, float]] = {}
-        self._stats = {"hits": 0, "misses": 0}
-
-    def _make_key(self, method: str, path: str, body: Optional[bytes]) -> str:
-        data = f"{method}:{path}:{body or ''}"
-        return hashlib.sha256(data.encode()).hexdigest()[:16]
-
-    def get(self, method: str, path: str, body: Optional[bytes] = None) -> Optional[bytes]:
-        key = self._make_key(method, path, body)
-        if key in self._cache:
-            data, expiry = self._cache[key]
-            if time.time() < expiry:
-                self._stats["hits"] += 1
-                return data
-            del self._cache[key]
-        self._stats["misses"] += 1
-        return None
-
-    def put(self, method: str, path: str, body: bytes, ttl: Optional[int] = None) -> None:
-        key = self._make_key(method, path, body)
-        expiry = time.time() + (ttl or self.default_ttl)
-        self._cache[key] = (body, expiry)
-
-    def invalidate(self, path_pattern: str) -> int:
-        count = 0
-        to_delete = [k for k in self._cache if k.startswith(path_pattern)]
-        for k in to_delete:
-            del self._cache[k]
-            count += 1
-        return count
-
-    def get_stats(self) -> Dict[str, int]:
-        total = self._stats["hits"] + self._stats["misses"]
-        return {
-            "hits": self._stats["hits"],
-            "misses": self._stats["misses"],
-            "hit_rate": self._stats["hits"] / max(total, 1),
-            "entries": len(self._cache),
-        }
-
-
-class APIGateway:
-    """
-    API gateway with routing, load balancing, and caching.
+    Args:
+        base_path: Base path for all routes.
+        enable_cors: Enable CORS support.
+        default_timeout: Default request timeout.
     """
 
-    def __init__(self, port: int = 8080):
-        self.port = port
-        self._routes: List[RouteConfig] = []
-        self._upstreams: Dict[str, List[str]] = defaultdict(list)
-        self._health_checks: Dict[str, asyncio.Task] = {}
-        self._rate_limiters: Dict[str, TokenBucket] = defaultdict(
-            lambda: TokenBucket(100, 200)
-        )
-        self.cache = ResponseCache()
-        self._lb_strategies: Dict[str, LoadBalancingStrategy] = defaultdict(
-            lambda: LoadBalancingStrategy.ROUND_ROBIN
-        )
-        self._lb_counters: Dict[str, int] = defaultdict(int)
-        self._server: Optional[asyncio.Server] = None
-        self._auth_handlers: Dict[str, Callable] = {}
-
-    def add_route(self, route: RouteConfig) -> None:
-        self._routes.append(route)
-        logger.info("Added route: %s -> %s", route.path_pattern, route.upstream_url)
-
-    def add_upstream(self, name: str, urls: List[str]) -> None:
-        self._upstreams[name] = urls
-        logger.info("Added upstream %s with %d endpoints", name, len(urls))
-
-    def set_load_balancing(
-        self, upstream: str, strategy: LoadBalancingStrategy
+    def __init__(
+        self,
+        base_path: str = "/api",
+        enable_cors: bool = True,
+        default_timeout: float = 30.0,
     ) -> None:
-        self._lb_strategies[upstream] = strategy
+        self._routes: list[Route] = []
+        self._base_path = base_path
+        self._enable_cors = enable_cors
+        self._default_timeout = default_timeout
+        self._api_keys: dict[str, dict[str, Any]] = {}
+        self._middleware: list[Callable] = []
 
-    def register_auth(self, auth_type: str, handler: Callable) -> None:
-        self._auth_handlers[auth_type] = handler
-
-    def _match_route(self, path: str, method: str) -> Optional[RouteConfig]:
-        for route in self._routes:
-            import fnmatch
-            if fnmatch.fnmatch(path, route.path_pattern):
-                if method.upper() in route.methods or not route.methods:
-                    return route
-        return None
-
-    def _select_upstream(self, upstream_name: str) -> Optional[str]:
-        urls = self._upstreams.get(upstream_name, [])
-        if not urls:
-            return None
-
-        strategy = self._lb_strategies[upstream_name]
-
-        if strategy == LoadBalancingStrategy.ROUND_ROBIN:
-            idx = self._lb_counters[upstream_name] % len(urls)
-            self._lb_counters[upstream_name] += 1
-            return urls[idx]
-
-        elif strategy == LoadBalancingStrategy.LEAST_CONNECTIONS:
-            return urls[0]
-
-        elif strategy == LoadBalancingStrategy.IP_HASH:
-            return urls[hash(urls[0]) % len(urls)]
-
-        elif strategy == LoadBalancingStrategy.WEIGHTED:
-            return urls[0]
-
-        return urls[0]
-
-    def _check_rate_limit(
-        self, route: RouteConfig, client_ip: str
+    def register_route(
+        self,
+        path: str,
+        method: str,
+        handler: Callable,
+        auth_type: AuthType = AuthType.NONE,
+        rate_limit: Optional[float] = None,
     ) -> bool:
-        if not route.rate_limit:
-            return True
+        """Register an API route.
 
-        if route.rate_limit > 0:
-            limiter = self._rate_limiters.get(client_ip)
-            if not limiter:
-                limiter = TokenBucket(route.rate_limit, route.rate_limit * 2)
-                self._rate_limiters[client_ip] = limiter
-            return limiter.consume()
+        Args:
+            path: Route path.
+            method: HTTP method.
+            handler: Handler function.
+            auth_type: Authentication type.
+            rate_limit: Optional rate limit (requests/second).
 
+        Returns:
+            True if registered successfully.
+        """
+        full_path = f"{self._base_path.rstrip('/')}/{path.lstrip('/')}"
+        route = Route(
+            path=full_path,
+            method=method.upper(),
+            handler=handler,
+            auth_type=auth_type,
+            rate_limit=rate_limit,
+        )
+        self._routes.append(route)
+        logger.debug(f"Registered route: {method} {full_path}")
         return True
 
-    async def _proxy_request(
-        self, request: GatewayRequest, route: RouteConfig
-    ) -> GatewayResponse:
-        import aiohttp
+    def register_api_key(
+        self,
+        key: str,
+        client_name: str,
+        permissions: Optional[list[str]] = None,
+        rate_limit: Optional[float] = None,
+    ) -> None:
+        """Register an API key.
 
-        upstream_url = self._select_upstream(route.upstream_url)
-        if not upstream_url:
-            return GatewayResponse(
-                status_code=502,
-                headers={},
-                body=b"No upstream available",
-            )
+        Args:
+            key: API key string.
+            client_name: Client name.
+            permissions: List of permissions.
+            rate_limit: Rate limit for this key.
+        """
+        self._api_keys[key] = {
+            "client_name": client_name,
+            "permissions": permissions or [],
+            "rate_limit": rate_limit,
+            "created_at": time.time(),
+        }
 
-        url = f"{upstream_url}{route.path_pattern.replace('*', '')}{request.path}"
+    def authenticate_request(
+        self,
+        context: RequestContext,
+        auth_type: AuthType,
+    ) -> Optional[str]:
+        """Authenticate an API request.
 
-        start = time.time()
+        Args:
+            context: Request context.
+            auth_type: Authentication type.
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.request(
-                    request.method,
-                    url,
-                    headers=request.headers,
-                    data=request.body,
-                    timeout=aiohttp.ClientTimeout(total=route.timeout),
-                ) as resp:
-                    body = await resp.read()
-                    latency = (time.time() - start) * 1000
+        Returns:
+            Client ID if authenticated, None otherwise.
+        """
+        if auth_type == AuthType.NONE:
+            return "anonymous"
 
-                    return GatewayResponse(
-                        status_code=resp.status,
-                        headers=dict(resp.headers),
-                        body=body,
-                        latency_ms=latency,
+        if auth_type == AuthType.API_KEY:
+            api_key = context.headers.get("X-API-Key") or context.query_params.get("api_key")
+            if api_key and api_key in self._api_keys:
+                return api_key
+            return None
+
+        if auth_type == AuthType.BEARER:
+            auth_header = context.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[7:]
+                for key, data in self._api_keys.items():
+                    if self._validate_bearer_token(token, key):
+                        return key
+            return None
+
+        if auth_type == AuthType.HMAC:
+            auth_header = context.headers.get("Authorization", "")
+            if auth_header.startswith("HMAC "):
+                parts = auth_header[5:].split(":")
+                if len(parts) == 2:
+                    key, signature = parts
+                    if key in self._api_keys and self._validate_hmac_signature(context, key, signature):
+                        return key
+            return None
+
+        return None
+
+    def _validate_bearer_token(self, token: str, key: str) -> bool:
+        """Validate a bearer token.
+
+        Args:
+            token: Bearer token.
+            key: API key.
+
+        Returns:
+            True if valid.
+        """
+        expected = hashlib.sha256(f"{key}:{time.time() // 3600}".encode()).hexdigest()
+        return token == expected
+
+    def _validate_hmac_signature(
+        self,
+        context: RequestContext,
+        key: str,
+        signature: str,
+    ) -> bool:
+        """Validate HMAC signature.
+
+        Args:
+            context: Request context.
+            key: API key.
+            signature: Provided signature.
+
+        Returns:
+            True if valid.
+        """
+        message = f"{context.method}:{context.path}:{json.dumps(context.body or {}, sort_keys=True)}"
+        expected = hmac.new(key.encode(), message.encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(signature, expected)
+
+    def route_request(self, context: RequestContext) -> ResponseData:
+        """Route and handle an API request.
+
+        Args:
+            context: Request context.
+
+        Returns:
+            Response data.
+        """
+        for route in self._routes:
+            if route.path == context.path and route.method == context.method:
+                for mw in self._middleware:
+                    result = mw(context)
+                    if result is not None:
+                        return result
+
+                client_id = self.authenticate_request(context, route.auth_type)
+                if client_id is None:
+                    return ResponseData(
+                        status_code=401,
+                        headers=self._get_cors_headers(),
+                        body={"error": "Unauthorized"},
                     )
 
-        except asyncio.TimeoutError:
-            return GatewayResponse(
-                status_code=504,
-                headers={},
-                body=b"Gateway timeout",
-                latency_ms=(time.time() - start) * 1000,
-            )
-        except Exception as exc:
-            logger.error("Proxy error: %s", exc)
-            return GatewayResponse(
-                status_code=502,
-                headers={},
-                body=str(exc).encode(),
-                latency_ms=(time.time() - start) * 1000,
-            )
+                try:
+                    result = route.handler(context)
+                    return ResponseData(
+                        status_code=200,
+                        headers=self._get_cors_headers(),
+                        body=result,
+                    )
+                except Exception as e:
+                    logger.error(f"Route handler error: {e}")
+                    return ResponseData(
+                        status_code=500,
+                        headers=self._get_cors_headers(),
+                        body={"error": "Internal server error"},
+                    )
 
-    async def handle_request(
-        self, request: GatewayRequest
-    ) -> GatewayResponse:
-        route = self._match_route(request.path, request.method)
-        if not route:
-            return GatewayResponse(
-                status_code=404,
-                headers={},
-                body=b"Route not found",
-            )
-
-        if not self._check_rate_limit(route, request.client_ip):
-            return GatewayResponse(
-                status_code=429,
-                headers={"Retry-After": "60"},
-                body=b"Rate limit exceeded",
-            )
-
-        if route.cache_ttl > 0 and request.method == "GET":
-            cached = self.cache.get(request.method, request.path, request.body)
-            if cached:
-                return GatewayResponse(
-                    status_code=200,
-                    headers={},
-                    body=cached,
-                    from_cache=True,
-                )
-
-        response = await self._proxy_request(request, route)
-
-        if route.cache_ttl > 0 and response.status_code == 200:
-            self.cache.put(request.method, request.path, response.body, route.cache_ttl)
-
-        return response
-
-    async def start(self) -> None:
-        self._server = await asyncio.start_server(
-            self._handle_connection, "0.0.0.0", self.port
+        return ResponseData(
+            status_code=404,
+            headers=self._get_cors_headers(),
+            body={"error": "Not found"},
         )
-        logger.info("API Gateway started on port %d", self.port)
 
-    async def stop(self) -> None:
-        if self._server:
-            self._server.close()
-            await self._server.wait_closed()
-        logger.info("API Gateway stopped")
+    def _get_cors_headers(self) -> dict[str, str]:
+        """Get CORS headers.
 
-    async def _handle_connection(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
-        addr = writer.get_extra_info("peername")
-        try:
-            request_data = await reader.read(65536)
-            lines = request_data.decode().split("\r\n")
-            if not lines:
-                return
-            request_line = lines[0]
-            parts = request_line.split()
-            if len(parts) < 2:
-                return
-            method, path = parts[0], parts[1]
+        Returns:
+            CORS headers dictionary.
+        """
+        if not self._enable_cors:
+            return {}
+        return {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization, X-API-Key",
+        }
 
-            headers = {}
-            body_start = 0
-            for i, line in enumerate(lines[1:], 1):
-                if line == "":
-                    body_start = i + 1
-                    break
-                if ":" in line:
-                    k, v = line.split(":", 1)
-                    headers[k.strip()] = v.strip()
+    def use_middleware(self, middleware: Callable) -> None:
+        """Register middleware.
 
-            body = "\r\n".join(lines[body_start:]).encode() if body_start else None
+        Args:
+            middleware: Middleware function.
+        """
+        self._middleware.append(middleware)
 
-            gw_request = GatewayRequest(
-                method=method,
-                path=path,
-                headers=headers,
-                query_params={},
-                body=body,
-                client_ip=addr[0] if addr else "unknown",
-            )
+    def get_stats(self) -> dict[str, Any]:
+        """Get API gateway statistics.
 
-            response = await self.handle_request(gw_request)
-
-            response_headers = response.headers.copy()
-            if response.from_cache:
-                response_headers["X-Cache"] = "HIT"
-            else:
-                response_headers["X-Cache"] = "MISS"
-
-            writer.write(f"HTTP/1.1 {response.status_code}\r\n".encode())
-            for k, v in response_headers.items():
-                writer.write(f"{k}: {v}\r\n".encode())
-            writer.write(b"\r\n")
-            writer.write(response.body)
-            await writer.drain()
-
-        except Exception as exc:
-            logger.error("Connection handler error: %s", exc)
-        finally:
-            writer.close()
-            await writer.wait_closed()
+        Returns:
+            Dictionary with stats.
+        """
+        return {
+            "total_routes": len(self._routes),
+            "registered_api_keys": len(self._api_keys),
+            "middleware_count": len(self._middleware),
+            "cors_enabled": self._enable_cors,
+        }
