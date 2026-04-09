@@ -1,305 +1,360 @@
-"""
-Notification Utilities for UI Automation.
+"""Notification Utilities.
 
-This module provides utilities for sending notifications and alerts
-during automation workflows, supporting multiple notification channels.
+This module provides notification utilities for macOS desktop applications,
+including local notifications, notification banners, and notification
+management for user alerts and automation triggers.
 
-Author: AI Assistant
-License: MIT
+Example:
+    >>> from notification_utils import NotificationManager, Notification
+    >>> manager = NotificationManager()
+    >>> manager.send(Notification(title="Task Complete", body="File saved"))
 """
 
 from __future__ import annotations
 
-import time
-import uuid
+import subprocess
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Callable, Optional
+from typing import Callable, Dict, List, Optional, Any
+
+
+class NotificationSound(Enum):
+    """Pre-defined notification sounds."""
+    DEFAULT = "default"
+    GLASS = "Glass"
+    BELL = "Bell"
+    BUZZ = "Buzz"
+    DONE = "Funk"
+    ALERT = "Bottle"
+    NONE = "none"
 
 
 class NotificationPriority(Enum):
     """Notification priority levels."""
-    LOW = 0
-    NORMAL = 1
-    HIGH = 2
-    URGENT = 3
-
-
-class NotificationStatus(Enum):
-    """Notification delivery status."""
-    PENDING = auto()
-    SENT = auto()
-    DELIVERED = auto()
-    FAILED = auto()
-    CANCELLED = auto()
+    LOW = auto()
+    MEDIUM = auto()
+    HIGH = auto()
+    CRITICAL = auto()
 
 
 @dataclass
 class Notification:
-    """
-    Represents a notification.
+    """Represents a notification.
     
     Attributes:
-        notification_id: Unique identifier
         title: Notification title
-        message: Notification message body
-        priority: Notification priority
-        status: Current delivery status
-        created_at: Creation timestamp
-        sent_at: When notification was sent
-        metadata: Additional notification data
+        body: Notification body text
+        subtitle: Optional subtitle
+        sound: Notification sound
+        priority: Priority level
     """
-    notification_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    title: str = ""
-    message: str = ""
-    priority: NotificationPriority = NotificationPriority.NORMAL
-    status: NotificationStatus = NotificationStatus.PENDING
-    created_at: float = field(default_factory=time.time)
-    sent_at: Optional[float] = None
-    delivered_at: Optional[float] = None
-    error: Optional[str] = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    title: str
+    body: str = ""
+    subtitle: Optional[str] = None
+    sound: NotificationSound = NotificationSound.DEFAULT
+    priority: NotificationPriority = NotificationPriority.MEDIUM
+    icon_path: Optional[str] = None
+    category: Optional[str] = None
+    user_info: Dict[str, Any] = field(default_factory=dict)
+    thread_id: Optional[str] = None
+    delay: float = 0.0
 
 
-class NotificationChannel:
-    """Base class for notification channels."""
-    
-    def __init__(self, name: str):
-        self.name = name
-        self._enabled = True
-    
-    def enable(self) -> None:
-        """Enable this channel."""
-        self._enabled = True
-    
-    def disable(self) -> None:
-        """Disable this channel."""
-        self._enabled = False
-    
-    @property
-    def is_enabled(self) -> bool:
-        """Check if channel is enabled."""
-        return self._enabled
-    
-    def send(self, notification: Notification) -> bool:
-        """
-        Send a notification through this channel.
-        
-        Args:
-            notification: Notification to send
-            
-        Returns:
-            True if sent successfully, False otherwise
-        """
-        raise NotImplementedError
-
-
-class ConsoleChannel(NotificationChannel):
-    """Console output notification channel."""
-    
-    def __init__(self):
-        super().__init__("console")
-    
-    def send(self, notification: Notification) -> bool:
-        """Send notification to console."""
-        try:
-            prefix = self._get_prefix(notification.priority)
-            print(f"{prefix} [{notification.title}] {notification.message}")
-            return True
-        except Exception as e:
-            notification.error = str(e)
-            return False
-    
-    def _get_prefix(self, priority: NotificationPriority) -> str:
-        """Get console prefix for priority."""
-        prefixes = {
-            NotificationPriority.LOW: "[INFO]",
-            NotificationPriority.NORMAL: "[INFO]",
-            NotificationPriority.HIGH: "[WARN]",
-            NotificationPriority.URGENT: "[ERROR]"
-        }
-        return prefixes.get(priority, "[INFO]")
-
-
-class LogChannel(NotificationChannel):
-    """Logging notification channel."""
-    
-    def __init__(self, log_file: Optional[str] = None):
-        super().__init__("log")
-        self.log_file = log_file
-    
-    def send(self, notification: Notification) -> bool:
-        """Log notification to file or logger."""
-        try:
-            timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-            log_entry = (
-                f"[{timestamp}] [{notification.priority.name}] "
-                f"{notification.title}: {notification.message}\n"
-            )
-            
-            if self.log_file:
-                with open(self.log_file, "a") as f:
-                    f.write(log_entry)
-            else:
-                # Use Python's logging module
-                import logging
-                logger = logging.getLogger("automation")
-                logger.info(log_entry)
-            
-            return True
-        except Exception as e:
-            notification.error = str(e)
-            return False
-
-
-class CallbackChannel(NotificationChannel):
-    """Callback-based notification channel."""
-    
-    def __init__(self, callback: Callable[[Notification], None]):
-        super().__init__("callback")
-        self.callback = callback
-    
-    def send(self, notification: Notification) -> bool:
-        """Execute callback with notification."""
-        try:
-            self.callback(notification)
-            return True
-        except Exception as e:
-            notification.error = str(e)
-            return False
+@dataclass
+class NotificationResponse:
+    """Response from notification interaction."""
+    action_id: str
+    notification: Notification
+    timestamp: float = 0.0
 
 
 class NotificationManager:
+    """Manages notifications for the application.
+    
+    Provides a unified interface for creating and sending notifications
+    using the macOS NSUserNotification system.
+    
+    Attributes:
+        app_name: Application name shown in notifications
+        default_sound: Default sound for notifications
     """
-    Manages notification dispatch to multiple channels.
     
-    Example:
-        manager = NotificationManager()
-        manager.add_channel(ConsoleChannel())
-        manager.notify(Notification(title="Done", message="Task completed"))
-    """
+    def __init__(
+        self,
+        app_name: str = "Application",
+        default_sound: NotificationSound = NotificationSound.DEFAULT,
+    ):
+        self.app_name = app_name
+        self.default_sound = default_sound
+        self._callbacks: Dict[str, List[Callable]] = {
+            'notification_opened': [],
+            'notification_action': [],
+            'notification_dismissed': [],
+        }
+        self._history: List[Notification] = []
     
-    def __init__(self):
-        self._channels: list[NotificationChannel] = []
-        self._history: list[Notification] = []
-        self._max_history: int = 100
+    def send(
+        self,
+        notification: Notification,
+        wait_for_response: bool = False,
+    ) -> Optional[NotificationResponse]:
+        """Send a notification.
+        
+        Args:
+            notification: Notification to send
+            wait_for_response: Whether to wait for user interaction
+            
+        Returns:
+            NotificationResponse if wait_for_response is True
+        """
+        self._history.append(notification)
+        
+        sound = notification.sound.value if notification.sound != NotificationSound.NONE else ""
+        
+        try:
+            cmd = [
+                'osascript',
+                '-e',
+                f'display notification "{notification.body}" '
+                f'with title "{notification.title}"'
+                + (f' subtitle "{notification.subtitle}"' if notification.subtitle else '')
+                + (f' sound name "{sound}"' if sound else ''),
+            ]
+            
+            subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=5,
+            )
+            
+            return None
+            
+        except Exception:
+            pass
+        
+        return None
     
-    def add_channel(self, channel: NotificationChannel) -> None:
-        """Add a notification channel."""
-        self._channels.append(channel)
-    
-    def remove_channel(self, name: str) -> bool:
-        """Remove a channel by name."""
-        for i, channel in enumerate(self._channels):
-            if channel.name == name:
-                del self._channels[i]
-                return True
-        return False
-    
-    def notify(
+    def send_simple(
         self,
         title: str,
-        message: str,
-        priority: NotificationPriority = NotificationPriority.NORMAL,
-        metadata: Optional[dict[str, Any]] = None
-    ) -> Notification:
-        """
-        Send a notification to all enabled channels.
+        body: str = "",
+        sound: NotificationSound = NotificationSound.DEFAULT,
+    ) -> None:
+        """Send a simple notification.
         
         Args:
             title: Notification title
-            message: Notification message
-            priority: Notification priority
-            metadata: Additional metadata
-            
-        Returns:
-            The created Notification object
+            body: Notification body
+            sound: Sound to play
         """
         notification = Notification(
             title=title,
-            message=message,
-            priority=priority,
-            metadata=metadata or {}
+            body=body,
+            sound=sound,
         )
-        
-        self._send_to_channels(notification)
-        self._add_to_history(notification)
-        
-        return notification
+        self.send(notification)
     
-    def _send_to_channels(self, notification: Notification) -> None:
-        """Send notification to all enabled channels."""
-        notification.status = NotificationStatus.PENDING
-        
-        success_count = 0
-        for channel in self._channels:
-            if channel.is_enabled:
-                try:
-                    if channel.send(notification):
-                        success_count += 1
-                except Exception as e:
-                    notification.error = str(e)
-        
-        if success_count > 0:
-            notification.status = NotificationStatus.SENT
-            notification.sent_at = time.time()
-        else:
-            notification.status = NotificationStatus.FAILED
+    def send_with_icon(
+        self,
+        notification: Notification,
+        icon_path: str,
+    ) -> None:
+        """Send notification with custom icon."""
+        notification.icon_path = icon_path
+        self.send(notification)
     
-    def _add_to_history(self, notification: Notification) -> None:
-        """Add notification to history."""
-        self._history.append(notification)
-        if len(self._history) > self._max_history:
-            self._history.pop(0)
-    
-    def get_history(
-        self, 
-        limit: int = 50,
-        priority_filter: Optional[NotificationPriority] = None
-    ) -> list[Notification]:
-        """
-        Get notification history.
+    def send_delayed(
+        self,
+        notification: Notification,
+        delay: float,
+    ) -> None:
+        """Send notification after delay.
         
         Args:
-            limit: Maximum number of notifications to return
-            priority_filter: Filter by priority level
+            notification: Notification to send
+            delay: Delay in seconds
+        """
+        import time
+        import threading
+        
+        def delayed_send():
+            time.sleep(delay)
+            self.send(notification)
+        
+        thread = threading.Thread(target=delayed_send)
+        thread.daemon = True
+        thread.start()
+    
+    def get_history(self, limit: Optional[int] = None) -> List[Notification]:
+        """Get notification history.
+        
+        Args:
+            limit: Maximum number of entries
             
         Returns:
-            List of notifications
+            List of sent notifications
         """
-        history = self._history
-        
-        if priority_filter is not None:
-            history = [n for n in history if n.priority == priority_filter]
-        
-        return history[-limit:]
+        if limit:
+            return self._history[-limit:]
+        return self._history.copy()
     
     def clear_history(self) -> None:
         """Clear notification history."""
         self._history.clear()
     
-    def get_pending_count(self) -> int:
-        """Get count of pending notifications."""
-        return sum(
-            1 for n in self._history 
-            if n.status == NotificationStatus.PENDING
-        )
-
-
-class AlertNotification(Notification):
-    """Extended notification for alerts with additional alert-specific fields."""
+    def on(self, event: str, callback: Callable) -> None:
+        """Register event callback."""
+        if event in self._callbacks:
+            self._callbacks[event].append(callback)
     
-    def __init__(
+    def _notify(self, event: str, *args) -> None:
+        """Notify callbacks of event."""
+        for callback in self._callbacks.get(event, []):
+            try:
+                callback(*args)
+            except Exception:
+                pass
+
+
+class NotificationCategory:
+    """Notification category with actions.
+    
+    Defines a category of notifications with associated actions
+    that users can take directly from the notification.
+    
+    Attributes:
+        id: Category identifier
+        actions: Available actions
+    """
+    
+    def __init__(self, id: str):
+        self.id = id
+        self._actions: List[Dict[str, str]] = []
+        self._callbacks: Dict[str, Callable] = {}
+    
+    def add_action(
         self,
+        action_id: str,
         title: str,
-        message: str,
-        alert_id: Optional[str] = None,
-        source: Optional[str] = None,
-        actions: Optional[list[str]] = None,
-        **kwargs
-    ):
-        super().__init__(title=title, message=message, **kwargs)
-        self.alert_id = alert_id or str(uuid.uuid4())
-        self.source = source
-        self.actions = actions or []
-        self.action_taken: Optional[str] = None
+        destructive: bool = False,
+    ) -> None:
+        """Add an action to the category."""
+        self._actions.append({
+            'id': action_id,
+            'title': title,
+            'destructive': destructive,
+        })
+    
+    def set_callback(self, action_id: str, callback: Callable[[Notification], None]) -> None:
+        """Set callback for action."""
+        self._callbacks[action_id] = callback
+    
+    def handle_action(self, action_id: str, notification: Notification) -> None:
+        """Handle action from notification."""
+        callback = self._callbacks.get(action_id)
+        if callback:
+            try:
+                callback(notification)
+            except Exception:
+                pass
+
+
+class NotificationScheduler:
+    """Schedule notifications for later delivery."""
+    
+    def __init__(self, manager: NotificationManager):
+        self.manager = manager
+        self._scheduled: List[Dict[str, Any]] = []
+    
+    def schedule(
+        self,
+        notification: Notification,
+        fire_date: float,
+    ) -> str:
+        """Schedule a notification.
+        
+        Args:
+            notification: Notification to send
+            fire_date: Unix timestamp to fire
+            
+        Returns:
+            Schedule ID
+        """
+        import uuid
+        
+        schedule_id = str(uuid.uuid4())
+        self._scheduled.append({
+            'id': schedule_id,
+            'notification': notification,
+            'fire_date': fire_date,
+            'is_repeating': False,
+        })
+        
+        return schedule_id
+    
+    def schedule_repeating(
+        self,
+        notification: Notification,
+        interval: float,
+    ) -> str:
+        """Schedule a repeating notification.
+        
+        Args:
+            notification: Notification to send
+            interval: Repeat interval in seconds
+            
+        Returns:
+            Schedule ID
+        """
+        import uuid
+        
+        schedule_id = str(uuid.uuid4())
+        self._scheduled.append({
+            'id': schedule_id,
+            'notification': notification,
+            'fire_date': 0,
+            'interval': interval,
+            'is_repeating': True,
+        })
+        
+        return schedule_id
+    
+    def cancel(self, schedule_id: str) -> bool:
+        """Cancel a scheduled notification."""
+        for i, scheduled in enumerate(self._scheduled):
+            if scheduled['id'] == schedule_id:
+                self._scheduled.pop(i)
+                return True
+        return False
+    
+    def cancel_all(self) -> None:
+        """Cancel all scheduled notifications."""
+        self._scheduled.clear()
+    
+    def get_pending(self) -> List[Dict[str, Any]]:
+        """Get pending scheduled notifications."""
+        return self._scheduled.copy()
+
+
+class NotificationCenterObserver:
+    """Observe notification center notifications."""
+    
+    def __init__(self):
+        self._callbacks: List[Callable[[Notification], None]] = []
+    
+    def add_callback(self, callback: Callable[[Notification], None]) -> None:
+        """Add notification callback."""
+        self._callbacks.append(callback)
+    
+    def remove_callback(self, callback: Callable[[Notification], None]) -> None:
+        """Remove notification callback."""
+        if callback in self._callbacks:
+            self._callbacks.remove(callback)
+    
+    def notify(self, notification: Notification) -> None:
+        """Notify all callbacks of new notification."""
+        for callback in self._callbacks:
+            try:
+                callback(notification)
+            except Exception:
+                pass

@@ -1,378 +1,269 @@
-"""
-Touch Bar manipulation utilities for macOS automation.
+"""Touch Bar Integration Utilities.
 
-Provides utilities for interacting with the Touch Bar on MacBook Pro,
-including button creation, text display, and event handling.
+This module provides Touch Bar integration utilities for macOS applications,
+including Touch Bar item management, customizable control strips, and
+Touch Bar event handling.
+
+Example:
+    >>> from touch_bar_utils import TouchBarManager, TouchBarButton
+    >>> manager = TouchBarManager()
+    >>> manager.add_button(TouchBarButton("Copy"))
 """
 
 from __future__ import annotations
 
-from typing import List, Optional, Callable, Dict, Any
-from dataclasses import dataclass
-from enum import Enum
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 class TouchBarItemType(Enum):
-    """Types of Touch Bar items."""
-    BUTTON = "button"
-    LABEL = "label"
-    GROUP = "group"
-    SLIDER = "slider"
-    SCRUBBER = "scrubber"
-    POPOVER = "popover"
-    SEGMENTED = "segmented"
+    """Touch Bar item types."""
+    BUTTON = auto()
+    LABEL = auto()
+    POPOVER = auto()
+    SLIDER = auto()
+    SEGMENTED = auto()
+    SCRUBBER = auto()
+    GROUP = auto()
+    CUSTOM = auto()
 
 
 @dataclass
 class TouchBarItem:
-    """Represents a single Touch Bar item."""
-    identifier: str
-    type: TouchBarItemType
-    label: str = ""
-    text: str = ""
-    callback: Optional[Callable[[], None]] = None
-    icon: Optional[bytes] = None
-    children: List["TouchBarItem"] = None
+    """Base class for Touch Bar items.
     
-    def __post_init__(self):
-        if self.children is None:
-            self.children = []
-    
-    @property
-    def type_name(self) -> str:
-        return self.type.value
+    Attributes:
+        id: Unique item identifier
+        type: Item type
+        title: Display title
+        is_enabled: Whether item is enabled
+    """
+    id: str
+    type: TouchBarItemType = TouchBarItemType.BUTTON
+    title: str = ""
+    is_enabled: bool = True
+    icon: Optional[str] = None
+    action: Optional[Callable[[], None]] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class TouchBarLayout:
-    """Defines a Touch Bar layout configuration."""
-    identifier: str
-    items: List[TouchBarItem]
-    default_identifier: Optional[str] = None
+class TouchBarButton(TouchBarItem):
+    """Touch Bar button item."""
+    def __init__(
+        self,
+        id: str,
+        title: str = "",
+        icon: Optional[str] = None,
+        action: Optional[Callable[[], None]] = None,
+    ):
+        super().__init__(id, TouchBarItemType.BUTTON, title, True, icon, action)
+
+
+@dataclass
+class TouchBarLabel(TouchBarItem):
+    """Touch Bar label item."""
+    def __init__(
+        self,
+        id: str,
+        title: str = "",
+    ):
+        super().__init__(id, TouchBarItemType.LABEL, title)
+
+
+@dataclass
+class TouchBarSegment:
+    """A segment in a segmented control."""
+    id: str
+    title: str = ""
+    icon: Optional[str] = None
+    is_enabled: bool = True
+
+
+class TouchBarSegmentedControl(TouchBarItem):
+    """Touch Bar segmented control item."""
+    def __init__(self, id: str, segments: Optional[List[TouchBarSegment]] = None):
+        super().__init__(id, TouchBarItemType.SEGMENTED)
+        self.segments: List[TouchBarSegment] = segments or []
+        self.selected_index: Optional[int] = None
+    
+    def add_segment(self, segment: TouchBarSegment) -> None:
+        self.segments.append(segment)
+    
+    def select_segment(self, index: int) -> None:
+        if 0 <= index < len(self.segments):
+            self.selected_index = index
+
+
+class TouchBarSlider(TouchBarItem):
+    """Touch Bar slider item."""
+    def __init__(
+        self,
+        id: str,
+        min_value: float = 0.0,
+        max_value: float = 1.0,
+        value: float = 0.5,
+    ):
+        super().__init__(id, TouchBarItemType.SLIDER)
+        self.min_value = min_value
+        self.max_value = max_value
+        self.value = value
+        self.on_change: Optional[Callable[[float], None]] = None
 
 
 class TouchBarManager:
-    """Manages Touch Bar interactions."""
+    """Manages Touch Bar items and configuration.
+    
+    Provides a high-level interface for creating and managing
+    Touch Bar layouts on supported macOS applications.
+    
+    Attributes:
+        items: Dictionary of registered items
+        default_items: Items shown by default
+    """
     
     def __init__(self):
-        """Initialize Touch Bar manager."""
-        self._layouts: Dict[str, TouchBarLayout] = {}
-        self._callbacks: Dict[str, Callable] = {}
-        self._current_layout: Optional[str] = None
-    
-    def register_layout(self, layout: TouchBarLayout) -> None:
-        """Register a Touch Bar layout.
-        
-        Args:
-            layout: TouchBarLayout to register
-        """
-        self._layouts[layout.identifier] = layout
-    
-    def unregister_layout(self, identifier: str) -> bool:
-        """Unregister a layout.
-        
-        Args:
-            identifier: Layout identifier
-            
-        Returns:
-            True if layout was removed
-        """
-        if identifier in self._layouts:
-            del self._layouts[identifier]
-            return True
-        return False
-    
-    def switch_to_layout(self, identifier: str) -> bool:
-        """Switch to a registered layout.
-        
-        Args:
-            identifier: Layout identifier
-            
-        Returns:
-            True if switch was successful
-        """
-        if identifier not in self._layouts:
-            return False
-        
-        self._current_layout = identifier
-        return self._apply_layout(self._layouts[identifier])
-    
-    def _apply_layout(self, layout: TouchBarLayout) -> bool:
-        """Apply a layout to the Touch Bar.
-        
-        Args:
-            layout: Layout to apply
-            
-        Returns:
-            True if successful
-        """
-        # Note: This would require using private/undocumented APIs
-        # or Accessibility controls to actually manipulate the Touch Bar
-        # For now, we just track the state
-        return True
-    
-    def get_current_layout(self) -> Optional[TouchBarLayout]:
-        """Get the currently active layout.
-        
-        Returns:
-            Current layout or None
-        """
-        if self._current_layout:
-            return self._layouts.get(self._current_layout)
-        return None
-    
-    def create_button(
-        self,
-        identifier: str,
-        label: str,
-        callback: Optional[Callable[[], None]] = None,
-        icon: Optional[bytes] = None
-    ) -> TouchBarItem:
-        """Create a Touch Bar button.
-        
-        Args:
-            identifier: Unique identifier
-            label: Button label
-            callback: Optional callback on tap
-            icon: Optional icon data
-            
-        Returns:
-            TouchBarItem for the button
-        """
-        item = TouchBarItem(
-            identifier=identifier,
-            type=TouchBarItemType.BUTTON,
-            label=label,
-            callback=callback,
-            icon=icon
-        )
-        
-        if callback:
-            self._callbacks[identifier] = callback
-        
-        return item
-    
-    def create_label(
-        self,
-        identifier: str,
-        text: str
-    ) -> TouchBarItem:
-        """Create a Touch Bar label.
-        
-        Args:
-            identifier: Unique identifier
-            text: Label text
-            
-        Returns:
-            TouchBarItem for the label
-        """
-        return TouchBarItem(
-            identifier=identifier,
-            type=TouchBarItemType.LABEL,
-            text=text
-        )
-    
-    def create_group(
-        self,
-        identifier: str,
-        items: List[TouchBarItem],
-        label: str = ""
-    ) -> TouchBarItem:
-        """Create a grouped Touch Bar item.
-        
-        Args:
-            identifier: Unique identifier
-            items: Items to include in group
-            label: Optional group label
-            
-        Returns:
-            TouchBarItem for the group
-        """
-        return TouchBarItem(
-            identifier=identifier,
-            type=TouchBarItemType.GROUP,
-            label=label,
-            children=items
-        )
-    
-    def create_scrubber(
-        self,
-        identifier: str,
-        items: List[TouchBarItem],
-        callback: Optional[Callable[[int], None]] = None
-    ) -> TouchBarItem:
-        """Create a scrubber (horizontal scrolling list).
-        
-        Args:
-            identifier: Unique identifier
-            items: Items to display
-            callback: Optional callback with selected index
-            
-        Returns:
-            TouchBarItem for the scrubber
-        """
-        item = TouchBarItem(
-            identifier=identifier,
-            type=TouchBarItemType.SCRUBBER,
-            children=items,
-            callback=callback
-        )
-        
-        if callback:
-            self._callbacks[identifier] = callback
-        
-        return item
-    
-    def trigger_callback(self, identifier: str) -> bool:
-        """Trigger a callback by item identifier.
-        
-        Args:
-            identifier: Item identifier
-            
-        Returns:
-            True if callback was found and triggered
-        """
-        if identifier in self._callbacks:
-            callback = self._callbacks[identifier]
-            callback()
-            return True
-        return False
-    
-    def remove_callback(self, identifier: str) -> bool:
-        """Remove a callback.
-        
-        Args:
-            identifier: Item identifier
-            
-        Returns:
-            True if callback was removed
-        """
-        if identifier in self._callbacks:
-            del self._callbacks[identifier]
-            return True
-        return False
-    
-    def simulate_tap(self, identifier: str) -> bool:
-        """Simulate a tap on a Touch Bar item.
-        
-        Args:
-            identifier: Item identifier
-            
-        Returns:
-            True if tap was simulated
-        """
-        return self.trigger_callback(identifier)
-    
-    def get_item_count(self) -> int:
-        """Get count of registered items across all layouts.
-        
-        Returns:
-            Total item count
-        """
-        return sum(
-            len(layout.items) 
-            for layout in self._layouts.values()
-        )
-
-
-def create_default_touch_bar_layout(
-    items: List[Tuple[str, str, Optional[Callable]]]
-) -> TouchBarLayout:
-    """Create a default Touch Bar layout from simple specifications.
-    
-    Args:
-        items: List of (identifier, label, callback) tuples
-        
-    Returns:
-        TouchBarLayout configured with the items
-    """
-    manager = TouchBarManager()
-    touch_bar_items = []
-    
-    for identifier, label, callback in items:
-        item = manager.create_button(identifier, label, callback)
-        touch_bar_items.append(item)
-    
-    return TouchBarLayout(
-        identifier="default",
-        items=touch_bar_items,
-        default_identifier=touch_bar_items[0].identifier if touch_bar_items else None
-    )
-
-
-def get_touch_bar_availability() -> Dict[str, Any]:
-    """Check Touch Bar availability on this Mac.
-    
-    Returns:
-        Dictionary with availability info
-    """
-    import subprocess
-    
-    info = {
-        "available": False,
-        "model": None,
-        "has_function_row": True,
-    }
-    
-    # Check model identifier
-    try:
-        result = subprocess.run(
-            ["sysctl", "-n", "hw.model"],
-            capture_output=True,
-            text=True,
-            timeout=2
-        )
-        
-        if result.returncode == 0:
-            model = result.stdout.strip()
-            
-            # Touch Bar models (MacBook Pro from 2016-2020)
-            touchbar_models = [
-                "MacBookPro13,1", "MacBookPro13,2", "MacBookPro13,3",
-                "MacBookPro14,1", "MacBookPro14,2", "MacBookPro14,3",
-                "MacBookPro15,1", "MacBookPro15,2", "MacBookPro15,3",
-                "MacBookPro16,1", "MacBookPro16,2", "MacBookPro16,3", "MacBookPro16,4",
-                "MacBookPro17,1", "MacBookPro18,1", "MacBookPro18,2", "MacBookPro18,3",
-            ]
-            
-            info["model"] = model
-            info["available"] = any(model.startswith(m) for m in touchbar_models)
-    except Exception:
-        pass
-    
-    return info
-
-
-def convert_to_touch_bar_json(layout: TouchBarLayout) -> str:
-    """Convert a TouchBarLayout to JSON representation.
-    
-    Args:
-        layout: Layout to convert
-        
-    Returns:
-        JSON string representation
-    """
-    import json
-    
-    def item_to_dict(item: TouchBarItem) -> Dict:
-        result = {
-            "identifier": item.identifier,
-            "type": item.type_name,
+        self.items: Dict[str, TouchBarItem] = {}
+        self.default_items: List[str] = []
+        self._callbacks: Dict[str, List[Callable]] = {
+            'item_tapped': [],
+            'slider_changed': [],
+            'segment_selected': [],
         }
-        
-        if item.label:
-            result["label"] = item.label
-        if item.text:
-            result["text"] = item.text
-        if item.children:
-            result["children"] = [item_to_dict(c) for c in item.children]
-        
-        return result
     
-    data = {
-        "identifier": layout.identifier,
-        "defaultIdentifier": layout.default_identifier,
-        "items": [item_to_dict(item) for item in layout.items],
-    }
+    def add_item(self, item: TouchBarItem) -> None:
+        """Add an item to the Touch Bar."""
+        self.items[item.id] = item
     
-    return json.dumps(data, indent=2)
+    def remove_item(self, item_id: str) -> bool:
+        """Remove an item from the Touch Bar."""
+        if item_id in self.items:
+            del self.items[item_id]
+            if item_id in self.default_items:
+                self.default_items.remove(item_id)
+            return True
+        return False
+    
+    def get_item(self, item_id: str) -> Optional[TouchBarItem]:
+        """Get an item by ID."""
+        return self.items.get(item_id)
+    
+    def set_default_items(self, item_ids: List[str]) -> None:
+        """Set items shown by default."""
+        self.default_items = [id_ for id_ in item_ids if id_ in self.items]
+    
+    def add_to_default(self, item_id: str) -> None:
+        """Add item to default items."""
+        if item_id in self.items and item_id not in self.default_items:
+            self.default_items.append(item_id)
+    
+    def trigger_item(self, item_id: str) -> bool:
+        """Trigger an item's action."""
+        item = self.items.get(item_id)
+        if item and item.is_enabled and item.action:
+            try:
+                item.action()
+                self._notify('item_tapped', item)
+                return True
+            except Exception:
+                pass
+        return False
+    
+    def update_label(self, item_id: str, title: str) -> bool:
+        """Update a label item's text."""
+        item = self.items.get(item_id)
+        if item and item.type == TouchBarItemType.LABEL:
+            item.title = title
+            return True
+        return False
+    
+    def update_button(self, item_id: str, title: Optional[str] = None, icon: Optional[str] = None) -> bool:
+        """Update a button item."""
+        item = self.items.get(item_id)
+        if item and item.type == TouchBarItemType.BUTTON:
+            if title is not None:
+                item.title = title
+            if icon is not None:
+                item.icon = icon
+            return True
+        return False
+    
+    def set_slider_value(self, item_id: str, value: float) -> bool:
+        """Set slider value."""
+        item = self.items.get(item_id)
+        if item and item.type == TouchBarItemType.SLIDER:
+            item.value = max(item.min_value, min(item.max_value, value))
+            self._notify('slider_changed', item, item.value)
+            return True
+        return False
+    
+    def on(self, event: str, callback: Callable) -> None:
+        """Register event callback."""
+        if event in self._callbacks:
+            self._callbacks[event].append(callback)
+    
+    def _notify(self, event: str, *args) -> None:
+        """Notify callbacks of event."""
+        for callback in self._callbacks.get(event, []):
+            try:
+                callback(*args)
+            except Exception:
+                pass
+    
+    def get_layout(self) -> List[TouchBarItem]:
+        """Get the current Touch Bar layout."""
+        items = []
+        for item_id in self.default_items:
+            item = self.items.get(item_id)
+            if item:
+                items.append(item)
+        return items
+
+
+class TouchBarPreset:
+    """Pre-configured Touch Bar layouts."""
+    
+    @staticmethod
+    def editing_preset() -> TouchBarManager:
+        """Preset for text editing."""
+        manager = TouchBarManager()
+        
+        manager.add_item(TouchBarButton("undo", "Undo", action=lambda: None))
+        manager.add_item(TouchBarButton("redo", "Redo", action=lambda: None))
+        manager.add_item(TouchBarLabel("label1", ""))
+        manager.add_item(TouchBarButton("cut", "Cut", action=lambda: None))
+        manager.add_item(TouchBarButton("copy", "Copy", action=lambda: None))
+        manager.add_item(TouchBarButton("paste", "Paste", action=lambda: None))
+        
+        manager.set_default_items(["undo", "redo", "label1", "cut", "copy", "paste"])
+        return manager
+    
+    @staticmethod
+    def media_preset() -> TouchBarManager:
+        """Preset for media playback."""
+        manager = TouchBarManager()
+        
+        manager.add_item(TouchBarButton("previous", "⏮", action=lambda: None))
+        manager.add_item(TouchBarButton("play", "▶", action=lambda: None))
+        manager.add_item(TouchBarButton("next", "⏭", action=lambda: None))
+        
+        slider = TouchBarSlider("scrubber", 0.0, 100.0, 50.0)
+        manager.add_item(slider)
+        
+        manager.set_default_items(["previous", "play", "next", "scrubber"])
+        return manager
+    
+    @staticmethod
+    def navigation_preset() -> TouchBarManager:
+        """Preset for navigation."""
+        manager = TouchBarManager()
+        
+        manager.add_item(TouchBarButton("back", "←", action=lambda: None))
+        manager.add_item(TouchBarButton("forward", "→", action=lambda: None))
+        manager.add_item(TouchBarLabel("title", "Title"))
+        manager.add_item(TouchBarButton("home", "⌂", action=lambda: None))
+        manager.add_item(TouchBarButton("refresh", "↻", action=lambda: None))
+        
+        manager.set_default_items(["back", "forward", "title", "home", "refresh"])
+        return manager
