@@ -1,261 +1,289 @@
-"""Automation recovery action module for RabAI AutoClick.
+"""Automation Recovery and Rollback System.
 
-Provides recovery mechanisms for automation:
-- AutomationRecoveryAction: Recover from automation failures
-- AutomationRollbackAction: Rollback automation state
-- AutomationHealthCheckAction: Health check automation
-- AutomationCircuitBreakerAction: Circuit breaker for automation
+This module provides automation recovery capabilities:
+- Automatic retry with backoff
+- Checkpoint-based recovery
+- State snapshots
+- Rollback orchestration
+
+Example:
+    >>> from actions.automation_recovery_action import RecoveryManager
+    >>> manager = RecoveryManager()
+    >>> manager.save_checkpoint("deploy_v2", state)
+    >>> recovered = manager.restore_checkpoint("deploy_v2")
 """
 
+from __future__ import annotations
+
+import json
 import time
-from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta
+import logging
+import threading
+from typing import Any, Callable, Optional
+from dataclasses import dataclass, field
 from enum import Enum
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class CircuitState(Enum):
-    """Circuit breaker states."""
-    CLOSED = "closed"
-    OPEN = "open"
-    HALF_OPEN = "half_open"
+class RecoveryStatus(Enum):
+    """Recovery status."""
+    IDLE = "idle"
+    IN_PROGRESS = "in_progress"
+    SUCCESS = "success"
+    FAILED = "failed"
 
 
-class AutomationRecoveryAction(BaseAction):
-    """Recover from automation failures."""
-    action_type = "automation_recovery"
-    display_name = "自动化恢复"
-    description = "从自动化失败中恢复"
+@dataclass
+class Checkpoint:
+    """A saved state checkpoint."""
+    checkpoint_id: str
+    name: str
+    state: dict[str, Any]
+    created_at: float
+    version: int
+    description: str = ""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            failure_context = params.get("failure_context", {})
-            recovery_strategy = params.get("recovery_strategy", "retry")
-            max_recovery_attempts = params.get("max_recovery_attempts", 3)
-            fallback_action = params.get("fallback_action")
-            checkpoint_data = params.get("checkpoint_data")
-            callback = params.get("callback")
 
-            recovery_attempt = 0
-            last_error = None
+@dataclass
+class RecoveryResult:
+    """Result of a recovery operation."""
+    success: bool
+    status: RecoveryStatus
+    recovered_state: Optional[dict[str, Any]] = None
+    error: Optional[str] = None
+    duration_ms: float = 0.0
 
-            while recovery_attempt <= max_recovery_attempts:
-                try:
-                    if recovery_strategy == "retry":
-                        time.sleep(2.0 ** recovery_attempt)
-                    elif recovery_strategy == "rollback" and checkpoint_data:
-                        return ActionResult(success=True, message=f"Rolled back to checkpoint", data={"checkpoint_data": checkpoint_data})
-                    elif recovery_strategy == "fallback" and callable(fallback_action):
-                        result = fallback_action()
-                        return ActionResult(success=True, message="Fallback action executed", data={"result": result})
 
-                    raise Exception(f"Recovery attempt {recovery_attempt} simulated failure")
+class RecoveryManager:
+    """Manages automation recovery and rollback."""
 
-                except Exception as e:
-                    last_error = e
-                    recovery_attempt += 1
+    def __init__(
+        self,
+        max_checkpoints: int = 100,
+        checkpoint_ttl: float = 86400 * 7,
+    ) -> None:
+        """Initialize the recovery manager.
 
-            if callable(fallback_action):
-                try:
-                    result = fallback_action()
-                    return ActionResult(success=True, message="Fallback after recovery failure", data={"result": result})
-                except Exception:
-                    pass
+        Args:
+            max_checkpoints: Maximum checkpoints to retain per name.
+            checkpoint_ttl: Checkpoint TTL in seconds.
+        """
+        self._checkpoints: dict[str, list[Checkpoint]] = {}
+        self._max_checkpoints = max_checkpoints
+        self._checkpoint_ttl = checkpoint_ttl
+        self._lock = threading.RLock()
+        self._stats = {"checkpoints_saved": 0, "recoveries": 0, "rollbacks": 0}
 
-            return ActionResult(
-                success=False,
-                message=f"Recovery failed after {recovery_attempt} attempts: {last_error}",
-                data={"attempts": recovery_attempt, "last_error": str(last_error)}
+    def save_checkpoint(
+        self,
+        name: str,
+        state: dict[str, Any],
+        description: str = "",
+        checkpoint_id: Optional[str] = None,
+    ) -> Checkpoint:
+        """Save a state checkpoint.
+
+        Args:
+            name: Checkpoint name (e.g., workflow name).
+            state: State dict to save.
+            description: Checkpoint description.
+            checkpoint_id: Custom ID. None = auto-generate.
+
+        Returns:
+            The created Checkpoint.
+        """
+        import uuid
+        cid = checkpoint_id or str(uuid.uuid4())[:8]
+
+        with self._lock:
+            if name not in self._checkpoints:
+                self._checkpoints[name] = []
+
+            existing = self._checkpoints[name]
+            version = (existing[-1].version + 1) if existing else 1
+
+            checkpoint = Checkpoint(
+                checkpoint_id=cid,
+                name=name,
+                state=state,
+                created_at=time.time(),
+                version=version,
+                description=description,
             )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Recovery error: {e}")
 
+            self._checkpoints[name].append(checkpoint)
+            self._stats["checkpoints_saved"] += 1
 
-class AutomationRollbackAction(BaseAction):
-    """Rollback automation state."""
-    action_type = "automation_rollback"
-    display_name = "自动化回滚"
-    description = "回滚自动化状态"
+            if len(self._checkpoints[name]) > self._max_checkpoints:
+                self._checkpoints[name] = self._checkpoints[name][-self._max_checkpoints:]
 
-    def __init__(self):
-        super().__init__()
-        self._history: List[Dict[str, Any]] = []
+            logger.info("Saved checkpoint %s (v%d) for %s", cid, version, name)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "rollback")
-            steps = params.get("steps", 1)
-            state_data = params.get("state_data", {})
-            save_state = params.get("save_state", True)
+        return checkpoint
 
-            if operation == "save":
-                state_id = f"state_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
-                self._history.append({
-                    "id": state_id,
-                    "data": state_data,
-                    "timestamp": datetime.now().isoformat(),
-                })
-                return ActionResult(success=True, message=f"State saved as {state_id}", data={"state_id": state_id, "history_size": len(self._history)})
+    def restore_checkpoint(
+        self,
+        name: str,
+        version: Optional[int] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Restore a checkpoint.
 
-            elif operation == "rollback":
-                if not self._history:
-                    return ActionResult(success=False, message="No saved states to rollback to")
+        Args:
+            name: Checkpoint name.
+            version: Specific version. None = latest.
 
-                target_steps = min(steps, len(self._history))
-                restored_state = self._history[-target_steps]["data"]
-                self._history = self._history[:-target_steps]
+        Returns:
+            State dict if found, None otherwise.
+        """
+        with self._lock:
+            checkpoints = self._checkpoints.get(name, [])
+            if not checkpoints:
+                return None
 
-                return ActionResult(
+            if version is not None:
+                for cp in reversed(checkpoints):
+                    if cp.version == version:
+                        self._stats["recoveries"] += 1
+                        return cp.state
+                return None
+            else:
+                self._stats["recoveries"] += 1
+                return checkpoints[-1].state
+
+    def list_checkpoints(
+        self,
+        name: Optional[str] = None,
+    ) -> list[Checkpoint]:
+        """List checkpoints.
+
+        Args:
+            name: Filter by name. None = all.
+
+        Returns:
+            List of Checkpoints.
+        """
+        with self._lock:
+            if name:
+                return list(self._checkpoints.get(name, []))
+            all_cp = []
+            for cps in self._checkpoints.values():
+                all_cp.extend(cps)
+            return sorted(all_cp, key=lambda c: c.created_at, reverse=True)
+
+    def delete_checkpoint(
+        self,
+        name: str,
+        version: Optional[int] = None,
+    ) -> bool:
+        """Delete checkpoints.
+
+        Args:
+            name: Checkpoint name.
+            version: Specific version. None = all for name.
+
+        Returns:
+            True if deleted.
+        """
+        with self._lock:
+            if name not in self._checkpoints:
+                return False
+
+            if version is None:
+                del self._checkpoints[name]
+                return True
+
+            self._checkpoints[name] = [
+                cp for cp in self._checkpoints[name] if cp.version != version
+            ]
+            return True
+
+    def execute_with_recovery(
+        self,
+        operation: Callable[[], dict[str, Any]],
+        name: str,
+        rollback: Optional[Callable[[dict], None]] = None,
+        max_retries: int = 3,
+    ) -> RecoveryResult:
+        """Execute an operation with automatic recovery.
+
+        Args:
+            operation: Operation to execute.
+            name: Recovery checkpoint name.
+            rollback: Rollback function if operation fails.
+            max_retries: Maximum retry attempts.
+
+        Returns:
+            RecoveryResult.
+        """
+        start = time.time()
+        last_error = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                result = operation()
+                duration_ms = (time.time() - start) * 1000
+                self.save_checkpoint(name, result, description=f"attempt_{attempt}")
+                return RecoveryResult(
                     success=True,
-                    message=f"Rolled back {target_steps} state(s)",
-                    data={"restored_state": restored_state, "states_remaining": len(self._history)}
+                    status=RecoveryStatus.SUCCESS,
+                    recovered_state=result,
+                    duration_ms=duration_ms,
                 )
+            except Exception as e:
+                last_error = str(e)
+                logger.error("Operation %s failed (attempt %d): %s", name, attempt + 1, e)
+                if attempt < max_retries:
+                    recovered_state = self.restore_checkpoint(name)
+                    if recovered_state:
+                        logger.info("Restored checkpoint for retry %d", attempt + 1)
 
-            elif operation == "history":
-                return ActionResult(success=True, message=f"{len(self._history)} saved states", data={"history": self._history})
-
-            elif operation == "clear":
-                count = len(self._history)
-                self._history.clear()
-                return ActionResult(success=True, message=f"Cleared {count} history entries")
-
-            return ActionResult(success=False, message=f"Unknown operation: {operation}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Rollback error: {e}")
-
-
-class AutomationHealthCheckAction(BaseAction):
-    """Health check for automation."""
-    action_type = "automation_health_check"
-    display_name = "自动化健康检查"
-    description = "检查自动化组件健康状态"
-
-    def __init__(self):
-        super().__init__()
-        self._component_status: Dict[str, Dict[str, Any]] = {}
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "check")
-            components = params.get("components", [])
-            threshold = params.get("failure_threshold", 3)
-
-            if operation == "check":
-                if not components:
-                    return ActionResult(success=True, message="No components specified", data={"components": self._component_status})
-
-                results = {}
-                overall_healthy = True
-
-                for component in components:
-                    status = self._component_status.get(component, {"failures": 0, "state": "unknown"})
-                    healthy = status.get("failures", 0) < threshold and status.get("state") != "unhealthy"
-                    results[component] = {
-                        "healthy": healthy,
-                        "failures": status.get("failures", 0),
-                        "last_check": status.get("last_check"),
-                    }
-                    if not healthy:
-                        overall_healthy = False
-
-                return ActionResult(
-                    success=overall_healthy,
-                    message=f"Health check: {'ALL HEALTHY' if overall_healthy else 'DEGRADED'}",
-                    data={"results": results, "overall_healthy": overall_healthy}
-                )
-
-            elif operation == "report":
-                component = params.get("component")
-                state = params.get("state", "healthy")
-                if component:
-                    self._component_status[component] = {
-                        "state": state,
-                        "failures": self._component_status.get(component, {}).get("failures", 0),
-                        "last_check": datetime.now().isoformat(),
-                    }
-                return ActionResult(success=True, message=f"Reported state for {component}")
-
-            elif operation == "reset":
-                component = params.get("component")
-                if component and component in self._component_status:
-                    self._component_status[component]["failures"] = 0
-                    self._component_status[component]["state"] = "healthy"
-                return ActionResult(success=True, message=f"Reset health for {component}")
-
-            return ActionResult(success=False, message=f"Unknown operation: {operation}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Health check error: {e}")
-
-
-class AutomationCircuitBreakerAction(BaseAction):
-    """Circuit breaker for automation."""
-    action_type = "automation_circuit_breaker"
-    display_name = "自动化断路器"
-    description = "自动化断路器保护"
-
-    def __init__(self):
-        super().__init__()
-        self._circuit_state = CircuitState.CLOSED
-        self._failure_count = 0
-        self._success_count = 0
-        self._last_failure_time: Optional[float] = None
-        self._half_open_attempts = 0
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "call")
-            action = params.get("action")
-            failure_threshold = params.get("failure_threshold", 5)
-            success_threshold = params.get("success_threshold", 3)
-            timeout = params.get("timeout", 60)
-            reset_timeout = params.get("reset_timeout", 30)
-
-            if operation == "state":
-                return ActionResult(success=True, message=f"Circuit is {self._circuit_state.value}", data={"state": self._circuit_state.value, "failures": self._failure_count})
-
-            if self._circuit_state == CircuitState.OPEN:
-                if self._last_failure_time and time.time() - self._last_failure_time >= reset_timeout:
-                    self._circuit_state = CircuitState.HALF_OPEN
-                    self._half_open_attempts = 0
-                    return ActionResult(success=True, message="Circuit transitioned to HALF_OPEN", data={"state": self._circuit_state.value})
-                return ActionResult(success=False, message="Circuit is OPEN, request rejected", data={"state": self._circuit_state.value, "retry_after": reset_timeout})
-
-            if operation == "call" and callable(action):
+        if rollback:
+            state = self.restore_checkpoint(name)
+            if state:
                 try:
-                    result = action()
-                    self._on_success(success_threshold)
-                    return ActionResult(success=True, message="Action succeeded", data={"result": result})
+                    rollback(state)
+                    self._stats["rollbacks"] += 1
                 except Exception as e:
-                    self._on_failure(failure_threshold)
-                    return ActionResult(success=False, message=f"Action failed: {e}", data={"state": self._circuit_state.value, "failures": self._failure_count})
+                    logger.error("Rollback failed: %s", e)
 
-            return ActionResult(success=False, message=f"Unknown operation or non-callable action: {operation}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Circuit breaker error: {e}")
+        duration_ms = (time.time() - start) * 1000
+        return RecoveryResult(
+            success=False,
+            status=RecoveryStatus.FAILED,
+            error=last_error,
+            duration_ms=duration_ms,
+        )
 
-    def _on_success(self, success_threshold: int) -> None:
-        """Handle successful call."""
-        self._success_count += 1
-        self._failure_count = 0
+    def cleanup_expired(self) -> int:
+        """Remove expired checkpoints.
 
-        if self._circuit_state == CircuitState.HALF_OPEN:
-            self._half_open_attempts += 1
-            if self._half_open_attempts >= success_threshold:
-                self._circuit_state = CircuitState.CLOSED
-                self._half_open_attempts = 0
-                self._success_count = 0
+        Returns:
+            Number of checkpoints removed.
+        """
+        now = time.time()
+        removed = 0
 
-    def _on_failure(self, failure_threshold: int) -> None:
-        """Handle failed call."""
-        self._failure_count += 1
-        self._success_count = 0
-        self._last_failure_time = time.time()
+        with self._lock:
+            for name in list(self._checkpoints.keys()):
+                before = len(self._checkpoints[name])
+                self._checkpoints[name] = [
+                    cp for cp in self._checkpoints[name]
+                    if (now - cp.created_at) < self._checkpoint_ttl
+                ]
+                removed += before - len(self._checkpoints[name])
+                if not self._checkpoints[name]:
+                    del self._checkpoints[name]
 
-        if self._failure_count >= failure_threshold:
-            self._circuit_state = CircuitState.OPEN
+        if removed:
+            logger.info("Cleaned up %d expired checkpoints", removed)
+        return removed
+
+    def get_stats(self) -> dict[str, Any]:
+        """Get recovery statistics."""
+        with self._lock:
+            return {
+                **self._stats,
+                "total_checkpoint_names": len(self._checkpoints),
+                "total_checkpoints": sum(len(cps) for cps in self._checkpoints.values()),
+            }
