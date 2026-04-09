@@ -5,6 +5,7 @@ Provides a floating overlay window that displays pressed keys
 and click animations for teaching and demonstration mode.
 """
 
+import os
 import sys
 from typing import Any, Dict, List, Optional
 
@@ -13,14 +14,6 @@ from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PyQt5.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 )
-
-
-# Add project root to path
-sys.path.insert(0, os.path.dirname(
-    os.path.dirname(os.path.abspath(__file__))
-))
-
-import os
 
 
 # Check pynput availability

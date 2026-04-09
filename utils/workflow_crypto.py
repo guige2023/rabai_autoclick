@@ -13,6 +13,7 @@ try:
     CRYPTO_AVAILABLE = True
 except ImportError:
     CRYPTO_AVAILABLE = False
+    Fernet = None  # type: ignore
 
 
 class WorkflowCrypto:
