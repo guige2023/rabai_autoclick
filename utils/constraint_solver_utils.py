@@ -1,153 +1,409 @@
-"""
-Constraint solver utilities for layout constraint solving.
+"""Constraint solver utilities for layout and positioning problems.
 
-Provides a simple constraint satisfaction solver for
-layout constraints like alignment, distribution, and sizing.
+This module provides utilities for solving constraint satisfaction problems
+common in UI layout, element positioning, and resource allocation.
 """
 
 from __future__ import annotations
 
+from typing import Any, Callable
+from dataclasses import dataclass, field
+from enum import Enum
 import math
-from dataclasses import dataclass
-from typing import Optional
 
 
-@dataclass
-class Variable:
-    """A variable in the constraint system."""
-    name: str
-    value: float = 0.0
-    min_value: float = -math.inf
-    max_value: float = math.inf
+class ConstraintType(Enum):
+    """Types of constraints."""
+    EQUAL = "equal"
+    LESS_THAN = "less_than"
+    LESS_EQUAL = "less_equal"
+    GREATER_THAN = "greater_than"
+    GREATER_EQUAL = "greater_equal"
+    RANGE = "range"
 
 
 @dataclass
 class Constraint:
-    """A constraint between variables."""
-    name: str
-    variables: list[str]
-    evaluate: callable  # Returns error (0 = satisfied)
-    priority: int = 0  # Higher = more important
+    """A single constraint between variables.
+
+    Attributes:
+        left_var: Left variable name.
+        right_var: Right variable name (or None for constants).
+        constraint_type: Type of comparison.
+        value: Constraint value (for binary constraints).
+        weight: Constraint priority (higher = more important).
+    """
+    left_var: str
+    right_var: str | float | None
+    constraint_type: ConstraintType
+    value: float = 0.0
+    weight: float = 1.0
+
+    def evaluate(self, vars: dict[str, float]) -> bool:
+        """Evaluate this constraint given variable values.
+
+        Args:
+            vars: Dictionary of variable names to values.
+
+        Returns:
+            True if constraint is satisfied.
+        """
+        left_val = vars.get(self.left_var, 0.0)
+
+        if self.right_var is None:
+            right_val = self.value
+        elif isinstance(self.right_var, (int, float)):
+            right_val = float(self.right_var)
+        else:
+            right_val = vars.get(self.right_var, 0.0)
+
+        if self.constraint_type == ConstraintType.EQUAL:
+            return abs(left_val - right_val) < 0.001
+        elif self.constraint_type == ConstraintType.LESS_THAN:
+            return left_val < right_val
+        elif self.constraint_type == ConstraintType.LESS_EQUAL:
+            return left_val <= right_val + 0.001
+        elif self.constraint_type == ConstraintType.GREATER_THAN:
+            return left_val > right_val
+        elif self.constraint_type == ConstraintType.GREATER_EQUAL:
+            return left_val >= right_val - 0.001
+        elif self.constraint_type == ConstraintType.RANGE:
+            return self.value <= left_val <= self.value + self.value
+
+        return True
+
+
+@dataclass
+class SolverResult:
+    """Result of constraint solving attempt.
+
+    Attributes:
+        success: Whether solving succeeded.
+        solution: Variable values if successful.
+        violations: List of violated constraints.
+        iterations: Number of iterations used.
+    """
+    success: bool
+    solution: dict[str, float] = field(default_factory=dict)
+    violations: list[Constraint] = field(default_factory=list)
+    iterations: int = 0
 
 
 class ConstraintSolver:
-    """Simple constraint solver for layout calculations."""
+    """Gradient descent constraint solver.
 
-    def __init__(self):
-        self._variables: dict[str, Variable] = {}
-        self._constraints: list[Constraint] = []
+    Minimizes constraint violations iteratively.
+    """
 
-    def add_variable(self, name: str, initial_value: float = 0.0) -> Variable:
-        """Add a variable to the solver."""
-        var = Variable(name=name, value=initial_value)
-        self._variables[name] = var
-        return var
+    def __init__(
+        self,
+        constraints: list[Constraint] | None = None,
+        learning_rate: float = 0.1,
+        max_iterations: int = 100,
+        tolerance: float = 0.001
+    ) -> None:
+        """Initialize solver.
 
-    def get(self, name: str) -> Optional[Variable]:
-        """Get a variable by name."""
-        return self._variables.get(name)
-
-    def set_value(self, name: str, value: float) -> None:
-        """Set a variable value."""
-        if name in self._variables:
-            self._variables[name].value = max(
-                self._variables[name].min_value,
-                min(self._variables[name].max_value, value),
-            )
+        Args:
+            constraints: Initial list of constraints.
+            learning_rate: Gradient descent step size.
+            max_iterations: Maximum iterations before giving up.
+            tolerance: Convergence tolerance.
+        """
+        self.constraints = constraints or []
+        self.learning_rate = learning_rate
+        self.max_iterations = max_iterations
+        self.tolerance = tolerance
+        self._variables: set[str] = set()
 
     def add_constraint(self, constraint: Constraint) -> None:
-        """Add a constraint."""
-        self._constraints.append(constraint)
-        self._constraints.sort(key=lambda c: c.priority, reverse=True)
+        """Add a constraint to the solver.
 
-    def add_equal(self, name_a: str, name_b: str, offset: float = 0.0) -> Constraint:
-        """Add equality constraint: A = B + offset."""
-        def eval_fn(vars_dict):
-            a = vars_dict.get(name_a, 0)
-            b = vars_dict.get(name_b, 0)
-            return abs(a - b - offset)
-        c = Constraint(name=f"{name_a} == {name_b}", variables=[name_a, name_b], evaluate=eval_fn)
-        self.add_constraint(c)
-        return c
+        Args:
+            constraint: Constraint to add.
+        """
+        self.constraints.append(constraint)
+        self._variables.add(constraint.left_var)
+        if isinstance(constraint.right_var, str):
+            self._variables.add(constraint.right_var)
 
-    def add_less_equal(self, name_a: str, name_b: str) -> Constraint:
-        """Add inequality: A <= B."""
-        def eval_fn(vars_dict):
-            a = vars_dict.get(name_a, 0)
-            b = vars_dict.get(name_b, 0)
-            return max(0, a - b)
-        c = Constraint(name=f"{name_a} <= {name_b}", variables=[name_a, name_b], evaluate=eval_fn)
-        self.add_constraint(c)
-        return c
+    def add_variable(self, name: str, initial_value: float = 0.0) -> None:
+        """Add a variable to the solver.
 
-    def add_greater_equal(self, name_a: str, name_b: str) -> Constraint:
-        """Add inequality: A >= B."""
-        def eval_fn(vars_dict):
-            a = vars_dict.get(name_a, 0)
-            b = vars_dict.get(name_b, 0)
-            return max(0, b - a)
-        c = Constraint(name=f"{name_a} >= {name_b}", variables=[name_a, name_b], evaluate=eval_fn)
-        self.add_constraint(c)
-        return c
+        Args:
+            name: Variable name.
+            initial_value: Starting value.
+        """
+        self._variables.add(name)
 
-    def add_center_constraint(self, parent: str, child: str, axis: str = "x") -> Constraint:
-        """Add centering constraint: child centered in parent."""
-        if axis == "x":
-            def eval_fn(vars_dict):
-                pw = vars_dict.get(f"{parent}_width", 0)
-                cw = vars_dict.get(f"{child}_width", 0)
-                px = vars_dict.get(f"{parent}_x", 0)
-                cx = vars_dict.get(f"{child}_x", 0)
-                expected_cx = px + pw / 2 - cw / 2
-                return abs(cx - expected_cx)
-            vars_list = [f"{parent}_x", f"{parent}_width", f"{child}_x", f"{child}_width"]
-        else:
-            def eval_fn(vars_dict):
-                ph = vars_dict.get(f"{parent}_height", 0)
-                ch = vars_dict.get(f"{child}_height", 0)
-                py = vars_dict.get(f"{parent}_y", 0)
-                cy = vars_dict.get(f"{child}_y", 0)
-                expected_cy = py + ph / 2 - ch / 2
-                return abs(cy - expected_cy)
-            vars_list = [f"{parent}_y", f"{parent}_height", f"{child}_y", f"{child}_height"]
+    def solve(self, initial_vars: dict[str, float] | None = None) -> SolverResult:
+        """Solve constraints starting from initial values.
 
-        c = Constraint(name=f"{child} centered on {parent} ({axis})", variables=vars_list, evaluate=eval_fn)
-        self.add_constraint(c)
-        return c
-
-    def solve(self, max_iterations: int = 100, tolerance: float = 0.01) -> dict[str, float]:
-        """Solve the constraint system.
+        Args:
+            initial_vars: Optional initial variable values.
 
         Returns:
-            Dict of variable names to solved values.
+            SolverResult with solution or violations.
         """
-        vars_dict = {name: v.value for name, v in self._variables.items()}
+        vars: dict[str, float] = initial_vars or {}
+        for v in self._variables:
+            if v not in vars:
+                vars[v] = 0.0
 
-        for iteration in range(max_iterations):
-            total_error = 0.0
+        for iteration in range(self.max_iterations):
+            violations: list[Constraint] = []
+            gradients: dict[str, float] = {v: 0.0 for v in self._variables}
 
-            for constraint in self._constraints:
-                error = constraint.evaluate(vars_dict)
-                total_error += error
+            for constraint in self.constraints:
+                if not constraint.evaluate(vars):
+                    violations.append(constraint)
 
-                if error > tolerance:
-                    # Adjust variables to reduce error
-                    adjustment = error / len(constraint.variables) if constraint.variables else error
-                    for var_name in constraint.variables:
-                        if var_name in self._variables:
-                            var = self._variables[var_name]
-                            # Gradient descent-like adjustment
-                            current = vars_dict[var_name]
-                            vars_dict[var_name] = current - adjustment * 0.1
+                    grad = self._compute_gradient(constraint, vars)
+                    for var, g in grad.items():
+                        gradients[var] += g * constraint.weight
 
-            if total_error < tolerance:
-                break
+            if not violations:
+                return SolverResult(
+                    success=True,
+                    solution=vars.copy(),
+                    violations=[],
+                    iterations=iteration + 1
+                )
 
-        # Update variable values
-        for name, var in self._variables.items():
-            var.value = vars_dict.get(name, var.value)
+            total_error = sum(
+                self._compute_error(constraint, vars)
+                for constraint in violations
+            )
 
-        return vars_dict
+            if total_error < self.tolerance:
+                return SolverResult(
+                    success=True,
+                    solution=vars.copy(),
+                    violations=violations,
+                    iterations=iteration + 1
+                )
+
+            for var in self._variables:
+                vars[var] -= self.learning_rate * gradients[var]
+
+        return SolverResult(
+            success=False,
+            solution=vars.copy(),
+            violations=violations,
+            iterations=self.max_iterations
+        )
+
+    def _compute_error(self, constraint: Constraint, vars: dict[str, float]) -> float:
+        """Compute error for a violated constraint.
+
+        Args:
+            constraint: Constraint to compute error for.
+            vars: Current variable values.
+
+        Returns:
+            Error value (higher = more violated).
+        """
+        left_val = vars.get(constraint.left_var, 0.0)
+
+        if isinstance(constraint.right_var, (int, float)):
+            right_val = float(constraint.right_var)
+        elif constraint.right_var is None:
+            right_val = constraint.value
+        else:
+            right_val = vars.get(constraint.right_var, 0.0)
+
+        if constraint.constraint_type == ConstraintType.EQUAL:
+            return abs(left_val - right_val)
+        elif constraint.constraint_type == ConstraintType.LESS_THAN:
+            return max(0.0, left_val - right_val) + 1.0
+        elif constraint.constraint_type == ConstraintType.LESS_EQUAL:
+            return max(0.0, left_val - right_val)
+        elif constraint.constraint_type == ConstraintType.GREATER_THAN:
+            return max(0.0, right_val - left_val) + 1.0
+        elif constraint.constraint_type == ConstraintType.GREATER_EQUAL:
+            return max(0.0, right_val - left_val)
+
+        return 0.0
+
+    def _compute_gradient(
+        self,
+        constraint: Constraint,
+        vars: dict[str, float]
+    ) -> dict[str, float]:
+        """Compute gradient for constraint violation.
+
+        Args:
+            constraint: Constraint to compute gradient for.
+            vars: Current variable values.
+
+        Returns:
+            Dictionary of variable gradients.
+        """
+        gradients: dict[str, float] = {v: 0.0 for v in self._variables}
+        epsilon = 0.01
+
+        base_error = self._compute_error(constraint, vars)
+
+        for var in self._variables:
+            vars_plus = vars.copy()
+            vars_plus[var] = vars.get(var, 0.0) + epsilon
+            error_plus = self._compute_error(constraint, vars_plus)
+            gradients[var] = (error_plus - base_error) / epsilon
+
+        return gradients
 
 
-__all__ = ["ConstraintSolver", "Variable", "Constraint"]
+def solve_box_layout(
+    container_width: float,
+    container_height: float,
+    elements: list[tuple[str, tuple[float, float]]]
+) -> dict[str, tuple[float, float, float, float]]:
+    """Solve layout constraints for a horizontal or vertical box.
+
+    Args:
+        container_width: Width of container.
+        container_height: Height of container.
+        elements: List of (name, size) tuples.
+
+    Returns:
+        Dictionary mapping element name to (x, y, width, height).
+    """
+    solver = ConstraintSolver()
+    positions: dict[str, tuple[float, float, float, float]] = {}
+
+    sorted_elements = sorted(elements, key=lambda e: e[0])
+
+    current_x = 0.0
+
+    for name, (elem_width, elem_height) in sorted_elements:
+        x_constraint = Constraint(
+            left_var=f"{name}_x",
+            right_var=float(current_x),
+            constraint_type=ConstraintType.EQUAL
+        )
+        solver.add_constraint(x_constraint)
+
+        y_constraint = Constraint(
+            left_var=f"{name}_y",
+            right_var=0.0,
+            constraint_type=ConstraintType.EQUAL
+        )
+        solver.add_constraint(y_constraint)
+
+        w_constraint = Constraint(
+            left_var=f"{name}_w",
+            right_var=float(elem_width),
+            constraint_type=ConstraintType.EQUAL
+        )
+        solver.add_constraint(w_constraint)
+
+        h_constraint = Constraint(
+            left_var=f"{name}_h",
+            right_var=float(elem_height),
+            constraint_type=ConstraintType.EQUAL
+        )
+        solver.add_constraint(h_constraint)
+
+        current_x += elem_width
+
+    result = solver.solve()
+
+    for name, _ in sorted_elements:
+        x = result.solution.get(f"{name}_x", 0.0)
+        y = result.solution.get(f"{name}_y", 0.0)
+        w = result.solution.get(f"{name}_w", 0.0)
+        h = result.solution.get(f"{name}_h", 0.0)
+        positions[name] = (x, y, w, h)
+
+    return positions
+
+
+def distribute_equal(
+    total_space: float,
+    count: int,
+    gap: float = 0.0
+) -> list[float]:
+    """Calculate equal distribution of space among elements.
+
+    Args:
+        total_space: Total available space.
+        count: Number of elements.
+        gap: Gap between elements.
+
+    Returns:
+        List of positions for each element.
+    """
+    if count <= 0:
+        return []
+
+    if count == 1:
+        return [total_space / 2]
+
+    total_gap = gap * (count - 1)
+    available = total_space - total_gap
+    element_size = available / count
+
+    positions: list[float] = []
+    current = element_size / 2
+
+    for _ in range(count):
+        positions.append(current)
+        current += element_size + gap
+
+    return positions
+
+
+def solve_centered(
+    element_size: float,
+    container_size: float
+) -> float:
+    """Calculate centered position for an element.
+
+    Args:
+        element_size: Size of element to center.
+        container_size: Size of container.
+
+    Returns:
+        Centered position.
+    """
+    return (container_size - element_size) / 2
+
+
+def solve_alignment(
+    positions: list[float],
+    alignment: str = "left"
+) -> list[float]:
+    """Adjust positions based on alignment mode.
+
+    Args:
+        positions: List of element positions.
+        alignment: Alignment type ("left", "center", "right", "spread").
+
+    Returns:
+        Adjusted positions.
+    """
+    if not positions:
+        return []
+
+    if alignment == "left":
+        min_pos = min(positions)
+        return [p - min_pos for p in positions]
+
+    elif alignment == "right":
+        max_pos = max(positions)
+        return [p - max_pos for p in positions]
+
+    elif alignment == "center":
+        center = sum(positions) / len(positions)
+        return [p - center for p in positions]
+
+    elif alignment == "spread":
+        min_pos = min(positions)
+        max_pos = max(positions)
+        total_space = max_pos - min_pos
+        if total_space == 0:
+            return positions
+
+        return [min_pos + (p - min_pos) / total_space * total_space for p in positions]
+
+    return positions
