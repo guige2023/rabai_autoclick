@@ -1,302 +1,310 @@
-"""API fault tolerance action module for RabAI AutoClick.
+"""API Fault Tolerance Action Module.
 
-Provides fault tolerance for API operations:
-- ApiFaultTolerance: Comprehensive fault tolerance for API calls
-- ApiResilienceHandler: Handle API failures with resilience patterns
-- ApiBulkhead: Bulkhead pattern for API isolation
+Provides fault tolerance mechanisms for API operations including:
+- Circuit breaker pattern implementation
+- Bulkhead isolation
+- Fallback mechanisms
+- Graceful degradation
+
+Author: rabai_autoclick team
 """
 
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
-import time
-import random
-import threading
+from __future__ import annotations
+
+import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
-from enum import Enum
-from collections import defaultdict, deque
+from enum import Enum, auto
+from typing import Any, Callable, Optional
 
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class FaultToleranceStrategy(Enum):
-    """Fault tolerance strategies."""
-    CIRCUIT_BREAKER = "circuit_breaker"
-    BULKHEAD = "bulkhead"
-    TIMEOUT = "timeout"
-    RETRY = "retry"
-    FALLBACK = "fallback"
-    RATE_LIMIT = "rate_limit"
+class CircuitState(Enum):
+    """Circuit breaker states."""
+    CLOSED = auto()      # Normal operation
+    OPEN = auto()        # Failing fast
+    HALF_OPEN = auto()   # Testing recovery
 
 
 @dataclass
-class BulkheadConfig:
-    """Bulkhead isolation configuration."""
-    max_concurrent: int = 10
-    max_queued: int = 20
-    timeout: float = 30.0
-
-
-@dataclass
-class FaultToleranceConfig:
-    """Configuration for API fault tolerance."""
-    enable_circuit_breaker: bool = True
-    enable_bulkhead: bool = True
-    enable_timeout: bool = True
-    enable_retry: bool = True
-    enable_fallback: bool = True
+class CircuitBreakerConfig:
+    """Configuration for circuit breaker pattern."""
     failure_threshold: int = 5
-    timeout: float = 30.0
-    retry_count: int = 3
-    retry_delay: float = 1.0
-    bulkhead_config: BulkheadConfig = field(default_factory=BulkheadConfig)
+    success_threshold: int = 2
+    timeout_seconds: float = 30.0
+    half_open_max_calls: int = 3
 
 
-class ApiBulkhead:
-    """Bulkhead pattern for API isolation."""
+@dataclass
+class CircuitMetrics:
+    """Metrics for circuit breaker monitoring."""
+    total_calls: int = 0
+    successful_calls: int = 0
+    failed_calls: int = 0
+    rejected_calls: int = 0
+    state_changes: int = 0
+    last_failure_time: Optional[float] = None
+    last_success_time: Optional[float] = None
+
+
+class CircuitBreaker:
+    """Circuit breaker implementation for API fault tolerance.
     
-    def __init__(self, name: str, config: BulkheadConfig):
+    Prevents cascading failures by opening the circuit when
+    a service is experiencing issues.
+    """
+    
+    def __init__(self, name: str, config: Optional[CircuitBreakerConfig] = None):
         self.name = name
-        self.config = config
-        self._semaphore: Optional[threading.Semaphore] = None
-        self._queue: deque = deque(maxlen=config.max_queued)
-        self._active_count = 0
-        self._lock = threading.Lock()
-        self._stats = {"total_attempts": 0, "admitted": 0, "rejected": 0, "queued": 0}
+        self.config = config or CircuitBreakerConfig()
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.success_count = 0
+        self.half_open_calls = 0
+        self.last_failure_time: Optional[float] = None
+        self.metrics = CircuitMetrics()
+        self._lock = asyncio.Lock()
     
-    def _get_semaphore(self) -> threading.Semaphore:
-        """Get or create semaphore lazily."""
-        if self._semaphore is None:
-            with self._lock:
-                if self._semaphore is None:
-                    self._semaphore = threading.Semaphore(self.config.max_concurrent)
-        return self._semaphore
-    
-    def execute(self, operation: Callable, *args, **kwargs) -> Tuple[bool, Any]:
-        """Execute operation through bulkhead."""
-        with self._lock:
-            self._stats["total_attempts"] += 1
+    async def call(self, func: Callable, *args, **kwargs) -> Any:
+        """Execute a function through the circuit breaker.
         
-        semaphore = self._get_semaphore()
-        
-        acquired = semaphore.acquire(timeout=0.1)
-        
-        if not acquired:
-            with self._lock:
-                self._stats["rejected"] += 1
-            return False, None
-        
-        with self._lock:
-            self._active_count += 1
-            self._stats["admitted"] += 1
+        Args:
+            func: Async function to execute
+            *args: Positional arguments for func
+            **kwargs: Keyword arguments for func
+            
+        Returns:
+            Result of the function call
+            
+        Raises:
+            CircuitOpenError: When circuit is open
+            Exception: Original exception from failed call
+        """
+        async with self._lock:
+            if self.state == CircuitState.OPEN:
+                if self._should_attempt_reset():
+                    await self._transition_to_half_open()
+                else:
+                    self.metrics.rejected_calls += 1
+                    raise CircuitOpenError(f"Circuit '{self.name}' is OPEN")
         
         try:
-            result = operation(*args, **kwargs)
-            return True, result
+            result = await func(*args, **kwargs)
+            await self._on_success()
+            return result
         except Exception as e:
-            return False, e
-        finally:
-            with self._lock:
-                self._active_count -= 1
-            semaphore.release()
+            await self._on_failure()
+            raise
     
-    def get_stats(self) -> Dict[str, Any]:
-        """Get bulkhead statistics."""
-        with self._lock:
-            return {
-                "name": self.name,
-                "active_count": self._active_count,
-                **{k: v for k, v in self._stats.items()},
-            }
-
-
-class ApiFaultTolerance:
-    """Comprehensive API fault tolerance handler."""
-    
-    def __init__(self, name: str, config: Optional[FaultToleranceConfig] = None):
-        self.name = name
-        self.config = config or FaultToleranceConfig()
-        self._bulkhead = ApiBulkhead(name, self.config.bulkhead_config)
-        self._circuit_open = False
-        self._failure_count = 0
-        self._last_failure_time: Optional[float] = None
-        self._lock = threading.RLock()
-        self._stats = {"total_calls": 0, "successful_calls": 0, "failed_calls": 0, "circuit_trips": 0}
-    
-    def _check_circuit(self) -> bool:
-        """Check if circuit breaker should trip."""
-        if not self.config.enable_circuit_breaker:
+    def _should_attempt_reset(self) -> bool:
+        """Check if enough time has passed to attempt reset."""
+        if self.last_failure_time is None:
             return True
-        
-        if self._circuit_open:
-            if self._last_failure_time and (time.time() - self._last_failure_time) > 60:
-                with self._lock:
-                    self._circuit_open = False
-                    self._failure_count = 0
-                return True
-            return False
-        
-        return True
+        return (time.time() - self.last_failure_time) >= self.config.timeout_seconds
     
-    def _trip_circuit(self):
-        """Trip the circuit breaker."""
-        with self._lock:
-            self._circuit_open = True
-            self._last_failure_time = time.time()
-            self._stats["circuit_trips"] += 1
+    async def _transition_to_half_open(self) -> None:
+        """Transition circuit to half-open state."""
+        self.state = CircuitState.HALF_OPEN
+        self.half_open_calls = 0
+        self.metrics.state_changes += 1
+        logger.info(f"Circuit '{self.name}' transitioning to HALF_OPEN")
     
-    def _record_success(self):
-        """Record successful call."""
-        with self._lock:
-            self._stats["successful_calls"] += 1
-            if self._failure_count > 0:
-                self._failure_count = max(0, self._failure_count - 1)
-    
-    def _record_failure(self):
-        """Record failed call."""
-        with self._lock:
-            self._failure_count += 1
-            self._last_failure_time = time.time()
+    async def _on_success(self) -> None:
+        """Handle successful call."""
+        async with self._lock:
+            self.metrics.total_calls += 1
+            self.metrics.successful_calls += 1
+            self.metrics.last_success_time = time.time()
             
-            if self.config.enable_circuit_breaker and self._failure_count >= self.config.failure_threshold:
-                self._trip_circuit()
+            if self.state == CircuitState.HALF_OPEN:
+                self.success_count += 1
+                self.half_open_calls += 1
+                if self.success_count >= self.config.success_threshold:
+                    await self._transition_to_closed()
+            elif self.state == CircuitState.CLOSED:
+                self.failure_count = max(0, self.failure_count - 1)
     
-    def execute(self, operation: Callable, fallback: Optional[Callable] = None, *args, **kwargs) -> Tuple[bool, Any]:
-        """Execute operation with fault tolerance."""
-        with self._lock:
-            self._stats["total_calls"] += 1
-        
-        if not self._check_circuit():
-            if fallback and self.config.enable_fallback:
-                try:
-                    result = fallback()
-                    return True, result
-                except Exception:
-                    return False, None
-            return False, None
-        
-        def execute_with_timeout():
-            result = [None]
-            error = [None]
+    async def _on_failure(self) -> None:
+        """Handle failed call."""
+        async with self._lock:
+            self.metrics.total_calls += 1
+            self.metrics.failed_calls += 1
+            self.metrics.last_failure_time = time.time()
+            self.last_failure_time = time.time()
             
-            def worker():
-                try:
-                    result[0] = operation()
-                except Exception as e:
-                    error[0] = e
-            
-            t = threading.Thread(target=worker)
-            t.daemon = True
-            t.start()
-            t.join(timeout=self.config.timeout)
-            
-            if t.is_alive():
-                raise TimeoutError(f"Operation timed out after {self.config.timeout}s")
-            if error[0]:
-                raise error[0]
-            return result[0]
-        
-        last_error = None
-        for attempt in range(self.config.retry_count + 1):
-            try:
-                if self.config.enable_bulkhead:
-                    success, bulkhead_result = self._bulkhead.execute(execute_with_timeout)
-                    if not success:
-                        raise Exception("Bulkhead rejected")
-                    result = bulkhead_result
-                else:
-                    result = execute_with_timeout()
-                
-                self._record_success()
-                return True, result
-                
-            except Exception as e:
-                last_error = e
-                if attempt < self.config.retry_count and self.config.enable_retry:
-                    delay = self.config.retry_delay * (2 ** attempt)
-                    time.sleep(delay)
-                else:
-                    self._record_failure()
-        
-        if fallback and self.config.enable_fallback:
-            try:
-                result = fallback()
-                return True, result
-            except Exception:
-                pass
-        
-        with self._lock:
-            self._stats["failed_calls"] += 1
-        
-        return False, last_error
+            if self.state == CircuitState.HALF_OPEN:
+                await self._transition_to_open()
+            elif self.state == CircuitState.CLOSED:
+                self.failure_count += 1
+                self.success_count = 0
+                if self.failure_count >= self.config.failure_threshold:
+                    await self._transition_to_open()
     
-    def get_stats(self) -> Dict[str, Any]:
-        """Get fault tolerance statistics."""
-        with self._lock:
-            bulkhead_stats = self._bulkhead.get_stats()
-            return {
-                "name": self.name,
-                "circuit_open": self._circuit_open,
-                "failure_count": self._failure_count,
-                "bulkhead": bulkhead_stats,
-                **{k: v for k, v in self._stats.items()},
+    async def _transition_to_open(self) -> None:
+        """Transition circuit to open state."""
+        self.state = CircuitState.OPEN
+        self.metrics.state_changes += 1
+        logger.warning(f"Circuit '{self.name}' transitioning to OPEN")
+    
+    async def _transition_to_closed(self) -> None:
+        """Transition circuit to closed state."""
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.success_count = 0
+        self.metrics.state_changes += 1
+        logger.info(f"Circuit '{self.name}' transitioning to CLOSED")
+    
+    def get_health_status(self) -> dict[str, Any]:
+        """Get current health status of the circuit breaker."""
+        return {
+            "name": self.name,
+            "state": self.state.name,
+            "failure_count": self.failure_count,
+            "success_count": self.success_count,
+            "metrics": {
+                "total_calls": self.metrics.total_calls,
+                "successful_calls": self.metrics.successful_calls,
+                "failed_calls": self.metrics.failed_calls,
+                "rejected_calls": self.metrics.rejected_calls,
             }
+        }
+
+
+class CircuitOpenError(Exception):
+    """Raised when circuit breaker is open."""
+    pass
+
+
+class BulkheadIsolation:
+    """Bulkhead isolation pattern implementation.
     
-    def reset_circuit(self):
-        """Manually reset circuit breaker."""
-        with self._lock:
-            self._circuit_open = False
-            self._failure_count = 0
+    Limits concurrent executions to prevent resource exhaustion.
+    """
+    
+    def __init__(self, max_concurrent: int = 10, max_queue_size: int = 100):
+        self.max_concurrent = max_concurrent
+        self.max_queue_size = max_queue_size
+        self._semaphore: Optional[asyncio.Semaphore] = None
+        self._active_count = 0
+        self._lock = asyncio.Lock()
+    
+    async def execute(self, func: Callable, *args, **kwargs) -> Any:
+        """Execute function with bulkhead isolation.
+        
+        Args:
+            func: Async function to execute
+            *args: Positional arguments
+            **kwargs: Keyword arguments
+            
+        Returns:
+            Result of the function
+            
+        Raises:
+            BulkheadFullError: When bulkhead capacity is exceeded
+        """
+        async with self._lock:
+            if self._semaphore is None:
+                self._semaphore = asyncio.Semaphore(self.max_concurrent)
+            if self._active_count >= self.max_concurrent:
+                raise BulkheadFullError("Bulkhead capacity exceeded")
+            self._active_count += 1
+        
+        try:
+            async with self._semaphore:
+                return await func(*args, **kwargs)
+        finally:
+            async with self._lock:
+                self._active_count -= 1
 
 
-class ApiFaultToleranceAction(BaseAction):
-    """API fault tolerance action."""
-    action_type = "api_fault_tolerance"
-    display_name = "API容错"
-    description = "API调用容错处理"
+class BulkheadFullError(Exception):
+    """Raised when bulkhead capacity is exceeded."""
+    pass
+
+
+class FaultToleranceManager:
+    """Manages fault tolerance across multiple services."""
     
     def __init__(self):
-        super().__init__()
-        self._handlers: Dict[str, ApiFaultTolerance] = {}
-        self._lock = threading.Lock()
+        self._circuit_breakers: dict[str, CircuitBreaker] = {}
+        self._bulkheads: dict[str, BulkheadIsolation] = {}
+        self._fallbacks: dict[str, Callable] = {}
+        self._lock = asyncio.Lock()
     
-    def _get_handler(self, name: str, config: Optional[FaultToleranceConfig] = None) -> ApiFaultTolerance:
-        """Get or create fault tolerance handler."""
-        with self._lock:
-            if name not in self._handlers:
-                self._handlers[name] = ApiFaultTolerance(name, config)
-            return self._handlers[name]
+    def get_circuit_breaker(self, name: str, config: Optional[CircuitBreakerConfig] = None) -> CircuitBreaker:
+        """Get or create a circuit breaker."""
+        if name not in self._circuit_breakers:
+            self._circuit_breakers[name] = CircuitBreaker(name, config)
+        return self._circuit_breakers[name]
     
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute with fault tolerance."""
+    def get_bulkhead(self, name: str, max_concurrent: int = 10) -> BulkheadIsolation:
+        """Get or create a bulkhead."""
+        if name not in self._bulkheads:
+            self._bulkheads[name] = BulkheadIsolation(max_concurrent)
+        return self._bulkheads[name]
+    
+    def register_fallback(self, service: str, fallback: Callable) -> None:
+        """Register a fallback function for a service."""
+        self._fallbacks[service] = fallback
+    
+    async def execute_with_fault_tolerance(
+        self,
+        service: str,
+        func: Callable,
+        use_circuit_breaker: bool = True,
+        use_bulkhead: bool = True,
+        *args,
+        **kwargs
+    ) -> Any:
+        """Execute function with all fault tolerance mechanisms.
+        
+        Args:
+            service: Service name for circuit breaker identification
+            func: Function to execute
+            use_circuit_breaker: Whether to use circuit breaker
+            use_bulkhead: Whether to use bulkhead isolation
+            *args: Positional arguments
+            **kwargs: Keyword arguments
+            
+        Returns:
+            Result of the function
+        """
+        fallback = self._fallbacks.get(service)
+        
         try:
-            name = params.get("name", "default")
-            operation = params.get("operation")
-            fallback = params.get("fallback")
+            if use_circuit_breaker:
+                cb = self.get_circuit_breaker(service)
+                func = cb.call
             
-            config = FaultToleranceConfig(
-                enable_circuit_breaker=params.get("enable_circuit_breaker", True),
-                enable_bulkhead=params.get("enable_bulkhead", True),
-                enable_timeout=params.get("enable_timeout", True),
-                enable_retry=params.get("enable_retry", True),
-                enable_fallback=params.get("enable_fallback", True),
-                failure_threshold=params.get("failure_threshold", 5),
-                timeout=params.get("timeout", 30.0),
-                retry_count=params.get("retry_count", 3),
-                retry_delay=params.get("retry_delay", 1.0),
-            )
+            if use_bulkhead:
+                bulkhead = self.get_bulkhead(service)
+                async def wrapped():
+                    return await func(*args, **kwargs)
+                return await bulkhead.execute(wrapped)
             
-            handler = self._get_handler(name, config)
+            return await func(*args, **kwargs)
             
-            if not operation:
-                stats = handler.get_stats()
-                return ActionResult(success=True, data={"stats": stats})
-            
-            success, result = handler.execute(operation, fallback)
-            return ActionResult(success=success, data={"result": result})
-            
+        except CircuitOpenError:
+            logger.warning(f"Circuit open for service '{service}', attempting fallback")
+            if fallback:
+                return await fallback(*args, **kwargs)
+            raise
+        except BulkheadFullError:
+            logger.error(f"Bulkhead full for service '{service}'")
+            if fallback:
+                return await fallback(*args, **kwargs)
+            raise
         except Exception as e:
-            return ActionResult(success=False, message=f"ApiFaultToleranceAction error: {str(e)}")
+            logger.error(f"Fault tolerance error for service '{service}': {e}")
+            if fallback:
+                return await fallback(*args, **kwargs)
+            raise
+    
+    def get_all_health_status(self) -> dict[str, dict[str, Any]]:
+        """Get health status of all managed circuits."""
+        return {
+            name: cb.get_health_status()
+            for name, cb in self._circuit_breakers.items()
+        }
