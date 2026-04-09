@@ -1,227 +1,367 @@
-"""Data profiling and statistics analysis action."""
+"""Data Profiler Action module.
+
+Provides data profiling capabilities for analyzing datasets
+including statistics, type inference, quality metrics,
+and distribution analysis.
+"""
 
 from __future__ import annotations
 
+import math
+import re
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Optional, Sequence
+from enum import Enum
+from typing import Any, Optional
 
-import statistics
+import numpy as np
+
+
+class DataType(Enum):
+    """Inferred data types."""
+
+    UNKNOWN = "unknown"
+    INTEGER = "integer"
+    FLOAT = "float"
+    BOOLEAN = "boolean"
+    STRING = "string"
+    DATETIME = "datetime"
+    UUID = "uuid"
+    EMAIL = "email"
+    URL = "url"
+    PHONE = "phone"
+    JSON = "json"
 
 
 @dataclass
 class FieldProfile:
-    """Profile statistics for a single field."""
+    """Profile for a single field/column."""
 
-    field_name: str
+    name: str
+    data_type: DataType
     total_count: int
     null_count: int
     unique_count: int
-    null_percentage: float
-    completeness: float
+    fill_rate: float
 
-    # Numeric stats
-    min_value: Optional[float] = None
-    max_value: Optional[float] = None
-    mean: Optional[float] = None
-    median: Optional[float] = None
-    std_dev: Optional[float] = None
-    p25: Optional[float] = None
-    p75: Optional[float] = None
-    p90: Optional[float] = None
-    p99: Optional[float] = None
+    numeric_stats: Optional[dict[str, float]] = None
+    string_stats: Optional[dict[str, Any]] = None
 
-    # String stats
-    min_length: Optional[int] = None
-    max_length: Optional[int] = None
-    avg_length: Optional[float] = None
-    empty_count: int = 0
+    top_values: list[tuple[Any, int]] = field(default_factory=list)
+    histogram: list[tuple[Any, int]] = field(default_factory=list)
 
-    # Type info
-    inferred_type: str = "unknown"
-    sample_values: list[Any] = field(default_factory=list)
+    examples: list[Any] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "name": self.name,
+            "data_type": self.data_type.value,
+            "total_count": self.total_count,
+            "null_count": self.null_count,
+            "unique_count": self.unique_count,
+            "fill_rate": self.fill_rate,
+            "numeric_stats": self.numeric_stats,
+            "string_stats": self.string_stats,
+            "top_values": [(str(v), c) for v, c in self.top_values[:10]],
+            "examples": [str(e) for e in self.examples[:5]],
+        }
 
 
 @dataclass
 class DatasetProfile:
     """Overall dataset profile."""
 
-    total_rows: int
-    total_columns: int
-    analyzed_at: datetime
-    field_profiles: dict[str, FieldProfile]
-    metadata: dict[str, Any] = field(default_factory=dict)
+    name: str
+    row_count: int
+    field_count: int
+    fields: list[FieldProfile]
+    created_at: datetime = field(default_factory=datetime.now)
 
+    quality_score: float = 0.0
+    issues: list[str] = field(default_factory=list)
 
-class DataProfilerAction:
-    """Profiles datasets and computes statistics."""
-
-    def __init__(
-        self,
-        sample_size: int = 10000,
-        compute_percentiles: bool = True,
-        compute_std_dev: bool = True,
-    ):
-        """Initialize the profiler.
-
-        Args:
-            sample_size: Max rows to analyze.
-            compute_percentiles: Whether to compute percentiles.
-            compute_std_dev: Whether to compute standard deviation.
-        """
-        self._sample_size = sample_size
-        self._compute_percentiles = compute_percentiles
-        self._compute_std_dev = compute_std_dev
-
-    def _infer_type(self, value: Any) -> str:
-        """Infer the type of a value."""
-        if value is None:
-            return "null"
-        if isinstance(value, bool):
-            return "boolean"
-        if isinstance(value, int):
-            return "integer"
-        if isinstance(value, float):
-            return "float"
-        if isinstance(value, str):
-            return "string"
-        if isinstance(value, (list, tuple)):
-            return "array"
-        if isinstance(value, dict):
-            return "object"
-        return type(value).__name__
-
-    def _is_numeric(self, value: Any) -> bool:
-        """Check if value is numeric."""
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-    def _to_numeric(self, value: Any) -> Optional[float]:
-        """Convert value to numeric."""
-        if self._is_numeric(value):
-            return float(value)
-        if isinstance(value, str):
-            try:
-                return float(value)
-            except (ValueError, TypeError):
-                return None
-        return None
-
-    def _compute_percentile(self, sorted_values: list[float], percentile: float) -> float:
-        """Compute percentile from sorted values."""
-        if not sorted_values:
-            return 0.0
-        idx = int(len(sorted_values) * percentile / 100)
-        idx = min(idx, len(sorted_values) - 1)
-        return sorted_values[idx]
-
-    def profile_field(self, values: Sequence[Any]) -> FieldProfile:
-        """Profile a single field."""
-        non_null = [v for v in values if v is not None]
-        empty_strings = [v for v in non_null if isinstance(v, str) and v == ""]
-        unique_values = set(non_null)
-
-        field_name = "unknown"
-        if hasattr(values, "__name__"):
-            field_name = getattr(values, "__name__", field_name)
-
-        numeric_values: list[float] = []
-        string_lengths: list[int] = []
-
-        for v in non_null:
-            if self._is_numeric(v):
-                numeric_values.append(float(v))
-            if isinstance(v, str):
-                string_lengths.append(len(v))
-
-        profile = FieldProfile(
-            field_name=field_name,
-            total_count=len(values),
-            null_count=len(values) - len(non_null),
-            unique_count=len(unique_values),
-            null_percentage=((len(values) - len(non_null)) / len(values) * 100)
-            if len(values) > 0
-            else 0,
-            completeness=len(non_null) / len(values) if len(values) > 0 else 0,
-            min_length=min(string_lengths) if string_lengths else None,
-            max_length=max(string_lengths) if string_lengths else None,
-            avg_length=statistics.mean(string_lengths) if string_lengths else None,
-            empty_count=len(empty_strings),
-            inferred_type=self._infer_type(non_null[0]) if non_null else "null",
-            sample_values=list(non_null[:5]),
-        )
-
-        if numeric_values:
-            numeric_values_sorted = sorted(numeric_values)
-            profile.min_value = min(numeric_values)
-            profile.max_value = max(numeric_values)
-            profile.mean = statistics.mean(numeric_values)
-            profile.median = statistics.median(numeric_values)
-
-            if self._compute_std_dev and len(numeric_values) > 1:
-                profile.std_dev = statistics.stdev(numeric_values)
-
-            if self._compute_percentiles and len(numeric_values) > 1:
-                profile.p25 = self._compute_percentile(numeric_values_sorted, 25)
-                profile.p75 = self._compute_percentile(numeric_values_sorted, 75)
-                profile.p90 = self._compute_percentile(numeric_values_sorted, 90)
-                profile.p99 = self._compute_percentile(numeric_values_sorted, 99)
-
-        return profile
-
-    def profile_dataset(
-        self,
-        data: list[dict[str, Any]],
-        field_names: Optional[list[str]] = None,
-    ) -> DatasetProfile:
-        """Profile an entire dataset.
-
-        Args:
-            data: List of records.
-            field_names: Specific fields to profile (None = all).
-
-        Returns:
-            DatasetProfile with statistics.
-        """
-        if not data:
-            return DatasetProfile(
-                total_rows=0,
-                total_columns=0,
-                analyzed_at=datetime.now(),
-                field_profiles={},
-            )
-
-        sample = data[: self._sample_size]
-
-        if field_names is None:
-            field_names = list(sample[0].keys()) if sample else []
-
-        field_profiles = {}
-        for field_name in field_names:
-            values = [row.get(field_name) for row in sample]
-            profile = self.profile_field(values)
-            profile.field_name = field_name
-            field_profiles[field_name] = profile
-
-        return DatasetProfile(
-            total_rows=len(data),
-            total_columns=len(field_names),
-            analyzed_at=datetime.now(),
-            field_profiles=field_profiles,
-            metadata={
-                "sample_size": len(sample),
-                "sampled": len(data) > self._sample_size,
-            },
-        )
-
-    def get_summary(self, profile: DatasetProfile) -> dict[str, Any]:
-        """Get a summary dict from a profile."""
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
         return {
-            "total_rows": profile.total_rows,
-            "total_columns": profile.total_columns,
-            "analyzed_at": profile.analyzed_at.isoformat(),
-            "completeness_avg": statistics.mean(
-                fp.completeness for fp in profile.field_profiles.values()
-            )
-            if profile.field_profiles else 0,
-            "types": {name: fp.inferred_type for name, fp in profile.field_profiles.items()},
+            "name": self.name,
+            "row_count": self.row_count,
+            "field_count": self.field_count,
+            "quality_score": self.quality_score,
+            "issues": self.issues,
+            "created_at": self.created_at.isoformat(),
+            "fields": [f.to_dict() for f in self.fields],
         }
+
+
+def infer_type(value: Any) -> DataType:
+    """Infer data type from a value.
+
+    Args:
+        value: Value to analyze
+
+    Returns:
+        Inferred DataType
+    """
+    if value is None:
+        return DataType.UNKNOWN
+
+    if isinstance(value, bool):
+        return DataType.BOOLEAN
+
+    if isinstance(value, int):
+        return DataType.INTEGER
+
+    if isinstance(value, float):
+        return DataType.FLOAT
+
+    if isinstance(value, (datetime, np.datetime64)):
+        return DataType.DATETIME
+
+    if isinstance(value, str):
+        value_lower = value.lower()
+
+        if value_lower in ("true", "false", "yes", "no", "0", "1"):
+            return DataType.BOOLEAN
+
+        try:
+            int(value)
+            return DataType.INTEGER
+        except ValueError:
+            pass
+
+        try:
+            float(value)
+            return DataType.FLOAT
+        except ValueError:
+            pass
+
+        datetime_patterns = [
+            r"^\d{4}-\d{2}-\d{2}$",
+            r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}",
+            r"^\d{2}/\d{2}/\d{4}$",
+        ]
+        for pattern in datetime_patterns:
+            if re.match(pattern, value):
+                return DataType.DATETIME
+
+        uuid_pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        if re.match(uuid_pattern, value_lower):
+            return DataType.UUID
+
+        email_pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+        if re.match(email_pattern, value):
+            return DataType.EMAIL
+
+        url_pattern = r"^https?://"
+        if re.match(url_pattern, value):
+            return DataType.URL
+
+        phone_pattern = r"^\+?[\d\s\-\(\)]{10,}$"
+        if re.match(phone_pattern, value):
+            return DataType.PHONE
+
+        try:
+            import json
+            json.loads(value)
+            return DataType.JSON
+        except (ValueError, TypeError):
+            pass
+
+        return DataType.STRING
+
+    return DataType.UNKNOWN
+
+
+def compute_numeric_stats(values: list[float]) -> dict[str, float]:
+    """Compute statistics for numeric values."""
+    if not values:
+        return {}
+
+    arr = np.array(values)
+    q1 = np.percentile(arr, 25)
+    q3 = np.percentile(arr, 75)
+
+    return {
+        "mean": float(np.mean(arr)),
+        "median": float(np.median(arr)),
+        "std": float(np.std(arr)),
+        "min": float(np.min(arr)),
+        "max": float(np.max(arr)),
+        "q1": float(q1),
+        "q3": float(q3),
+        "iqr": float(q3 - q1),
+        "skewness": float(((arr - np.mean(arr)) ** 3).mean() / (np.std(arr) ** 3)) if np.std(arr) > 0 else 0,
+        "kurtosis": float((((arr - np.mean(arr)) / np.std(arr)) ** 4).mean()) if np.std(arr) > 0 else 0,
+    }
+
+
+def compute_string_stats(values: list[str]) -> dict[str, Any]:
+    """Compute statistics for string values."""
+    if not values:
+        return {}
+
+    lengths = [len(v) for v in values]
+
+    return {
+        "min_length": min(lengths),
+        "max_length": max(lengths),
+        "avg_length": sum(lengths) / len(lengths),
+        "total_chars": sum(lengths),
+        "unique_chars": len(set("".join(values))),
+    }
+
+
+def profile_field(name: str, values: list[Any]) -> FieldProfile:
+    """Profile a single field.
+
+    Args:
+        name: Field name
+        values: List of values
+
+    Returns:
+        FieldProfile
+    """
+    total_count = len(values)
+    null_count = sum(1 for v in values if v is None or (isinstance(v, str) and not v.strip()))
+    non_null = [v for v in values if v is not None and (not isinstance(v, str) or v.strip())]
+
+    unique_values = set(non_null)
+    unique_count = len(unique_values)
+
+    fill_rate = (total_count - null_count) / total_count if total_count > 0 else 0.0
+
+    if non_null:
+        type_counts = Counter(infer_type(v) for v in non_null[:1000])
+        primary_type = type_counts.most_common(1)[0][0]
+    else:
+        primary_type = DataType.UNKNOWN
+
+    numeric_values = [v for v in non_null if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    string_values = [v for v in non_null if isinstance(v, str)]
+
+    numeric_stats = compute_numeric_stats(numeric_values) if numeric_values else None
+    string_stats = compute_string_stats(string_values) if string_values else None
+
+    value_counts = Counter(non_null)
+    top_values = value_counts.most_common(10)
+
+    examples = list(set(non_null))[:5]
+
+    return FieldProfile(
+        name=name,
+        data_type=primary_type,
+        total_count=total_count,
+        null_count=null_count,
+        unique_count=unique_count,
+        fill_rate=fill_rate,
+        numeric_stats=numeric_stats,
+        string_stats=string_stats,
+        top_values=top_values,
+        examples=examples,
+    )
+
+
+def profile_dataset(name: str, data: list[dict[str, Any]]) -> DatasetProfile:
+    """Profile an entire dataset.
+
+    Args:
+        name: Dataset name
+        data: List of records (dicts)
+
+    Returns:
+        DatasetProfile
+    """
+    if not data:
+        return DatasetProfile(
+            name=name,
+            row_count=0,
+            field_count=0,
+            fields=[],
+        )
+
+    row_count = len(data)
+    field_names = set()
+    for record in data:
+        field_names.update(record.keys())
+
+    field_count = len(field_names)
+
+    fields = []
+    for field_name in sorted(field_names):
+        values = [record.get(field_name) for record in data]
+        field_profile = profile_field(field_name, values)
+        fields.append(field_profile)
+
+    quality_score = sum(f.fill_rate for f in fields) / len(fields) if fields else 0.0
+
+    issues = []
+    for field_profile in fields:
+        if field_profile.fill_rate < 0.5:
+            issues.append(f"Field '{field_profile.name}' has low fill rate: {field_profile.fill_rate:.2%}")
+        if field_profile.unique_count == 1 and field_profile.total_count > 10:
+            issues.append(f"Field '{field_profile.name}' has only one unique value")
+        if field_profile.null_count > field_profile.total_count * 0.5:
+            issues.append(f"Field '{field_profile.name}' is mostly null")
+
+    return DatasetProfile(
+        name=name,
+        row_count=row_count,
+        field_count=field_count,
+        fields=fields,
+        quality_score=quality_score,
+        issues=issues,
+    )
+
+
+def compare_profiles(
+    before: DatasetProfile,
+    after: DatasetProfile,
+) -> dict[str, Any]:
+    """Compare two dataset profiles.
+
+    Args:
+        before: Earlier profile
+        after: Later profile
+
+    Returns:
+        Comparison report
+    """
+    changes = {
+        "row_count_change": after.row_count - before.row_count,
+        "field_count_change": after.field_count - before.field_count,
+        "quality_change": after.quality_score - before.quality_score,
+        "field_changes": [],
+    }
+
+    before_fields = {f.name: f for f in before.fields}
+    after_fields = {f.name: f for f in after.fields}
+
+    all_field_names = set(before_fields.keys()) | set(after_fields.keys())
+
+    for field_name in all_field_names:
+        bf = before_fields.get(field_name)
+        af = after_fields.get(field_name)
+
+        if bf and af:
+            change = {
+                "name": field_name,
+                "type_changed": bf.data_type != af.data_type,
+                "fill_rate_change": af.fill_rate - bf.fill_rate,
+                "null_count_change": af.null_count - bf.null_count,
+                "unique_count_change": af.unique_count - bf.unique_count,
+            }
+            changes["field_changes"].append(change)
+        elif af and not bf:
+            changes["field_changes"].append({
+                "name": field_name,
+                "status": "added",
+            })
+        else:
+            changes["field_changes"].append({
+                "name": field_name,
+                "status": "removed",
+            })
+
+    return changes
