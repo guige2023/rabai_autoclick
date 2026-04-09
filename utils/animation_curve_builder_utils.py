@@ -158,12 +158,7 @@ class StepCurve:
     
     @staticmethod
     def steps(count: int, position: str = "end") -> Callable[[float], float]:
-        """Create a step function.
-        
-        Args:
-            count: Number of steps
-            position: 'start', 'end', or 'middle'
-        """
+        """Create a step function."""
         def step(t: float) -> float:
             if position == "start":
                 return math.ceil(t * count) / count
