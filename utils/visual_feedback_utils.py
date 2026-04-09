@@ -1,296 +1,369 @@
-"""Visual feedback utilities for providing user feedback.
+"""
+Visual feedback and overlay utilities for UI automation.
 
-This module provides utilities for creating visual feedback elements
-like loading indicators, progress bars, status messages, and notifications,
-useful for user-facing automation workflows.
+Provides visual feedback mechanisms like highlights,
+overlays, crosshairs, and animated indicators.
 
-Author: AI Assistant
-License: MIT
+Author: Auto-generated
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+import time
+from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional, List, Tuple
-import io
+from typing import Callable
 
 
 class FeedbackType(Enum):
-    """Type of visual feedback."""
-    LOADING = auto()
-    PROGRESS = auto()
-    SUCCESS = auto()
-    ERROR = auto()
-    WARNING = auto()
-    INFO = auto()
+    """Types of visual feedback."""
+    HIGHLIGHT = auto()
+    CROSSHAIR = auto()
+    PULSE = auto()
+    RIPPLE = auto()
+    SPOTLIGHT = auto()
+    DRAW_RECT = auto()
 
 
 @dataclass
 class FeedbackConfig:
     """Configuration for visual feedback."""
-    feedback_type: FeedbackType = FeedbackType.INFO
-    message: str = ""
-    progress: float = 0.0
-    duration_ms: float = 0.0
-    position: str = "center"  # center, top, bottom, top-right, etc.
+    color: str = "#FF0000"
+    width: float = 3.0
+    duration_ms: float = 1000
+    fade_in_ms: float = 100
+    fade_out_ms: float = 200
+    fill_color: str | None = None
+    fill_opacity: float = 0.2
 
 
 @dataclass
-class NotificationStyle:
-    """Style configuration for notifications."""
-    bg_color: Tuple[int, int, int] = (50, 50, 50)
-    text_color: Tuple[int, int, int] = (255, 255, 255)
-    border_color: Tuple[int, int, int] = (100, 100, 100)
-    border_width: int = 2
-    corner_radius: int = 10
-    padding: int = 20
-    font_size: int = 16
+class OverlayElement:
+    """An element to render in an overlay."""
+    element_type: FeedbackType
+    x: float
+    y: float
+    width: float = 0
+    height: float = 0
+    config: FeedbackConfig = field(default_factory=FeedbackConfig)
+    metadata: dict = field(default_factory=dict)
+    
+    @property
+    def bounds(self) -> tuple[float, float, float, float]:
+        """Get bounds as (x, y, width, height)."""
+        return (self.x, self.y, self.width, self.height)
 
 
-def create_loading_indicator(
-    image_data: bytes,
-    x: int,
-    y: int,
-    size: int = 50,
-    color: Tuple[int, int, int] = (255, 255, 255),
-) -> bytes:
-    """Add loading spinner indicator to image.
-    
-    Args:
-        image_data: Image bytes.
-        x: Center X of indicator.
-        y: Center Y of indicator.
-        size: Size of indicator.
-        color: RGB color.
-    
-    Returns:
-        Image with loading indicator.
+class VisualFeedbackOverlay:
     """
-    try:
-        from PIL import Image, ImageDraw
-        import io
-        import math
+    Renders visual feedback overlays.
+    
+    Example:
+        overlay = VisualFeedbackOverlay()
+        overlay.show_highlight(100, 100, 200, 200)
+        time.sleep(1)
+        overlay.hide()
+    """
+    
+    def __init__(self, render_callback: Callable[[list[OverlayElement]], None] | None = None):
+        self._render_callback = render_callback
+        self._elements: list[OverlayElement] = []
+        self._active = False
+        self._animation_frame: Callable | None = None
+    
+    def show_highlight(
+        self,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        config: FeedbackConfig | None = None,
+    ) -> OverlayElement:
+        """
+        Show a highlight around an area.
         
-        img = Image.open(io.BytesIO(image_data)).convert("RGB")
-        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
-        
-        radius = size // 2
-        draw.ellipse(
-            [(x - radius, y - radius), (x + radius, y + radius)],
-            outline=color,
-            width=3,
-        )
-        
-        arc_start = 0
-        arc_end = 270
-        
-        for i in range(12):
-            angle = math.radians(arc_start + i * 30)
-            inner_x = int(x + (radius - 10) * math.cos(angle))
-            inner_y = int(y + (radius - 10) * math.sin(angle))
+        Args:
+            x, y: Top-left position
+            width, height: Size of highlight area
+            config: Optional feedback configuration
             
-            draw.ellipse(
-                [(inner_x - 3, inner_y - 3), (inner_x + 3, inner_y + 3)],
-                fill=color,
-            )
-        
-        img = Image.alpha_composite(
-            img.convert("RGBA"),
-            overlay,
-        ).convert("RGB")
-        
-        output = io.BytesIO()
-        img.save(output, format="PNG")
-        return output.getvalue()
-    except ImportError:
-        raise ImportError("PIL is required for loading indicator")
-
-
-def create_progress_bar(
-    image_data: bytes,
-    x: int,
-    y: int,
-    width: int,
-    height: int,
-    progress: float,
-    bg_color: Tuple[int, int, int] = (50, 50, 50),
-    fill_color: Tuple[int, int, int] = (0, 200, 0),
-) -> bytes:
-    """Add progress bar to image.
-    
-    Args:
-        image_data: Image bytes.
-        x: Left edge of bar.
-        y: Top edge of bar.
-        width: Bar width.
-        height: Bar height.
-        progress: Progress value (0.0 to 1.0).
-        bg_color: Background color.
-        fill_color: Fill color.
-    
-    Returns:
-        Image with progress bar.
-    """
-    try:
-        from PIL import Image, ImageDraw
-        import io
-        
-        img = Image.open(io.BytesIO(image_data)).convert("RGB")
-        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
-        
-        draw.rectangle(
-            [(x, y), (x + width, y + height)],
-            fill=bg_color,
+        Returns:
+            Created OverlayElement
+        """
+        element = OverlayElement(
+            element_type=FeedbackType.HIGHLIGHT,
+            x=x,
+            y=y,
+            width=width,
+            height=height,
+            config=config or FeedbackConfig(),
         )
+        self._elements.append(element)
+        self._render()
+        return element
+    
+    def show_crosshair(
+        self,
+        x: float,
+        y: float,
+        size: float = 20,
+        config: FeedbackConfig | None = None,
+    ) -> OverlayElement:
+        """
+        Show a crosshair at a point.
         
-        fill_width = int(width * min(1.0, max(0.0, progress)))
-        if fill_width > 0:
-            draw.rectangle(
-                [(x, y), (x + fill_width, y + height)],
-                fill=fill_color,
-            )
+        Args:
+            x, y: Center position
+            size: Size of crosshair lines
+            config: Optional feedback configuration
+            
+        Returns:
+            Created OverlayElement
+        """
+        element = OverlayElement(
+            element_type=FeedbackType.CROSSHAIR,
+            x=x,
+            y=y,
+            width=size,
+            height=size,
+            config=config or FeedbackConfig(),
+        )
+        self._elements.append(element)
+        self._render()
+        return element
+    
+    def show_pulse(
+        self,
+        x: float,
+        y: float,
+        radius: float = 30,
+        config: FeedbackConfig | None = None,
+    ) -> OverlayElement:
+        """
+        Show a pulsing circle at a point.
         
-        img = Image.alpha_composite(
-            img.convert("RGBA"),
-            overlay,
-        ).convert("RGB")
+        Args:
+            x, y: Center position
+            radius: Initial radius of pulse
+            config: Optional feedback configuration
+            
+        Returns:
+            Created OverlayElement
+        """
+        element = OverlayElement(
+            element_type=FeedbackType.PULSE,
+            x=x,
+            y=y,
+            width=radius,
+            height=radius,
+            config=config or FeedbackConfig(),
+            metadata={"max_radius": radius * 2},
+        )
+        self._elements.append(element)
+        self._start_animation(element)
+        return element
+    
+    def show_ripple(
+        self,
+        x: float,
+        y: float,
+        config: FeedbackConfig | None = None,
+    ) -> OverlayElement:
+        """
+        Show a ripple effect at a point.
         
-        output = io.BytesIO()
-        img.save(output, format="PNG")
-        return output.getvalue()
-    except ImportError:
-        raise ImportError("PIL is required for progress bar")
+        Args:
+            x, y: Center of ripple
+            config: Optional feedback configuration
+            
+        Returns:
+            Created OverlayElement
+        """
+        element = OverlayElement(
+            element_type=FeedbackType.RIPPLE,
+            x=x,
+            y=y,
+            width=10,
+            height=10,
+            config=config or FeedbackConfig(duration_ms=600),
+            metadata={"max_radius": 100},
+        )
+        self._elements.append(element)
+        self._start_animation(element)
+        return element
+    
+    def show_rectangle(
+        self,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        config: FeedbackConfig | None = None,
+    ) -> OverlayElement:
+        """
+        Show a rectangle outline.
+        
+        Args:
+            x, y: Top-left position
+            width, height: Rectangle dimensions
+            config: Optional feedback configuration
+            
+        Returns:
+            Created OverlayElement
+        """
+        element = OverlayElement(
+            element_type=FeedbackType.DRAW_RECT,
+            x=x,
+            y=y,
+            width=width,
+            height=height,
+            config=config or FeedbackConfig(),
+        )
+        self._elements.append(element)
+        self._render()
+        return element
+    
+    def _render(self) -> None:
+        """Render all elements via callback."""
+        if self._render_callback:
+            self._render_callback(self._elements)
+    
+    def _start_animation(self, element: OverlayElement) -> None:
+        """Start animation for an animated element."""
+        pass  # Animation handled by external loop
+    
+    def hide(self, element: OverlayElement | None = None) -> None:
+        """
+        Hide feedback overlay.
+        
+        Args:
+            element: Specific element to hide, or None to hide all
+        """
+        if element is None:
+            self._elements.clear()
+        elif element in self._elements:
+            self._elements.remove(element)
+        self._render()
+    
+    def clear(self) -> None:
+        """Clear all feedback elements."""
+        self._elements.clear()
+        self._render()
+    
+    def get_elements(self) -> list[OverlayElement]:
+        """Get all current overlay elements."""
+        return list(self._elements)
+    
+    def is_active(self) -> bool:
+        """Check if overlay is active."""
+        return self._active
 
 
-def create_notification_banner(
-    image_data: bytes,
-    message: str,
-    feedback_type: FeedbackType = FeedbackType.INFO,
-    position: str = "top",
-    config: Optional[NotificationStyle] = None,
-) -> bytes:
-    """Add notification banner to image.
-    
-    Args:
-        image_data: Image bytes.
-        message: Notification message.
-        feedback_type: Type of notification.
-        position: Position (top, bottom, center).
-        config: Notification style configuration.
-    
-    Returns:
-        Image with notification banner.
+class SpotlightEffect:
     """
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-        import io
+    Creates a spotlight effect that dims everything except
+    a highlighted area.
+    """
+    
+    def __init__(self, render_callback: Callable[[list], None] | None = None):
+        self._render_callback = render_callback
+        self._spotlight_x: float = 0
+        self._spotlight_y: float = 0
+        self._spotlight_radius: float = 50
+        self._dim_color: str = "rgba(0, 0, 0, 0.5)"
+        self._active = False
+    
+    def show(
+        self,
+        x: float,
+        y: float,
+        radius: float = 50,
+        dim_color: str = "rgba(0, 0, 0, 0.5)",
+    ) -> None:
+        """
+        Show spotlight effect.
         
-        config = config or NotificationStyle()
-        
-        colors = {
-            FeedbackType.SUCCESS: (0, 150, 0),
-            FeedbackType.ERROR: (200, 0, 0),
-            FeedbackType.WARNING: (200, 150, 0),
-            FeedbackType.INFO: (50, 50, 50),
-            FeedbackType.LOADING: (50, 50, 50),
-            FeedbackType.PROGRESS: (50, 50, 50),
+        Args:
+            x, y: Center of spotlight
+            radius: Radius of clear area
+            dim_color: Color for dimmed area
+        """
+        self._spotlight_x = x
+        self._spotlight_y = y
+        self._spotlight_radius = radius
+        self._dim_color = dim_color
+        self._active = True
+        self._render()
+    
+    def move(self, x: float, y: float) -> None:
+        """Move spotlight to new position."""
+        self._spotlight_x = x
+        self._spotlight_y = y
+        if self._active:
+            self._render()
+    
+    def hide(self) -> None:
+        """Hide spotlight effect."""
+        self._active = False
+        self._render()
+    
+    def _render(self) -> None:
+        """Render via callback."""
+        if self._render_callback:
+            self._render_callback([self])
+    
+    @property
+    def spotlight_data(self) -> dict:
+        """Get spotlight data for rendering."""
+        return {
+            "x": self._spotlight_x,
+            "y": self._spotlight_y,
+            "radius": self._spotlight_radius,
+            "dim_color": self._dim_color,
+            "active": self._active,
         }
-        
-        bg_color = colors.get(feedback_type, (50, 50, 50))
-        
-        img = Image.open(io.BytesIO(image_data)).convert("RGB")
-        
-        try:
-            font = ImageFont.truetype(
-                "/System/Library/Fonts/Helvetica.ttc",
-                config.font_size,
-            )
-        except Exception:
-            font = ImageFont.load_default()
-        
-        draw = ImageDraw.Draw(img)
-        bbox = draw.textbbox((0, 0), message, font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-        
-        banner_height = text_height + config.padding * 2
-        banner_width = text_width + config.padding * 2
-        
-        if position == "top":
-            bx = (img.width - banner_width) // 2
-            by = 20
-        elif position == "bottom":
-            bx = (img.width - banner_width) // 2
-            by = img.height - banner_height - 20
-        else:
-            bx = (img.width - banner_width) // 2
-            by = (img.height - banner_height) // 2
-        
-        draw.rectangle(
-            [(bx, by), (bx + banner_width, by + banner_height)],
-            fill=bg_color,
-        )
-        
-        text_x = bx + (banner_width - text_width) // 2
-        text_y = by + config.padding
-        
-        draw.text(
-            (text_x, text_y),
-            message,
-            fill=config.text_color,
-            font=font,
-        )
-        
-        output = io.BytesIO()
-        img.save(output, format="PNG")
-        return output.getvalue()
-    except ImportError:
-        raise ImportError("PIL is required for notification banner")
 
 
-def create_cursor_highlight(
-    image_data: bytes,
-    x: int,
-    y: int,
-    highlight_color: Tuple[int, int, int] = (255, 255, 0),
-    size: int = 30,
-) -> bytes:
-    """Highlight cursor position with circle.
+def create_click_feedback(
+    x: float,
+    y: float,
+    feedback_type: str = "ripple",
+) -> OverlayElement:
+    """
+    Create a click feedback element at position.
     
     Args:
-        image_data: Image bytes.
-        x: Cursor X coordinate.
-        y: Cursor Y coordinate.
-        highlight_color: Highlight color.
-        size: Size of highlight.
-    
+        x, y: Click position
+        feedback_type: Type of feedback ('ripple', 'pulse', 'highlight')
+        
     Returns:
-        Image with cursor highlight.
+        OverlayElement configured for click feedback
     """
-    try:
-        from PIL import Image, ImageDraw
-        import io
-        
-        img = Image.open(io.BytesIO(image_data)).convert("RGB")
-        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
-        
-        draw.ellipse(
-            [(x - size // 2, y - size // 2), (x + size // 2, y + size // 2)],
-            outline=highlight_color,
-            width=3,
-        )
-        
-        img = Image.alpha_composite(
-            img.convert("RGBA"),
-            overlay,
-        ).convert("RGB")
-        
-        output = io.BytesIO()
-        img.save(output, format="PNG")
-        return output.getvalue()
-    except ImportError:
-        raise ImportError("PIL is required for cursor highlight")
+    config = FeedbackConfig(
+        color="#FFFFFF",
+        width=2.0,
+        duration_ms=400,
+        fill_color="#007AFF",
+        fill_opacity=0.3,
+    )
+    
+    if feedback_type == "ripple":
+        element_type = FeedbackType.RIPPLE
+        metadata = {"max_radius": 80}
+    elif feedback_type == "pulse":
+        element_type = FeedbackType.PULSE
+        metadata = {"max_radius": 60}
+    else:
+        element_type = FeedbackType.HIGHLIGHT
+        metadata = {}
+    
+    return OverlayElement(
+        element_type=element_type,
+        x=x,
+        y=y,
+        width=10,
+        height=10,
+        config=config,
+        metadata=metadata,
+    )
