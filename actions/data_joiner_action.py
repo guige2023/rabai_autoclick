@@ -1,16 +1,17 @@
-"""Data joiner action module for RabAI AutoClick.
+"""
+Data Joiner Action Module.
 
-Provides data joining capabilities with support for inner, left,
-right, outer joins and cross joins.
+Provides SQL-style joins with support for multiple join types,
+cross references, and async execution.
 """
 
-import sys
-import os
-from typing import Any, Dict, List, Optional, Set, Tuple
+import asyncio
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Generic, TypeVar, Optional
 from collections import defaultdict
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+T = TypeVar("T")
 
 
 class JoinType(Enum):
@@ -18,163 +19,388 @@ class JoinType(Enum):
     INNER = "inner"
     LEFT = "left"
     RIGHT = "right"
-    OUTER = "outer"
+    FULL = "full"
     CROSS = "cross"
+    SEMI = "semi"
+    ANTI = "anti"
 
 
-from enum import Enum
+@dataclass
+class JoinConfig:
+    """Join configuration."""
+    join_type: JoinType = JoinType.INNER
+    left_key: str = "id"
+    right_key: str = "id"
+    left_alias: Optional[str] = None
+    right_alias: Optional[str] = None
+    condition: Optional[Callable[[dict, dict], bool]] = None
 
 
-class DataJoinerAction(BaseAction):
-    """Data joiner action for combining data sources.
-    
-    Supports inner, left, right, outer, and cross joins with
-    configurable key fields.
-    """
-    action_type = "data_joiner"
-    display_name = "数据连接"
-    description = "多数据源关联Join"
-    
-    def execute(
+@dataclass
+class JoinResult:
+    """Join operation result."""
+    rows: list[dict] = field(default_factory=list)
+    left_unmatched: list[dict] = field(default_factory=list)
+    right_unmatched: list[dict] = field(default_factory=list)
+    join_type: JoinType = JoinType.INNER
+    left_count: int = 0
+    right_count: int = 0
+    matched_count: int = 0
+
+
+class HashJoin:
+    """Hash join implementation."""
+
+    def __init__(self, config: JoinConfig):
+        self.config = config
+
+    def _get_key_value(self, record: dict, key: str) -> Any:
+        """Get key value from record."""
+        parts = key.split(".")
+        value = record
+        for part in parts:
+            if isinstance(value, dict):
+                value = value.get(part)
+            else:
+                return None
+        return value
+
+    def _build_hash_table(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute join operation.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                left: Left data source
-                right: Right data source
-                left_key: Key field for left source
-                right_key: Key field for right source
-                join_type: Type of join (inner, left, right, outer, cross)
-                how: Alias for join_type
-                select_fields: Fields to include in output.
-        
-        Returns:
-            ActionResult with joined data.
-        """
-        left = params.get('left', [])
-        right = params.get('right', [])
-        left_key = params.get('left_key')
-        right_key = params.get('right_key')
-        join_type = params.get('join_type') or params.get('how', 'inner')
-        select_fields = params.get('select_fields')
-        
-        if not isinstance(left, list) or not isinstance(right, list):
-            return ActionResult(success=False, message="Both sources must be lists")
-        
-        if join_type == 'cross':
-            return self._cross_join(left, right, select_fields)
-        
-        if not left_key or not right_key:
-            return ActionResult(success=False, message="left_key and right_key required")
-        
-        return self._join(
-            left, right,
-            left_key, right_key,
-            join_type,
-            select_fields
-        )
-    
-    def _join(
+        records: list[dict],
+        key: str
+    ) -> dict[Any, list[dict]]:
+        """Build hash table for joining."""
+        hash_table = defaultdict(list)
+        for record in records:
+            key_value = self._get_key_value(record, key)
+            hash_table[key_value].append(record)
+        return hash_table
+
+    def inner_join(
         self,
-        left: List[Dict],
-        right: List[Dict],
-        left_key: str,
-        right_key: str,
-        join_type: str,
-        select_fields: Optional[List[str]]
-    ) -> ActionResult:
-        """Perform join operation."""
-        join_type = join_type.lower()
-        
-        right_index: Dict[Any, List[Dict]] = defaultdict(list)
-        for item in right:
-            key = item.get(right_key)
-            if key is not None:
-                right_index[key].append(item)
-        
-        matched_right: Set[int] = set()
-        results = []
-        
-        for i, left_item in enumerate(left):
-            left_val = left_item.get(left_key)
-            right_matches = right_index.get(left_val, [])
-            
-            if right_matches:
-                matched_right.update(id(r) for r in right_matches)
-                for right_item in right_matches:
-                    merged = self._merge_items(left_item, right_item, select_fields)
-                    results.append(merged)
-            elif join_type in ('left', 'outer'):
-                merged = self._merge_items(left_item, {}, select_fields)
-                results.append(merged)
-        
-        if join_type in ('right', 'outer'):
-            for right_item in right:
-                if id(right_item) not in matched_right:
-                    merged = self._merge_items({}, right_item, select_fields)
-                    results.append(merged)
-        
-        return ActionResult(
-            success=True,
-            message=f"{join_type.title()} join: {len(results)} results",
-            data={
-                'results': results,
-                'count': len(results),
-                'join_type': join_type
-            }
+        left: list[dict],
+        right: list[dict]
+    ) -> JoinResult:
+        """Perform inner join."""
+        right_hash = self._build_hash_table(right, self.config.right_key)
+        result_rows = []
+        left_unmatched = []
+
+        for left_record in left:
+            key_value = self._get_key_value(left_record, self.config.left_key)
+            right_matches = right_hash.get(key_value, [])
+
+            if not right_matches:
+                left_unmatched.append(left_record)
+                continue
+
+            for right_record in right_matches:
+                if self.config.condition and not self.config.condition(left_record, right_record):
+                    continue
+
+                merged = {**left_record, **right_record}
+                result_rows.append(merged)
+
+        return JoinResult(
+            rows=result_rows,
+            left_unmatched=left_unmatched,
+            right_unmatched=[],
+            join_type=JoinType.INNER,
+            left_count=len(left),
+            right_count=len(right),
+            matched_count=len(result_rows)
         )
-    
+
+    def left_join(
+        self,
+        left: list[dict],
+        right: list[dict]
+    ) -> JoinResult:
+        """Perform left join."""
+        right_hash = self._build_hash_table(right, self.config.right_key)
+        result_rows = []
+        left_unmatched = []
+
+        for left_record in left:
+            key_value = self._get_key_value(left_record, self.config.left_key)
+            right_matches = right_hash.get(key_value, [])
+
+            if not right_matches:
+                merged = {**left_record}
+                for right_field in right[0].keys() if right else []:
+                    if right_field not in merged:
+                        merged[right_field] = None
+                result_rows.append(merged)
+                left_unmatched.append(left_record)
+                continue
+
+            for right_record in right_matches:
+                if self.config.condition and not self.config.condition(left_record, right_record):
+                    continue
+                merged = {**left_record, **right_record}
+                result_rows.append(merged)
+
+        return JoinResult(
+            rows=result_rows,
+            left_unmatched=left_unmatched,
+            right_unmatched=[],
+            join_type=JoinType.LEFT,
+            left_count=len(left),
+            right_count=len(right),
+            matched_count=len(result_rows)
+        )
+
+    def right_join(
+        self,
+        left: list[dict],
+        right: list[dict]
+    ) -> JoinResult:
+        """Perform right join."""
+        left_hash = self._build_hash_table(left, self.config.left_key)
+        result_rows = []
+        right_unmatched = []
+
+        for right_record in right:
+            key_value = self._get_key_value(right_record, self.config.right_key)
+            left_matches = left_hash.get(key_value, [])
+
+            if not left_matches:
+                merged = {**right_record}
+                for left_field in left[0].keys() if left else []:
+                    if left_field not in merged:
+                        merged[left_field] = None
+                result_rows.append(merged)
+                right_unmatched.append(right_record)
+                continue
+
+            for left_record in left_matches:
+                if self.config.condition and not self.config.condition(left_record, right_record):
+                    continue
+                merged = {**left_record, **right_record}
+                result_rows.append(merged)
+
+        return JoinResult(
+            rows=result_rows,
+            left_unmatched=[],
+            right_unmatched=right_unmatched,
+            join_type=JoinType.RIGHT,
+            left_count=len(left),
+            right_count=len(right),
+            matched_count=len(result_rows)
+        )
+
+    def full_join(
+        self,
+        left: list[dict],
+        right: list[dict]
+    ) -> JoinResult:
+        """Perform full outer join."""
+        left_hash = self._build_hash_table(left, self.config.left_key)
+        right_hash = self._build_hash_table(right, self.config.right_key)
+
+        left_keys = set(self._get_key_value(r, self.config.left_key) for r in left)
+        right_keys = set(self._get_key_value(r, self.config.right_key) for r in right)
+        all_keys = left_keys | right_keys
+
+        result_rows = []
+        left_unmatched = []
+        right_unmatched = []
+        matched_left_keys = set()
+        matched_right_keys = set()
+
+        for key in all_keys:
+            left_matches = left_hash.get(key, [])
+            right_matches = right_hash.get(key, [])
+
+            if left_matches and right_matches:
+                for lr in left_matches:
+                    for rr in right_matches:
+                        if self.config.condition and not self.config.condition(lr, rr):
+                            continue
+                        result_rows.append({**lr, **rr})
+                        matched_left_keys.add(key)
+                        matched_right_keys.add(key)
+            elif left_matches:
+                for lr in left_matches:
+                    merged = {**lr}
+                    for rf in right[0].keys() if right else []:
+                        if rf not in merged:
+                            merged[rf] = None
+                    result_rows.append(merged)
+                    left_unmatched.append(lr)
+            elif right_matches:
+                for rr in right_matches:
+                    merged = {**rr}
+                    for lf in left[0].keys() if left else []:
+                        if lf not in merged:
+                            merged[lf] = None
+                    result_rows.append(merged)
+                    right_unmatched.append(rr)
+
+        return JoinResult(
+            rows=result_rows,
+            left_unmatched=left_unmatched,
+            right_unmatched=right_unmatched,
+            join_type=JoinType.FULL,
+            left_count=len(left),
+            right_count=len(right),
+            matched_count=len(result_rows)
+        )
+
+
+class DataJoiner:
+    """Data joiner with multiple join types."""
+
+    def __init__(self, config: Optional[JoinConfig] = None):
+        self.config = config or JoinConfig()
+        self._hash_join = HashJoin(self.config)
+
+    def join(
+        self,
+        left: list[dict],
+        right: list[dict],
+        join_type: Optional[JoinType] = None
+    ) -> JoinResult:
+        """Perform join."""
+        jt = join_type or self.config.join_type
+
+        if jt == JoinType.INNER:
+            return self._hash_join.inner_join(left, right)
+        elif jt == JoinType.LEFT:
+            return self._hash_join.left_join(left, right)
+        elif jt == JoinType.RIGHT:
+            return self._hash_join.right_join(left, right)
+        elif jt == JoinType.FULL:
+            return self._hash_join.full_join(left, right)
+        elif jt == JoinType.CROSS:
+            return self._cross_join(left, right)
+        elif jt == JoinType.SEMI:
+            return self._semi_join(left, right)
+        elif jt == JoinType.ANTI:
+            return self._anti_join(left, right)
+
+        return self._hash_join.inner_join(left, right)
+
     def _cross_join(
         self,
-        left: List[Dict],
-        right: List[Dict],
-        select_fields: Optional[List[str]]
-    ) -> ActionResult:
+        left: list[dict],
+        right: list[dict]
+    ) -> JoinResult:
         """Perform cross join."""
-        if len(left) * len(right) > 100000:
-            return ActionResult(
-                success=False,
-                message=f"Cross join would produce {len(left) * len(right)} results (limit: 100000)"
-            )
-        
         results = []
-        for left_item in left:
-            for right_item in right:
-                merged = self._merge_items(left_item, right_item, select_fields)
-                results.append(merged)
-        
-        return ActionResult(
-            success=True,
-            message=f"Cross join: {len(results)} results",
-            data={
-                'results': results,
-                'count': len(results),
-                'join_type': 'cross'
-            }
+        for l in left:
+            for r in right:
+                results.append({**l, **r})
+        return JoinResult(
+            rows=results,
+            join_type=JoinType.CROSS,
+            left_count=len(left),
+            right_count=len(right),
+            matched_count=len(results)
         )
-    
-    def _merge_items(
+
+    def _semi_join(
         self,
-        left_item: Dict,
-        right_item: Dict,
-        select_fields: Optional[List[str]]
-    ) -> Dict:
-        """Merge two items, handling key conflicts."""
-        result = {}
-        
-        for key, value in left_item.items():
-            if select_fields is None or key in select_fields:
-                result[key] = value
-        
-        for key, value in right_item.items():
-            if key in left_item:
-                result[f"{key}_y"] = value
-            elif select_fields is None or key in select_fields:
-                result[key] = value
-        
-        return result
+        left: list[dict],
+        right: list[dict]
+    ) -> JoinResult:
+        """Perform semi join."""
+        right_hash = self._hash_join._build_hash_table(right, self.config.right_key)
+        results = []
+        unmatched = []
+
+        for record in left:
+            key = self._hash_join._get_key_value(record, self.config.left_key)
+            if key in right_hash:
+                results.append(record)
+            else:
+                unmatched.append(record)
+
+        return JoinResult(
+            rows=results,
+            left_unmatched=unmatched,
+            join_type=JoinType.SEMI,
+            left_count=len(left),
+            right_count=len(right),
+            matched_count=len(results)
+        )
+
+    def _anti_join(
+        self,
+        left: list[dict],
+        right: list[dict]
+    ) -> JoinResult:
+        """Perform anti join."""
+        right_hash = self._hash_join._build_hash_table(right, self.config.right_key)
+        results = []
+        matched = []
+
+        for record in left:
+            key = self._hash_join._get_key_value(record, self.config.left_key)
+            if key not in right_hash:
+                results.append(record)
+            else:
+                matched.append(record)
+
+        return JoinResult(
+            rows=results,
+            left_unmatched=matched,
+            join_type=JoinType.ANTI,
+            left_count=len(left),
+            right_count=len(right),
+            matched_count=len(results)
+        )
+
+
+class DataJoinerAction:
+    """
+    SQL-style data joins.
+
+    Example:
+        joiner = DataJoinerAction(
+            join_type=JoinType.LEFT,
+            left_key="user_id",
+            right_key="id"
+        )
+
+        result = joiner.join(users, orders)
+        print(f"Matched: {result.matched_count}")
+    """
+
+    def __init__(
+        self,
+        join_type: JoinType = JoinType.INNER,
+        left_key: str = "id",
+        right_key: str = "id",
+        condition: Optional[Callable[[dict, dict], bool]] = None
+    ):
+        config = JoinConfig(
+            join_type=join_type,
+            left_key=left_key,
+            right_key=right_key,
+            condition=condition
+        )
+        self._joiner = DataJoiner(config)
+
+    def join(
+        self,
+        left: list[dict],
+        right: list[dict],
+        join_type: Optional[JoinType] = None
+    ) -> JoinResult:
+        """Join datasets."""
+        return self._joiner.join(left, right, join_type)
+
+    async def join_async(
+        self,
+        left: list[dict],
+        right: list[dict],
+        join_type: Optional[JoinType] = None
+    ) -> JoinResult:
+        """Join datasets asynchronously."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: self._joiner.join(left, right, join_type)
+        )
