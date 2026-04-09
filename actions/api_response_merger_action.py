@@ -1,507 +1,437 @@
-"""
-API Response Merger Module.
+"""API Response Merger Action Module.
 
-Provides response aggregation, merging, and fan-out/fan-in patterns
-for distributed API requests.
+Merges multiple API responses into unified results.
+Handles field selection, conflict resolution, and data transformation.
+
+Author: rabai_autoclick team
 """
 
 from __future__ import annotations
 
 import asyncio
-import time
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, TypeVar
-from collections import defaultdict
 import logging
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum, auto
+from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar("T")
-R = TypeVar("R")
-
 
 class MergeStrategy(Enum):
-    """Strategy for merging responses."""
-    FIRST = "first"
-    LAST = "last"
-    ALL = "all"
-    CONCAT = "concat"
-    MERGE = "merge"
-    RESOLVE = "resolve"  # Wait for all, merge results
-    RACE = "race"  # Return first to complete
-    ANY = "any"  # Return first successful
+    """Strategy for merging conflicting values."""
+    FIRST = auto()       # Use first value
+    LAST = auto()       # Use last value
+    CONCATENATE = auto() # Concatenate values
+    MERGE_OBJECTS = auto() # Deep merge objects
+    RESOLVE_CONFLICT = auto() # Custom resolution
+
+
+class ConflictResolver:
+    """Resolves conflicts between merged values."""
+    
+    @staticmethod
+    def newest(values: List[Any]) -> Any:
+        """Select the most recent value based on timestamp."""
+        return max(values, key=lambda v: v.get("_timestamp", 0) if isinstance(v, dict) else 0)
+    
+    @staticmethod
+    def oldest(values: List[Any]) -> Any:
+        """Select the oldest value."""
+        return min(values, key=lambda v: v.get("_timestamp", float('inf')) if isinstance(v, dict) else float('inf'))
+    
+    @staticmethod
+    def longest(values: List[str]) -> str:
+        """Select the longest string value."""
+        return max(values, key=len)
+    
+    @staticmethod
+    def highest(values: List[Union[int, float]]) -> Union[int, float]:
+        """Select the highest numeric value."""
+        return max(values)
+    
+    @staticmethod
+    def lowest(values: List[Union[int, float]]) -> Union[int, float]:
+        """Select the lowest numeric value."""
+        return min(values)
+    
+    @staticmethod
+    def most_common(values: List[Any]) -> Any:
+        """Select the most frequently occurring value."""
+        counts = defaultdict(int)
+        for v in values:
+            counts[str(v)] += 1
+        return max(values, key=lambda v: counts[str(v)])
 
 
 @dataclass
 class MergeConfig:
     """Configuration for response merging."""
-    strategy: MergeStrategy = MergeStrategy.ALL
-    timeout: float = 30.0
-    fail_fast: bool = True
-    max_results: Optional[int] = None
-    preserve_order: bool = False
-    dedup_key: Optional[str] = None
+    strategy: MergeStrategy = MergeStrategy.FIRST
+    conflict_resolver: Optional[Callable[[List[Any]], Any]] = None
+    include_metadata: bool = True
+    dedupe_arrays: bool = True
+    preserve_null: bool = False
 
 
 @dataclass
-class MergedResponse:
-    """Container for merged response."""
-    responses: List[Any]
-    errors: List[Exception]
-    success_count: int
-    error_count: int
-    total_latency: float
-    strategy: MergeStrategy
-    
-    
-@dataclass
-class ResponseContext:
-    """Context for a single response."""
-    request_id: str
-    response: Any
-    latency: float
-    success: bool
-    error: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+class MergeResult:
+    """Result of a merge operation."""
+    data: Dict[str, Any]
+    conflicts: List[Dict[str, Any]] = field(default_factory=list)
+    sources: List[str] = field(default_factory=list)
+    merged_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
-class ResponseMerger:
-    """
-    Merge responses from multiple API requests.
+class APIResponseMerger:
+    """Merges multiple API responses into unified results.
     
-    Example:
-        merger = ResponseMerger(MergeConfig(
-            strategy=MergeStrategy.RESOLVE,
-            timeout=10.0
-        ))
-        
-        # Fan-out requests
-        requests = [
-            ("GET", "https://api.example.com/users/1"),
-            ("GET", "https://api.example.com/users/2"),
-            ("GET", "https://api.example.com/users/3"),
-        ]
-        
-        async for result in merger.merge_requests(requests, handler):
-            print(result)
+    Supports:
+    - Field selection and exclusion
+    - Conflict resolution strategies
+    - Nested object merging
+    - Array deduplication
+    - Type coercion
     """
     
-    def __init__(self, config: Optional[MergeConfig] = None) -> None:
-        """
-        Initialize the response merger.
-        
-        Args:
-            config: Merge configuration.
-        """
+    def __init__(self, config: Optional[MergeConfig] = None):
         self.config = config or MergeConfig()
-        
-    async def merge_requests(
-        self,
-        requests: List[Tuple[str, str, Optional[Dict], Optional[Dict], Optional[bytes]]],
-        handler: Callable[..., Awaitable[Any]],
-    ) -> MergedResponse:
-        """
-        Merge responses from multiple requests.
+        self._field_selectors: Dict[str, List[str]] = {}
+        self._field_transformers: Dict[str, Callable] = {}
+        self._type_coercions: Dict[str, type] = {}
+        self._lock = asyncio.Lock()
+    
+    def select_fields(self, source: str, fields: List[str]) -> None:
+        """Set field selection for a source.
         
         Args:
-            requests: List of (method, url, params, headers, body) tuples.
-            handler: Async function to execute each request.
-            
-        Returns:
-            MergedResponse with all results.
+            source: Source identifier
+            fields: List of field paths to include
         """
-        start_time = time.time()
-        contexts: List[ResponseContext] = []
-        errors: List[Exception] = []
+        self._field_selectors[source] = fields
+    
+    def add_field_transformer(
+        self,
+        field_path: str,
+        transformer: Callable[[Any], Any]
+    ) -> None:
+        """Add a transformation for a specific field.
         
-        if self.config.strategy == MergeStrategy.RACE:
-            return await self._merge_race(requests, handler, start_time)
-        elif self.config.strategy == MergeStrategy.ANY:
-            return await self._merge_any(requests, handler, start_time)
-        elif self.config.strategy == MergeStrategy.RESOLVE:
-            return await self._merge_resolve(requests, handler, start_time)
-        else:
-            return await self._merge_all(requests, handler, start_time)
-            
+        Args:
+            field_path: Dot-separated path (e.g., "user.name")
+            transformer: Function to transform the field value
+        """
+        self._field_transformers[field_path] = transformer
+    
+    def set_type_coercion(self, field_path: str, target_type: type) -> None:
+        """Set type coercion for a field.
+        
+        Args:
+            field_path: Dot-separated path
+            target_type: Target type to coerce to
+        """
+        self._type_coercions[field_path] = target_type
+    
     async def merge_responses(
         self,
-        futures: List[asyncio.Future],
-    ) -> MergedResponse:
-        """
-        Merge multiple response futures.
+        responses: Dict[str, Dict[str, Any]]
+    ) -> MergeResult:
+        """Merge multiple API responses.
         
         Args:
-            futures: List of response futures.
+            responses: Dict mapping source names to response data
             
         Returns:
-            MergedResponse with results.
+            Merged result with conflicts
         """
-        start_time = time.time()
-        responses = []
-        errors = []
+        result_data: Dict[str, Any] = {}
+        conflicts: List[Dict[str, Any]] = []
+        all_sources = list(responses.keys())
         
-        try:
-            results = await asyncio.gather(*futures, return_exceptions=True)
+        all_fields = set()
+        for response in responses.values():
+            all_fields.update(self._flatten_dict(response).keys())
+        
+        for field_path in all_fields:
+            values = []
+            sources_with_field = []
             
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    errors.append(result)
-                else:
-                    responses.append(result)
-                    
-        except Exception as e:
-            errors.append(e)
+            for source, response in responses.items():
+                value = self._get_nested_value(response, field_path)
+                if value is not None:
+                    values.append(value)
+                    sources_with_field.append(source)
             
-        total_latency = time.time() - start_time
-        
-        return MergedResponse(
-            responses=responses,
-            errors=errors,
-            success_count=len(responses),
-            error_count=len(errors),
-            total_latency=total_latency,
-            strategy=self.config.strategy,
-        )
-        
-    async def _merge_all(
-        self,
-        requests: List[Tuple[str, str, Optional[Dict], Optional[Dict], Optional[bytes]]],
-        handler: Callable[..., Awaitable[Any]],
-        start_time: float,
-    ) -> MergedResponse:
-        """Merge all responses (wait for all)."""
-        tasks = []
-        
-        for i, (method, url, params, headers, body) in enumerate(requests):
-            request_id = f"merge_{i}_{int(time.time() * 1000)}"
-            task = self._execute_and_wrap(
-                request_id, method, url, params, headers, body, handler
-            )
-            tasks.append(task)
+            if not values:
+                continue
             
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        responses = []
-        errors = []
-        
-        for result in results:
-            if isinstance(result, ResponseContext):
-                if result.success:
-                    responses.append(result.response)
-                else:
-                    errors.append(Exception(result.error or "Unknown error"))
+            if len(values) == 1:
+                result_data = self._set_nested_value(
+                    result_data, field_path, values[0]
+                )
             else:
-                errors.append(result)
+                conflict = await self._resolve_conflict(
+                    field_path, values, sources_with_field
+                )
                 
-        total_latency = time.time() - start_time
-        
-        return MergedResponse(
-            responses=responses,
-            errors=errors,
-            success_count=len(responses),
-            error_count=len(errors),
-            total_latency=total_latency,
-            strategy=self.config.strategy,
-        )
-        
-    async def _merge_race(
-        self,
-        requests: List[Tuple[str, str, Optional[Dict], Optional[Dict], Optional[bytes]]],
-        handler: Callable[..., Awaitable[Any]],
-        start_time: float,
-    ) -> MergedResponse:
-        """Return response from first request to complete."""
-        tasks = []
-        
-        for i, (method, url, params, headers, body) in enumerate(requests):
-            request_id = f"race_{i}_{int(time.time() * 1000)}"
-            task = self._execute_and_wrap(
-                request_id, method, url, params, headers, body, handler
-            )
-            tasks.append(task)
-            
-        # Wait for first result
-        done, pending = await asyncio.wait(
-            tasks,
-            timeout=self.config.timeout,
-            return_when=asyncio.FIRST_COMPLETED
-        )
-        
-        # Cancel pending
-        for task in pending:
-            task.cancel()
-            
-        # Get first result
-        responses = []
-        errors = []
-        
-        for task in done:
-            try:
-                result = task.result()
-                if isinstance(result, ResponseContext):
-                    if result.success:
-                        responses.append(result.response)
-                    else:
-                        errors.append(Exception(result.error or "Unknown error"))
-                else:
-                    errors.append(result)
-            except Exception as e:
-                errors.append(e)
-                
-        total_latency = time.time() - start_time
-        
-        return MergedResponse(
-            responses=responses,
-            errors=errors,
-            success_count=len(responses),
-            error_count=len(errors),
-            total_latency=total_latency,
-            strategy=self.config.strategy,
-        )
-        
-    async def _merge_any(
-        self,
-        requests: List[Tuple[str, str, Optional[Dict], Optional[Dict], Optional[bytes]]],
-        handler: Callable[..., Awaitable[Any]],
-        start_time: float,
-    ) -> MergedResponse:
-        """Return first successful response."""
-        tasks = []
-        
-        for i, (method, url, params, headers, body) in enumerate(requests):
-            request_id = f"any_{i}_{int(time.time() * 1000)}"
-            task = self._execute_and_wrap(
-                request_id, method, url, params, headers, body, handler
-            )
-            tasks.append(task)
-            
-        # Wait for first successful
-        done, pending = await asyncio.wait(
-            tasks,
-            timeout=self.config.timeout,
-            return_when=asyncio.FIRST_EXCEPTION
-        )
-        
-        # Check for success
-        for task in done:
-            try:
-                result = task.result()
-                if isinstance(result, ResponseContext) and result.success:
-                    # Cancel pending
-                    for p in pending:
-                        p.cancel()
-                    return MergedResponse(
-                        responses=[result.response],
-                        errors=[],
-                        success_count=1,
-                        error_count=0,
-                        total_latency=time.time() - start_time,
-                        strategy=self.config.strategy,
+                if conflict["resolved"]:
+                    result_data = self._set_nested_value(
+                        result_data, field_path, conflict["value"]
                     )
-            except Exception:
-                pass
-                
-        # No success, return what we have
-        return await self._merge_all(requests, handler, start_time)
-        
-    async def _merge_resolve(
-        self,
-        requests: List[Tuple[str, str, Optional[Dict], Optional[Dict], Optional[bytes]]],
-        handler: Callable[..., Awaitable[Any]],
-        start_time: float,
-    ) -> MergedResponse:
-        """Wait for all, then merge results."""
-        merged = await self._merge_all(requests, handler, start_time)
-        merged.strategy = MergeStrategy.RESOLVE
-        return merged
-        
-    async def _execute_and_wrap(
-        self,
-        request_id: str,
-        method: str,
-        url: str,
-        params: Optional[Dict],
-        headers: Optional[Dict],
-        body: Optional[bytes],
-        handler: Callable[..., Awaitable[Any]],
-    ) -> ResponseContext:
-        """Execute request and wrap in ResponseContext."""
-        start_time = time.time()
-        
-        try:
-            result = await asyncio.wait_for(
-                handler(method, url, params, headers, body),
-                timeout=self.config.timeout
-            )
-            latency = time.time() - start_time
-            
-            return ResponseContext(
-                request_id=request_id,
-                response=result,
-                latency=latency,
-                success=True,
-            )
-        except asyncio.TimeoutError:
-            return ResponseContext(
-                request_id=request_id,
-                response=None,
-                latency=self.config.timeout,
-                success=False,
-                error=f"Request timeout after {self.config.timeout}s",
-            )
-        except Exception as e:
-            return ResponseContext(
-                request_id=request_id,
-                response=None,
-                latency=time.time() - start_time,
-                success=False,
-                error=str(e),
-            )
-            
-    def merge_data(
-        self,
-        data: List[Dict[str, Any]],
-        merge_key: str,
-    ) -> Dict[str, List[Any]]:
-        """
-        Merge list of dicts by key.
-        
-        Args:
-            data: List of dictionaries.
-            merge_key: Key to merge on.
-            
-        Returns:
-            Merged dictionary.
-        """
-        result: Dict[str, List[Any]] = defaultdict(list)
-        
-        for item in data:
-            if merge_key in item:
-                key = item[merge_key]
-                result[key].append(item)
-                
-        return dict(result)
-
-
-class FanOutMerger:
-    """
-    Fan-out/fan-in request pattern with merging.
-    
-    Example:
-        fanout = FanOutMerger(max_concurrency=10)
-        
-        async for result in fanout.execute(
-            items=user_ids,
-            func=lambda uid: fetch_user(uid),
-            merge_strategy="merge_by_id"
-        ):
-            print(result)
-    """
-    
-    def __init__(
-        self,
-        max_concurrency: int = 10,
-        timeout: float = 30.0,
-    ) -> None:
-        """
-        Initialize fan-out merger.
-        
-        Args:
-            max_concurrency: Maximum concurrent executions.
-            timeout: Timeout per item.
-        """
-        self.max_concurrency = max_concurrency
-        self.timeout = timeout
-        self._semaphore = asyncio.Semaphore(max_concurrency)
-        
-    async def execute(
-        self,
-        items: List[T],
-        func: Callable[[T], Awaitable[R]],
-        merge_strategy: str = "all",
-    ) -> MergedResponse:
-        """
-        Execute function for each item with fan-out/fan-in.
-        
-        Args:
-            items: List of items to process.
-            func: Async function to execute per item.
-            merge_strategy: How to merge results.
-            
-        Returns:
-            MergedResponse with all results.
-        """
-        start_time = time.time()
-        results: List[R] = []
-        errors: List[Exception] = []
-        
-        async def execute_with_semaphore(item: T, index: int) -> Tuple[int, R, Optional[Exception]]:
-            async with self._semaphore:
-                try:
-                    result = await asyncio.wait_for(func(item), timeout=self.timeout)
-                    return (index, result, None)
-                except Exception as e:
-                    return (index, None, e)
-                    
-        tasks = [execute_with_semaphore(item, i) for i, item in enumerate(items)]
-        task_results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Collect results
-        for result in task_results:
-            if isinstance(result, Exception):
-                errors.append(result)
-            else:
-                index, value, error = result
-                if error:
-                    errors.append(error)
                 else:
-                    results.append(value)
-                    
-        total_latency = time.time() - start_time
+                    conflicts.append(conflict)
+                    result_data = self._set_nested_value(
+                        result_data, field_path, values[0]
+                    )
         
-        return MergedResponse(
-            responses=results,
-            errors=errors,
-            success_count=len(results),
-            error_count=len(errors),
-            total_latency=total_latency,
-            strategy=MergeStrategy.ALL,
+        if self.config.include_metadata:
+            result_data["_merge_metadata"] = {
+                "sources": all_sources,
+                "merged_at": datetime.now().isoformat(),
+                "conflict_count": len(conflicts)
+            }
+        
+        return MergeResult(
+            data=result_data,
+            conflicts=conflicts,
+            sources=all_sources
         )
-        
-    async def execute_with_buckets(
+    
+    async def merge_arrays(
         self,
-        items: List[T],
-        func: Callable[[T], Awaitable[R]],
-        bucket_count: int = 3,
-    ) -> List[List[R]]:
-        """
-        Execute items in buckets, return results per bucket.
+        arrays: List[List[Any]],
+        dedupe: bool = True,
+        dedupe_key: Optional[str] = None
+    ) -> List[Any]:
+        """Merge multiple arrays with optional deduplication.
         
         Args:
-            items: List of items to process.
-            func: Async function to execute per item.
-            bucket_count: Number of buckets.
+            arrays: List of arrays to merge
+            dedupe: Whether to deduplicate results
+            dedupe_key: Optional key for object deduplication
             
         Returns:
-            List of result lists per bucket.
+            Merged array
         """
-        # Split items into buckets
-        bucket_size = (len(items) + bucket_count - 1) // bucket_count
-        buckets = [
-            items[i:i + bucket_size]
-            for i in range(0, len(items), bucket_size)
-        ]
+        merged = []
+        for arr in arrays:
+            merged.extend(arr)
         
-        async def process_bucket(bucket_items: List[T]) -> List[R]:
-            results = []
-            for item in bucket_items:
-                result = await func(item)
-                results.append(result)
-            return results
+        if dedupe:
+            if dedupe_key:
+                seen = set()
+                result = []
+                for item in merged:
+                    key_val = self._get_nested_value(item, dedupe_key)
+                    if key_val not in seen:
+                        seen.add(key_val)
+                        result.append(item)
+                merged = result
+            else:
+                merged = list(dict.fromkeys(merged))
+        
+        return merged
+    
+    async def _resolve_conflict(
+        self,
+        field_path: str,
+        values: List[Any],
+        sources: List[str]
+    ) -> Dict[str, Any]:
+        """Resolve a merge conflict.
+        
+        Args:
+            field_path: Field path with conflict
+            values: Conflicting values
+            sources: Sources providing each value
             
-        bucket_results = await asyncio.gather(*[
-            process_bucket(bucket) for bucket in buckets
-        ])
+        Returns:
+            Conflict resolution details
+        """
+        if self.config.conflict_resolver:
+            resolved_value = self.config.conflict_resolver(values)
+            return {
+                "field_path": field_path,
+                "values": values,
+                "sources": sources,
+                "resolved": True,
+                "value": resolved_value
+            }
         
-        return list(bucket_results)
+        strategy = self.config.strategy
+        
+        if strategy == MergeStrategy.FIRST:
+            return {
+                "field_path": field_path,
+                "values": values,
+                "sources": sources,
+                "resolved": True,
+                "value": values[0]
+            }
+        
+        if strategy == MergeStrategy.LAST:
+            return {
+                "field_path": field_path,
+                "values": values,
+                "sources": sources,
+                "resolved": True,
+                "value": values[-1]
+            }
+        
+        if strategy == MergeStrategy.CONCATENATE:
+            if all(isinstance(v, str) for v in values):
+                return {
+                    "field_path": field_path,
+                    "values": values,
+                    "sources": sources,
+                    "resolved": True,
+                    "value": " ".join(values)
+                }
+            return {
+                "field_path": field_path,
+                "values": values,
+                "sources": sources,
+                "resolved": True,
+                "value": values[-1]
+            }
+        
+        if strategy == MergeStrategy.MERGE_OBJECTS:
+            if all(isinstance(v, dict) for v in values):
+                merged = {}
+                for v in values:
+                    merged.update(v)
+                return {
+                    "field_path": field_path,
+                    "values": values,
+                    "sources": sources,
+                    "resolved": True,
+                    "value": merged
+                }
+        
+        return {
+            "field_path": field_path,
+            "values": values,
+            "sources": sources,
+            "resolved": False
+        }
+    
+    def _flatten_dict(
+        self,
+        d: Dict[str, Any],
+        parent_key: str = "",
+        sep: str = "."
+    ) -> Dict[str, Any]:
+        """Flatten nested dictionary."""
+        items = []
+        for k, v in d.items():
+            new_key = f"{parent_key}{sep}{k}" if parent_key else k
+            if isinstance(v, dict):
+                items.extend(self._flatten_dict(v, new_key, sep).items())
+            else:
+                items.append((new_key, v))
+        return dict(items)
+    
+    def _get_nested_value(
+        self,
+        data: Dict[str, Any],
+        path: str,
+        sep: str = "."
+    ) -> Optional[Any]:
+        """Get value from nested dict using path."""
+        keys = path.split(sep)
+        value = data
+        
+        for key in keys:
+            if isinstance(value, dict) and key in value:
+                value = value[key]
+            else:
+                return None
+        
+        return value
+    
+    def _set_nested_value(
+        self,
+        data: Dict[str, Any],
+        path: str,
+        value: Any,
+        sep: str = "."
+    ) -> Dict[str, Any]:
+        """Set value in nested dict using path."""
+        keys = path.split(sep)
+        current = data
+        
+        for key in keys[:-1]:
+            if key not in current:
+                current[key] = {}
+            current = current[key]
+        
+        current[keys[-1]] = value
+        return data
+
+
+class GraphQLResponseMerger(APIResponseMerger):
+    """Specialized merger for GraphQL responses.
+    
+    Handles GraphQL-specific merging including:
+    - Query result merging
+    - Fragment handling
+    - Alias resolution
+    """
+    
+    async def merge_graphql_responses(
+        self,
+        responses: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Merge GraphQL response objects.
+        
+        Args:
+            responses: List of GraphQL response data
+            
+        Returns:
+            Merged GraphQL response
+        """
+        result = {
+            "data": {},
+            "errors": []
+        }
+        
+        for response in responses:
+            if "data" in response:
+                merged = await self.merge_responses({"r": response["data"]})
+                result["data"].update(merged.data)
+            
+            if "errors" in response:
+                result["errors"].extend(response["errors"])
+        
+        return result
+    
+    async def merge_subscriptions(
+        self,
+        subscription_data: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Merge subscription events.
+        
+        Args:
+            subscription_data: List of subscription events
+            
+        Returns:
+            Merged subscription stream
+        """
+        events_by_id: Dict[str, List] = defaultdict(list)
+        
+        for event in subscription_data:
+            event_id = event.get("id", str(hash(str(event))))
+            events_by_id[event_id].append(event)
+        
+        merged = []
+        for events in events_by_id.values():
+            if len(events) == 1:
+                merged.extend(events)
+            else:
+                merged_event = await self.merge_responses(
+                    {f"e{i}": e for i, e in enumerate(events)}
+                )
+                merged.append(merged_event.data)
+        
+        return merged
