@@ -4,6 +4,8 @@ Provides the abstract base class for all actions and the ActionResult
 dataclass for standardized return values from action execution.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, field
@@ -23,7 +25,7 @@ class ActionResult:
     success: bool
     message: str = ""
     data: Any = None
-    next_step_id: Optional[int] = None
+    next_step_id: Optional[str] = None
     duration: float = 0.0
 
 
