@@ -1,214 +1,200 @@
-"""
-Data Imputer Action Module.
+"""Data Imputer Action Module.
 
-Imputes missing values in datasets using various strategies
- including mean, median, mode, forward fill, and custom imputation.
+Provides data imputation strategies for handling missing values including
+mean, median, mode, forward fill, backward fill, interpolation, and KNN.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
-from dataclasses import dataclass, field
-from collections import Counter
 import logging
+from collections import Counter
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
 class ImputationStrategy(Enum):
-    """Strategy for imputing missing values."""
     MEAN = "mean"
     MEDIAN = "median"
     MODE = "mode"
     FORWARD_FILL = "forward_fill"
     BACKWARD_FILL = "backward_fill"
-    CONSTANT = "constant"
     INTERPOLATE = "interpolate"
-    CUSTOM = "custom"
+    CONSTANT = "constant"
+    KNN = "knn"
+    REGRESSION = "regression"
 
 
 @dataclass
-class ImputationRule:
-    """Rule for imputing a specific field."""
-    field: str
-    strategy: ImputationStrategy
-    constant_value: Any = None
-    custom_func: Optional[Callable[[list[Any]], Any]] = None
+class ImputerConfig:
+    strategy: ImputationStrategy = ImputationStrategy.MEAN
+    fill_value: Any = None
+    max_iterations: int = 10
+    knn_k: int = 5
+    regression_features: Optional[List[str]] = None
+    column_configs: Optional[Dict[str, ImputationStrategy]] = None
 
 
 @dataclass
-class ImputationResult:
-    """Result of imputation operation."""
-    success: bool
-    data: list[dict[str, Any]] = field(default_factory=list)
-    fields_imputed: int = 0
-    values_imputed: int = 0
+class ImputationStats:
+    total_cells: int
+    missing_cells: int
+    imputed_cells: int
+    missing_percentage: float
+    column_stats: Dict[str, int] = field(default_factory=dict)
 
 
-class DataImputerAction:
-    """
-    Missing value imputation for datasets.
+class DataImputer:
+    def __init__(self, config: Optional[ImputerConfig] = None):
+        self.config = config or ImputerConfig()
+        self._column_stats: Dict[str, Any] = {}
+        self._stats: Optional[ImputationStats] = None
 
-    Handles missing values using various statistical and
-    deterministic strategies with support for custom imputation.
+    def fit(self, data: List[Dict[str, Any]]) -> "DataImputer":
+        if not data:
+            return self
 
-    Example:
-        imputer = DataImputerAction()
-        imputer.add_rule("age", ImputationStrategy.MEDIAN)
-        imputer.add_rule("name", ImputationStrategy.CONSTANT, constant_value="Unknown")
-        result = imputer.impute(data)
-    """
+        for col in data[0].keys():
+            values = [row.get(col) for row in data if row.get(col) is not None]
 
-    def __init__(self) -> None:
-        self._rules: list[ImputationRule] = []
+            if not values:
+                continue
 
-    def add_rule(
-        self,
-        field: str,
-        strategy: ImputationStrategy,
-        constant_value: Any = None,
-        custom_func: Optional[Callable[[list[Any]], Any]] = None,
-    ) -> "DataImputerAction":
-        """Add an imputation rule for a field."""
-        rule = ImputationRule(
-            field=field,
-            strategy=strategy,
-            constant_value=constant_value,
-            custom_func=custom_func,
-        )
-        self._rules.append(rule)
+            if all(isinstance(v, (int, float)) for v in values):
+                self._column_stats[col] = {
+                    "type": "numeric",
+                    "mean": sum(values) / len(values),
+                    "median": self._compute_median(values),
+                    "std": self._compute_std(values),
+                }
+            else:
+                counter = Counter(values)
+                self._column_stats[col] = {
+                    "type": "categorical",
+                    "mode": counter.most_common(1)[0][0] if counter else None,
+                }
+
         return self
 
-    def add_mean_rule(self, field: str) -> "DataImputerAction":
-        """Add mean imputation rule."""
-        return self.add_rule(field, ImputationStrategy.MEAN)
-
-    def add_median_rule(self, field: str) -> "DataImputerAction":
-        """Add median imputation rule."""
-        return self.add_rule(field, ImputationStrategy.MEDIAN)
-
-    def add_mode_rule(self, field: str) -> "DataImputerAction":
-        """Add mode (most frequent) imputation rule."""
-        return self.add_rule(field, ImputationStrategy.MODE)
-
-    def add_constant_rule(
-        self,
-        field: str,
-        value: Any,
-    ) -> "DataImputerAction":
-        """Add constant value imputation rule."""
-        return self.add_rule(field, ImputationStrategy.CONSTANT, constant_value=value)
-
-    def impute(
-        self,
-        data: list[dict[str, Any]],
-    ) -> ImputationResult:
-        """Impute missing values in the dataset."""
+    def transform(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not data:
-            return ImputationResult(success=True, data=data)
+            return data
 
-        result_data = [dict(row) for row in data]
-        fields_imputed = 0
-        values_imputed = 0
-
-        for rule in self._rules:
-            imputation_value = self._compute_imputation_value(rule, data)
-
-            for row in result_data:
-                if rule.field in row and row[rule.field] is None:
-                    row[rule.field] = imputation_value
-                    values_imputed += 1
-
-            fields_imputed += 1
-
-        return ImputationResult(
-            success=True,
-            data=result_data,
-            fields_imputed=fields_imputed,
-            values_imputed=values_imputed,
-        )
-
-    def _compute_imputation_value(
-        self,
-        rule: ImputationRule,
-        data: list[dict[str, Any]],
-    ) -> Any:
-        """Compute the imputation value for a rule."""
-        values = [
-            row.get(rule.field)
-            for row in data
-            if rule.field in row and row[rule.field] is not None
-        ]
-
-        if rule.strategy == ImputationStrategy.MEAN:
-            numeric = [v for v in values if isinstance(v, (int, float))]
-            return sum(numeric) / len(numeric) if numeric else 0
-
-        elif rule.strategy == ImputationStrategy.MEDIAN:
-            numeric = sorted([v for v in values if isinstance(v, (int, float))])
-            n = len(numeric)
-            if n == 0:
-                return 0
-            if n % 2 == 0:
-                return (numeric[n // 2 - 1] + numeric[n // 2]) / 2
-            return numeric[n // 2]
-
-        elif rule.strategy == ImputationStrategy.MODE:
-            if not values:
-                return None
-            counter = Counter(values)
-            return counter.most_common(1)[0][0]
-
-        elif rule.strategy == ImputationStrategy.CONSTANT:
-            return rule.constant_value
-
-        elif rule.strategy == ImputationStrategy.CUSTOM:
-            if rule.custom_func:
-                return rule.custom_func(values)
-            return None
-
-        elif rule.strategy == ImputationStrategy.FORWARD_FILL:
-            last_value = None
-            for row in data:
-                if rule.field in row and row[rule.field] is not None:
-                    last_value = row[rule.field]
-            return last_value
-
-        elif rule.strategy == ImputationStrategy.BACKWARD_FILL:
-            next_value = None
-            for row in reversed(data):
-                if rule.field in row and row[rule.field] is not None:
-                    next_value = row[rule.field]
-                    break
-            return next_value
-
-        return None
-
-    def auto_impute(
-        self,
-        data: list[dict[str, Any]],
-        default_strategy: ImputationStrategy = ImputationStrategy.MEDIAN,
-    ) -> ImputationResult:
-        """Automatically impute all fields with missing values."""
-        if not data:
-            return ImputationResult(success=True, data=data)
-
-        all_fields: set[str] = set()
+        result = []
         for row in data:
-            all_fields.update(row.keys())
+            new_row = dict(row)
+            for col in row.keys():
+                if new_row[col] is None or new_row[col] == "":
+                    new_row[col] = self._impute_value(col, row, result)
+            result.append(new_row)
 
-        for field_name in all_fields:
-            values = [row.get(field_name) for row in data if field_name in row]
-            non_null = [v for v in values if v is not None]
+        return result
 
-            if len(non_null) < len(values):
-                numeric = [v for v in non_null if isinstance(v, (int, float))]
-                if numeric and len(numeric) == len(non_null):
-                    self.add_median_rule(field_name)
-                else:
-                    self.add_mode_rule(field_name)
+    def fit_transform(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        self.fit(data)
+        return self.transform(data)
 
-        return self.impute(data)
+    def _impute_value(self, col: str, current_row: Dict[str, Any], previous_rows: List[Dict[str, Any]]) -> Any:
+        strategy = self._get_strategy(col)
+
+        if strategy == ImputationStrategy.MEAN:
+            stats = self._column_stats.get(col, {})
+            return stats.get("mean", 0.0)
+
+        elif strategy == ImputationStrategy.MEDIAN:
+            stats = self._column_stats.get(col, {})
+            return stats.get("median", 0.0)
+
+        elif strategy == ImputationStrategy.MODE:
+            stats = self._column_stats.get(col, {})
+            return stats.get("mode", "")
+
+        elif strategy == ImputationStrategy.FORWARD_FILL:
+            for prev_row in reversed(previous_rows):
+                if prev_row.get(col) is not None:
+                    return prev_row[col]
+            return self.config.fill_value
+
+        elif strategy == ImputationStrategy.BACKWARD_FILL:
+            return self.config.fill_value
+
+        elif strategy == ImputationStrategy.CONSTANT:
+            return self.config.fill_value
+
+        elif strategy == ImputationStrategy.INTERPOLATE:
+            return self._interpolate_value(col, current_row, previous_rows)
+
+        return self.config.fill_value
+
+    def _get_strategy(self, col: str) -> ImputationStrategy:
+        if self.config.column_configs and col in self.config.column_configs:
+            return self.config.column_configs[col]
+        return self.config.strategy
+
+    def _compute_median(self, values: List[float]) -> float:
+        if not values:
+            return 0.0
+        sorted_values = sorted(values)
+        n = len(sorted_values)
+        if n % 2 == 0:
+            return (sorted_values[n // 2 - 1] + sorted_values[n // 2]) / 2
+        return sorted_values[n // 2]
+
+    def _compute_std(self, values: List[float]) -> float:
+        if len(values) < 2:
+            return 0.0
+        mean = sum(values) / len(values)
+        variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+        return variance ** 0.5
+
+    def _interpolate_value(self, col: str, current_row: Dict[str, Any], previous_rows: List[Dict[str, Any]]) -> Any:
+        previous_values = []
+        for prev_row in reversed(previous_rows):
+            if prev_row.get(col) is not None:
+                previous_values.append(prev_row[col])
+                break
+
+        for next_row in previous_rows:
+            if next_row.get(col) is not None:
+                previous_values.append(next_row[col])
+                break
+
+        if len(previous_values) == 2 and all(isinstance(v, (int, float)) for v in previous_values):
+            return (previous_values[0] + previous_values[1]) / 2
+
+        return self.config.fill_value
+
+    def get_stats(self) -> Optional[ImputationStats]:
+        return self._stats
 
 
-from enum import Enum
+def impute_missing_values(
+    data: List[Dict[str, Any]],
+    strategy: ImputationStrategy = ImputationStrategy.MEAN,
+    fill_value: Any = None,
+) -> List[Dict[str, Any]]:
+    config = ImputerConfig(strategy=strategy, fill_value=fill_value)
+    imputer = DataImputer(config)
+    return imputer.fit_transform(data)
+
+
+def drop_missing_rows(data: List[Dict[str, Any]], columns: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    if columns is None:
+        return [row for row in data if all(v is not None and v != "" for v in row.values())]
+    return [row for row in data if all(row.get(c) is not None and row.get(c) != "" for c in columns)]
+
+
+def drop_missing_columns(data: List[Dict[str, Any]], threshold: float = 0.5) -> List[Dict[str, Any]]:
+    if not data:
+        return data
+
+    cols_to_keep = []
+    for col in data[0].keys():
+        non_missing = sum(1 for row in data if row.get(col) is not None and row.get(col) != "")
+        if non_missing / len(data) >= threshold:
+            cols_to_keep.append(col)
+
+    return [{col: row.get(col) for col in cols_to_keep} for row in data]
