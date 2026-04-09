@@ -1,250 +1,324 @@
-"""
-Data Sampling Action Module.
+"""Data sampling action module for RabAI AutoClick.
 
-Provides data sampling strategies including
-random, stratified, cluster, and systematic sampling.
+Provides data sampling operations:
+- RandomSamplingAction: Random sampling
+- StratifiedSamplingAction: Stratified sampling
+- SystematicSamplingAction: Systematic sampling
+- ClusterSamplingAction: Cluster sampling
+- ReservoirSamplingAction: Reservoir sampling for large datasets
 """
 
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
-from dataclasses import dataclass, field
-from datetime import datetime
-import asyncio
-import logging
+from typing import Any, Dict, List, Optional
 import random
+import math
 
-logger = logging.getLogger(__name__)
+import sys
+import os
 
-
-class SamplingStrategy(Enum):
-    """Sampling strategies."""
-    RANDOM = "random"
-    STRATIFIED = "stratified"
-    CLUSTER = "cluster"
-    SYSTEMATIC = "systematic"
-    RESERVOIR = "reservoir"
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-class SamplingConfig:
-    """Sampling configuration."""
-    def __init__(
-        self,
-        strategy: SamplingStrategy,
-        sample_size: int,
-        replace: bool = False,
-        random_state: Optional[int] = None
-    ):
-        self.strategy = strategy
-        self.sample_size = sample_size
-        self.replace = replace
-        self.random_state = random_state
-
-
-class RandomSampler:
-    """Random sampling."""
-
-    def __init__(self, config: SamplingConfig):
-        self.config = config
-        if config.random_state is not None:
-            random.seed(config.random_state)
-
-    def sample(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Perform random sampling."""
-        if self.config.replace:
-            return random.choices(data, k=self.config.sample_size)
-        else:
-            return random.sample(
-                data,
-                min(self.config.sample_size, len(data))
-            )
-
-
-class StratifiedSampler:
-    """Stratified sampling."""
-
-    def __init__(self, config: SamplingConfig, stratify_by: str):
-        self.config = config
-        self.stratify_by = stratify_by
-        if config.random_state is not None:
-            random.seed(config.random_state)
-
-    def sample(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Perform stratified sampling."""
-        strata: Dict[Any, List[Dict[str, Any]]] = {}
-
-        for record in data:
-            key = record.get(self.stratify_by)
-            if key not in strata:
-                strata[key] = []
-            strata[key].append(record)
-
-        total_size = self.config.sample_size
-        total_records = len(data)
-
-        sampled = []
-        for key, stratum in strata.items():
-            proportion = len(stratum) / total_records
-            stratum_size = max(1, int(total_size * proportion))
-
-            if self.config.replace:
-                sampled.extend(random.choices(stratum, k=stratum_size))
-            else:
-                sampled.extend(random.sample(stratum, min(stratum_size, len(stratum))))
-
-        return sampled
-
-
-class ClusterSampler:
-    """Cluster sampling."""
-
-    def __init__(self, config: SamplingConfig, cluster_by: str):
-        self.config = config
-        self.cluster_by = cluster_by
-        if config.random_state is not None:
-            random.seed(config.random_state)
-
-    def sample(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Perform cluster sampling."""
-        clusters: Dict[Any, List[Dict[str, Any]]] = {}
-
-        for record in data:
-            key = record.get(self.cluster_by)
-            if key not in clusters:
-                clusters[key] = []
-            clusters[key].append(record)
-
-        cluster_keys = list(clusters.keys())
-        num_clusters_to_sample = min(
-            self.config.sample_size,
-            len(cluster_keys)
-        )
-
-        if not self.config.replace:
-            selected_clusters = random.sample(
-                cluster_keys,
-                num_clusters_to_sample
-            )
-        else:
-            selected_clusters = random.choices(
-                cluster_keys,
-                k=num_clusters_to_sample
-            )
-
-        sampled = []
-        for cluster_key in selected_clusters:
-            sampled.extend(clusters[cluster_key])
-
-        return sampled
-
-
-class SystematicSampler:
-    """Systematic sampling."""
-
-    def __init__(self, config: SamplingConfig, interval: Optional[int] = None):
-        self.config = config
-        self.interval = interval
-
-    def sample(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Perform systematic sampling."""
-        n = len(data)
-        k = self.interval or max(1, n // self.config.sample_size)
-
-        sampled = []
-        for i in range(0, n, k):
-            if len(sampled) >= self.config.sample_size:
-                break
-            sampled.append(data[i])
-
-        return sampled
-
-
-class ReservoirSampler:
-    """Reservoir sampling for streaming data."""
-
-    def __init__(self, config: SamplingConfig):
-        self.config = config
-        self.reservoir: List[Dict[str, Any]] = []
-        self.count = 0
-        if config.random_state is not None:
-            random.seed(config.random_state)
-
-    def add(self, item: Dict[str, Any]):
-        """Add item to reservoir."""
-        self.count += 1
-
-        if len(self.reservoir) < self.config.sample_size:
-            self.reservoir.append(item)
-        else:
-            j = random.randint(0, self.count)
-            if j < self.config.sample_size:
-                self.reservoir[j] = item
-
-    def get_sample(self) -> List[Dict[str, Any]]:
-        """Get current sample."""
-        return self.reservoir.copy()
-
-
-class DataSampler:
-    """Main sampling orchestrator."""
-
+class RandomSamplingAction(BaseAction):
+    """Random sampling from data."""
+    action_type = "random_sampling"
+    display_name = "随机抽样"
+    description = "从数据中进行随机抽样"
+    
     def __init__(self):
-        self.samplers: Dict[SamplingStrategy, Any] = {}
+        super().__init__()
+    
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            n = params.get("n", 10)
+            replace = params.get("replace", False)
+            seed = params.get("seed")
+            
+            if not data:
+                return ActionResult(success=False, message="No data provided")
+            
+            if seed is not None:
+                random.seed(seed)
+            
+            if replace:
+                sampled = random.choices(data, k=n)
+            else:
+                n = min(n, len(data))
+                sampled = random.sample(data, k=n)
+            
+            return ActionResult(
+                success=True,
+                message=f"Random sampling complete",
+                data={
+                    "original_count": len(data),
+                    "sample_count": len(sampled),
+                    "sample": sampled,
+                    "replace": replace,
+                    "seed": seed
+                }
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
 
-    def sample(
-        self,
-        data: List[Dict[str, Any]],
-        strategy: SamplingStrategy,
-        sample_size: int,
-        **kwargs
-    ) -> List[Dict[str, Any]]:
-        """Sample data using specified strategy."""
-        config = SamplingConfig(
-            strategy=strategy,
-            sample_size=sample_size,
-            random_state=kwargs.get("random_state")
-        )
 
-        if strategy == SamplingStrategy.RANDOM:
-            sampler = RandomSampler(config)
-        elif strategy == SamplingStrategy.STRATIFIED:
-            sampler = StratifiedSampler(config, kwargs.get("stratify_by", ""))
-        elif strategy == SamplingStrategy.CLUSTER:
-            sampler = ClusterSampler(config, kwargs.get("cluster_by", ""))
-        elif strategy == SamplingStrategy.SYSTEMATIC:
-            sampler = SystematicSampler(config, kwargs.get("interval"))
-        elif strategy == SamplingStrategy.RESERVOIR:
-            reservoir = ReservoirSampler(config)
+class StratifiedSamplingAction(BaseAction):
+    """Stratified sampling by groups."""
+    action_type = "stratified_sampling"
+    display_name = "分层抽样"
+    description = "按组进行分层抽样"
+    
+    def __init__(self):
+        super().__init__()
+    
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            group_by = params.get("group_by")
+            n = params.get("n", 10)
+            proportional = params.get("proportional", True)
+            seed = params.get("seed")
+            
+            if not data:
+                return ActionResult(success=False, message="No data provided")
+            
+            if not group_by:
+                return ActionResult(success=False, message="group_by is required")
+            
+            if seed is not None:
+                random.seed(seed)
+            
+            groups: Dict[str, List] = {}
             for item in data:
-                reservoir.add(item)
-            return reservoir.get_sample()
-        else:
-            sampler = RandomSampler(config)
+                if isinstance(item, dict):
+                    key = str(item.get(group_by, "unknown"))
+                    if key not in groups:
+                        groups[key] = []
+                    groups[key].append(item)
+            
+            sampled = []
+            total = len(data)
+            
+            for group_key, group_items in groups.items():
+                if proportional:
+                    group_n = max(1, int(n * len(group_items) / total))
+                else:
+                    group_n = max(1, n // len(groups))
+                
+                group_n = min(group_n, len(group_items))
+                sampled.extend(random.sample(group_items, k=group_n))
+            
+            return ActionResult(
+                success=True,
+                message="Stratified sampling complete",
+                data={
+                    "original_count": len(data),
+                    "sample_count": len(sampled),
+                    "group_by": group_by,
+                    "groups": {k: len(v) for k, v in groups.items()},
+                    "proportional": proportional,
+                    "sample": sampled[:100]
+                }
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
 
-        return sampler.sample(data)
+
+class SystematicSamplingAction(BaseAction):
+    """Systematic sampling at regular intervals."""
+    action_type = "systematic_sampling"
+    display_name = "系统抽样"
+    description = "按固定间隔进行系统抽样"
+    
+    def __init__(self):
+        super().__init__()
+    
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            n = params.get("n", 10)
+            start = params.get("start", 0)
+            
+            if not data:
+                return ActionResult(success=False, message="No data provided")
+            
+            if n <= 0:
+                return ActionResult(success=False, message="n must be positive")
+            
+            total = len(data)
+            interval = max(1, total // n)
+            
+            indices = list(range(start, total, interval))[:n]
+            sampled = [data[i] for i in indices]
+            
+            return ActionResult(
+                success=True,
+                message="Systematic sampling complete",
+                data={
+                    "original_count": total,
+                    "sample_count": len(sampled),
+                    "interval": interval,
+                    "start": start,
+                    "indices": indices,
+                    "sample": sampled
+                }
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
 
 
-from enum import Enum
+class ClusterSamplingAction(BaseAction):
+    """Cluster sampling by grouping."""
+    action_type = "cluster_sampling"
+    display_name = "整群抽样"
+    description = "按分组进行整群抽样"
+    
+    def __init__(self):
+        super().__init__()
+    
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            cluster_by = params.get("cluster_by")
+            n_clusters = params.get("n_clusters", 2)
+            seed = params.get("seed")
+            
+            if not data:
+                return ActionResult(success=False, message="No data provided")
+            
+            if not cluster_by:
+                return ActionResult(success=False, message="cluster_by is required")
+            
+            if seed is not None:
+                random.seed(seed)
+            
+            clusters: Dict[str, List] = {}
+            for item in data:
+                if isinstance(item, dict):
+                    key = str(item.get(cluster_by, "unknown"))
+                    if key not in clusters:
+                        clusters[key] = []
+                    clusters[key].append(item)
+            
+            cluster_keys = list(clusters.keys())
+            n_clusters = min(n_clusters, len(cluster_keys))
+            
+            selected_clusters = random.sample(cluster_keys, k=n_clusters)
+            
+            sampled = []
+            for cluster_key in selected_clusters:
+                sampled.extend(clusters[cluster_key])
+            
+            return ActionResult(
+                success=True,
+                message="Cluster sampling complete",
+                data={
+                    "original_count": len(data),
+                    "sample_count": len(sampled),
+                    "total_clusters": len(clusters),
+                    "selected_clusters": selected_clusters,
+                    "cluster_by": cluster_by,
+                    "sample": sampled[:100]
+                }
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
 
 
-def main():
-    """Demonstrate data sampling."""
-    data = [
-        {"id": i, "category": random.choice(["A", "B", "C"]), "value": i * 10}
-        for i in range(100)
-    ]
+class ReservoirSamplingAction(BaseAction):
+    """Reservoir sampling for large datasets."""
+    action_type = "reservoir_sampling"
+    display_name = "水塘抽样"
+    description = "对大数据集进行水塘抽样"
+    
+    def __init__(self):
+        super().__init__()
+        self._reservoir: List[Any] = []
+    
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            stream = params.get("stream", [])
+            k = params.get("k", 10)
+            seed = params.get("seed")
+            
+            if seed is not None:
+                random.seed(seed)
+            
+            if not stream:
+                return ActionResult(
+                    success=True,
+                    message="Reservoir sampling complete (empty stream)",
+                    data={
+                        "sample_count": 0,
+                        "k": k,
+                        "sample": []
+                    }
+                )
+            
+            reservoir = self._reservoir_sampling(stream, k)
+            
+            return ActionResult(
+                success=True,
+                message="Reservoir sampling complete",
+                data={
+                    "stream_size": len(stream),
+                    "sample_count": len(reservoir),
+                    "k": k,
+                    "sample": reservoir
+                }
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+    
+    def _reservoir_sampling(self, stream: List, k: int) -> List:
+        reservoir = []
+        
+        for i, item in enumerate(stream):
+            if i < k:
+                reservoir.append(item)
+            else:
+                j = random.randint(0, i)
+                if j < k:
+                    reservoir[j] = item
+        
+        return reservoir
 
-    sampler = DataSampler()
 
-    random_sample = sampler.sample(data, SamplingStrategy.RANDOM, 10)
-    print(f"Random sample: {len(random_sample)} records")
-
-    stratified_sample = sampler.sample(
-        data,
-        SamplingStrategy.STRATIFIED,
-        10,
-        stratify_by="category"
-    )
-    print(f"Stratified sample: {len(stratified_sample)} records")
-
-
-if __name__ == "__main__":
-    main()
+class BootstrapSamplingAction(BaseAction):
+    """Bootstrap sampling with replacement."""
+    action_type = "bootstrap_sampling"
+    display_name = "Bootstrap抽样"
+    description = "带放回的Bootstrap抽样"
+    
+    def __init__(self):
+        super().__init__()
+    
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            n = params.get("n", None)
+            seed = params.get("seed")
+            
+            if not data:
+                return ActionResult(success=False, message="No data provided")
+            
+            if seed is not None:
+                random.seed(seed)
+            
+            n = n if n is not None else len(data)
+            
+            sampled = random.choices(data, k=n)
+            
+            return ActionResult(
+                success=True,
+                message="Bootstrap sampling complete",
+                data={
+                    "original_count": len(data),
+                    "sample_count": len(sampled),
+                    "with_replacement": True,
+                    "sample": sampled[:100]
+                }
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")

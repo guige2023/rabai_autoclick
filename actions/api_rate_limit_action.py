@@ -1,248 +1,353 @@
 """
-API Rate Limit Action Module
+API Rate Limiting Action Module.
 
-Provides rate limiting, throttling, and quota management for API operations.
+Implements rate limiting for API requests using various strategies
+including token bucket, sliding window, and fixed window algorithms.
+
+Author: RabAI Team
 """
-from typing import Any, Optional
+
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from collections import defaultdict
-import asyncio
+from enum import Enum
 import time
+import threading
+from collections import defaultdict
+from datetime import datetime, timedelta
+
+
+class RateLimitStrategy(Enum):
+    """Rate limiting strategies."""
+    TOKEN_BUCKET = "token_bucket"
+    SLIDING_WINDOW = "sliding_window"
+    FIXED_WINDOW = "fixed_window"
+    LEAKY_BUCKET = "leaky_bucket"
+
+
+class RateLimitExceeded(Exception):
+    """Raised when rate limit is exceeded."""
+    
+    def __init__(self, retry_after: float, limit_type: str):
+        self.retry_after = retry_after
+        self.limit_type = limit_type
+        super().__init__(f"Rate limit exceeded. Retry after {retry_after:.2f}s")
 
 
 @dataclass
 class RateLimitConfig:
     """Configuration for rate limiting."""
-    max_requests: int = 100
-    window_seconds: int = 60
-    burst_size: int = 10
-    strategy: str = "sliding_window"  # sliding_window, token_bucket, fixed_window
-
-
-@dataclass
-class RateLimitResult:
-    """Result of a rate limit check."""
-    allowed: bool
-    remaining: int
-    reset_at: datetime
-    retry_after: Optional[float] = None
-    limit_type: str = "request"
+    requests_per_second: float
+    burst_size: int
+    strategy: RateLimitStrategy = RateLimitStrategy.TOKEN_BUCKET
 
 
 class TokenBucket:
-    """Token bucket algorithm implementation."""
+    """
+    Token bucket rate limiter implementation.
     
-    def __init__(self, capacity: int, refill_rate: float):
+    Example:
+        bucket = TokenBucket(rate=10.0, capacity=20)
+        if bucket.allow():
+            make_request()
+        else:
+            wait_time = bucket.get_wait_time()
+    """
+    
+    def __init__(self, rate: float, capacity: int):
+        self.rate = rate
         self.capacity = capacity
-        self.refill_rate = refill_rate
-        self.tokens = capacity
-        self.last_refill = time.monotonic()
+        self.tokens = float(capacity)
+        self.last_update = time.monotonic()
+        self._lock = threading.Lock()
     
-    def consume(self, tokens: int = 1) -> bool:
-        """Try to consume tokens from the bucket."""
-        self._refill()
-        if self.tokens >= tokens:
-            self.tokens -= tokens
-            return True
-        return False
+    def allow(self, tokens: int = 1) -> bool:
+        """Check if request is allowed."""
+        with self._lock:
+            self._refill()
+            if self.tokens >= tokens:
+                self.tokens -= tokens
+                return True
+            return False
+    
+    def get_wait_time(self, tokens: int = 1) -> float:
+        """Get time to wait before request can be made."""
+        with self._lock:
+            self._refill()
+            if self.tokens >= tokens:
+                return 0.0
+            return (tokens - self.tokens) / self.rate
     
     def _refill(self):
         """Refill tokens based on elapsed time."""
         now = time.monotonic()
-        elapsed = now - self.last_refill
-        self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
-        self.last_refill = now
+        elapsed = now - self.last_update
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+        self.last_update = now
 
 
-@dataclass
-class SlidingWindowCounter:
-    """Sliding window counter for rate limiting."""
-    timestamps: list = field(default_factory=list)
-    window_size: int = 60
+class SlidingWindow:
+    """
+    Sliding window rate limiter.
     
-    def is_allowed(self, max_requests: int) -> bool:
-        """Check if request is allowed within window."""
-        now = time.time()
-        cutoff = now - self.window_size
-        self.timestamps = [t for t in self.timestamps if t > cutoff]
+    More accurate than fixed window but uses more memory.
+    """
+    
+    def __init__(self, rate: float, window_size: float):
+        self.rate = rate
+        self.window_size = window_size
+        self.requests: List[float] = []
+        self._lock = threading.Lock()
+    
+    def allow(self) -> bool:
+        """Check if request is allowed."""
+        with self._lock:
+            now = time.monotonic()
+            cutoff = now - self.window_size
+            
+            # Remove old requests
+            self.requests = [t for t in self.requests if t > cutoff]
+            
+            if len(self.requests) < self.rate:
+                self.requests.append(now)
+                return True
+            return False
+    
+    def get_wait_time(self) -> float:
+        """Get time to wait before request can be made."""
+        with self._lock:
+            now = time.monotonic()
+            cutoff = now - self.window_size
+            self.requests = [t for t in self.requests if t > cutoff]
+            
+            if len(self.requests) < self.rate:
+                return 0.0
+            
+            oldest = min(self.requests)
+            return (oldest + self.window_size) - now
+
+
+class LeakyBucket:
+    """
+    Leaky bucket rate limiter.
+    
+    Smooths out burst traffic by processing at constant rate.
+    """
+    
+    def __init__(self, rate: float, capacity: int):
+        self.rate = rate
+        self.capacity = capacity
+        self.level = 0.0
+        self.last_update = time.monotonic()
+        self._lock = threading.Lock()
+    
+    def allow(self) -> bool:
+        """Check if request is allowed."""
+        with self._lock:
+            self._process_leak()
+            
+            if self.level < self.capacity:
+                self.level += 1
+                return True
+            return False
+    
+    def get_wait_time(self) -> float:
+        """Get time to wait before request can be made."""
+        with self._lock:
+            self._process_leak()
+            
+            if self.level < self.capacity:
+                return 0.0
+            
+            return (self.level - self.capacity + 1) / self.rate
+    
+    def _process_leak(self):
+        """Process leaky bucket outflow."""
+        now = time.monotonic()
+        elapsed = now - self.last_update
+        self.level = max(0, self.level - elapsed * self.rate)
+        self.last_update = now
+
+
+class FixedWindow:
+    """Fixed window rate limiter."""
+    
+    def __init__(self, rate: float, window_size: float):
+        self.rate = rate
+        self.window_size = window_size
+        self.counters: Dict[str, Tuple[float, int]] = {}
+        self._lock = threading.Lock()
+    
+    def allow(self, key: str = "default") -> bool:
+        """Check if request is allowed."""
+        with self._lock:
+            now = time.monotonic()
+            window_start = int(now / self.window_size)
+            
+            if key not in self.counters or self.counters[key][0] != window_start:
+                self.counters[key] = (window_start, 1)
+                return True
+            
+            _, count = self.counters[key]
+            if count < self.rate:
+                self.counters[key] = (window_start, count + 1)
+                return True
+            
+            return False
+    
+    def get_wait_time(self, key: str = "default") -> float:
+        """Get time to wait before request can be made."""
+        with self._lock:
+            now = time.monotonic()
+            window_start = int(now / self.window_size)
+            window_end = (window_start + 1) * self.window_size
+            
+            if key not in self.counters or self.counters[key][0] != window_start:
+                return 0.0
+            
+            _, count = self.counters[key]
+            if count < self.rate:
+                return 0.0
+            
+            return window_end - now
+
+
+class RateLimiter:
+    """
+    Multi-client rate limiter with configurable strategies.
+    
+    Example:
+        limiter = RateLimiter(strategy=RateLimitStrategy.TOKEN_BUCKET)
+        limiter.add_client("api_client_1", rate=10, capacity=20)
+        limiter.add_client("api_client_2", rate=5, capacity=10)
         
-        if len(self.timestamps) < max_requests:
-            self.timestamps.append(now)
+        if limiter.allow("api_client_1"):
+            make_request()
+    """
+    
+    def __init__(self, strategy: RateLimitStrategy = RateLimitStrategy.TOKEN_BUCKET):
+        self.strategy = strategy
+        self.limiters: Dict[str, Any] = {}
+        self.global_limit: Optional[Any] = None
+    
+    def add_client(
+        self,
+        client_id: str,
+        rate: float,
+        capacity: int
+    ) -> "RateLimiter":
+        """Add a client with specific rate limit."""
+        limiter = self._create_limiter(rate, capacity)
+        self.limiters[client_id] = limiter
+        return self
+    
+    def set_global_limit(self, rate: float, capacity: int) -> "RateLimiter":
+        """Set global rate limit across all clients."""
+        self.global_limit = self._create_limiter(rate, capacity)
+        return self
+    
+    def allow(self, client_id: str) -> bool:
+        """Check if request is allowed for client."""
+        if client_id not in self.limiters:
             return True
-        return False
-    
-    def get_remaining(self, max_requests: int) -> int:
-        """Get remaining requests in current window."""
-        now = time.time()
-        cutoff = now - self.window_size
-        self.timestamps = [t for t in self.timestamps if t > cutoff]
-        return max(0, max_requests - len(self.timestamps))
-
-
-class RateLimitAction:
-    """Main rate limiting action handler."""
-    
-    def __init__(self, config: Optional[RateLimitConfig] = None):
-        self.config = config or RateLimitConfig()
-        self._buckets: dict[str, TokenBucket] = {}
-        self._sliding_windows: dict[str, SlidingWindowCounter] = {}
-        self._quotas: dict[str, dict] = defaultdict(dict)
-        self._locks: dict[str, asyncio.Lock] = {}
-    
-    async def check_rate_limit(
-        self,
-        key: str,
-        operation: str = "default"
-    ) -> RateLimitResult:
-        """
-        Check if operation is allowed under rate limits.
         
-        Args:
-            key: Identifier for rate limit scope (user, ip, api_key, etc.)
-            operation: Operation type for differentiated limits
-            
-        Returns:
-            RateLimitResult indicating if request is allowed
-        """
-        now = datetime.now()
+        client_limiter = self.limiters[client_id]
         
-        if self.config.strategy == "token_bucket":
-            return await self._check_token_bucket(key, now)
-        elif self.config.strategy == "fixed_window":
-            return await self._check_fixed_window(key, now)
-        else:
-            return await self._check_sliding_window(key, now)
-    
-    async def _check_token_bucket(
-        self,
-        key: str,
-        now: datetime
-    ) -> RateLimitResult:
-        """Token bucket rate limiting."""
-        if key not in self._buckets:
-            self._locks[key] = asyncio.Lock()
-            self._buckets[key] = TokenBucket(
-                self.config.burst_size,
-                self.config.max_requests / self.config.window_seconds
-            )
+        if not client_limiter.allow():
+            return False
         
-        async with self._locks[key]:
-            bucket = self._buckets[key]
-            allowed = bucket.consume()
-            
-            remaining = int(bucket.tokens)
-            reset_at = now + timedelta(seconds=self.config.window_seconds)
-            
-            return RateLimitResult(
-                allowed=allowed,
-                remaining=max(0, remaining),
-                reset_at=reset_at,
-                limit_type="token_bucket"
-            )
-    
-    async def _check_sliding_window(
-        self,
-        key: str,
-        now: datetime
-    ) -> RateLimitResult:
-        """Sliding window rate limiting."""
-        if key not in self._sliding_windows:
-            self._sliding_windows[key] = SlidingWindowCounter(
-                window_size=self.config.window_seconds
-            )
+        if self.global_limit and not self.global_limit.allow():
+            return False
         
-        window = self._sliding_windows[key]
-        allowed = window.is_allowed(self.config.max_requests)
-        remaining = window.get_remaining(self.config.max_requests)
-        
-        reset_at = now + timedelta(seconds=self.config.window_seconds)
-        
-        return RateLimitResult(
-            allowed=allowed,
-            remaining=remaining,
-            reset_at=reset_at,
-            limit_type="sliding_window"
-        )
-    
-    async def _check_fixed_window(
-        self,
-        key: str,
-        now: datetime
-    ) -> RateLimitResult:
-        """Fixed window rate limiting."""
-        window_key = f"{key}:{int(now.timestamp() // self.config.window_seconds)}"
-        
-        if window_key not in self._quotas:
-            self._quotas[window_key] = {"count": 0, "window_start": now}
-        
-        quota = self._quotas[window_key]
-        allowed = quota["count"] < self.config.max_requests
-        
-        if allowed:
-            quota["count"] += 1
-        
-        remaining = max(0, self.config.max_requests - quota["count"])
-        window_end = now + timedelta(seconds=self.config.window_seconds)
-        
-        return RateLimitResult(
-            allowed=allowed,
-            remaining=remaining,
-            reset_at=window_end,
-            limit_type="fixed_window"
-        )
-    
-    async def get_quota_status(
-        self,
-        key: str,
-        quota_type: str = "daily"
-    ) -> dict[str, Any]:
-        """Get current quota status for a key."""
-        now = datetime.now()
-        
-        if quota_type == "daily":
-            day_key = f"{key}:{now.date()}"
-            if day_key not in self._quotas:
-                return {
-                    "used": 0,
-                    "limit": self.config.max_requests * 60,  # Approximate daily limit
-                    "remaining": self.config.max_requests * 60,
-                    "resets_at": datetime.combine(now.date() + timedelta(days=1), datetime.min.time())
-                }
-            
-            return {
-                "used": self._quotas[day_key]["count"],
-                "limit": self.config.max_requests * 60,
-                "remaining": max(0, self.config.max_requests * 60 - self._quotas[day_key]["count"]),
-                "resets_at": datetime.combine(now.date() + timedelta(days=1), datetime.min.time())
-            }
-        
-        return {"error": f"Unknown quota type: {quota_type}"}
-    
-    async def reset_limit(self, key: str) -> bool:
-        """Manually reset rate limit for a key."""
-        if key in self._buckets:
-            del self._buckets[key]
-        if key in self._sliding_windows:
-            del self._sliding_windows[key]
-        if key in self._locks:
-            del self._locks[key]
         return True
     
-    async def adjust_limit(
-        self,
-        key: str,
-        max_requests: Optional[int] = None,
-        window_seconds: Optional[int] = None
-    ) -> dict[str, Any]:
-        """Dynamically adjust rate limits."""
-        if max_requests is not None:
-            self.config.max_requests = max_requests
-        if window_seconds is not None:
-            self.config.window_seconds = window_seconds
+    def get_wait_time(self, client_id: str) -> float:
+        """Get wait time for client."""
+        if client_id not in self.limiters:
+            return 0.0
+        
+        client_wait = self.limiters[client_id].get_wait_time()
+        
+        if self.global_limit:
+            global_wait = self.global_limit.get_wait_time()
+            return max(client_wait, global_wait)
+        
+        return client_wait
+    
+    def _create_limiter(self, rate: float, capacity: int) -> Any:
+        """Create limiter based on strategy."""
+        if self.strategy == RateLimitStrategy.TOKEN_BUCKET:
+            return TokenBucket(rate, capacity)
+        elif self.strategy == RateLimitStrategy.SLIDING_WINDOW:
+            return SlidingWindow(rate, 1.0)  # 1 second window
+        elif self.strategy == RateLimitStrategy.LEAKY_BUCKET:
+            return LeakyBucket(rate, capacity)
+        elif self.strategy == RateLimitStrategy.FIXED_WINDOW:
+            return FixedWindow(rate, 1.0)
+        else:
+            return TokenBucket(rate, capacity)
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get rate limiter status."""
+        return {
+            "strategy": self.strategy.value,
+            "clients": len(self.limiters),
+            "has_global": self.global_limit is not None
+        }
+
+
+class BaseAction:
+    """Base class for all actions."""
+    
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Any:
+        raise NotImplementedError
+
+
+class APIRateLimitAction(BaseAction):
+    """
+    Rate limiting action for API requests.
+    
+    Parameters:
+        strategy: Rate limiting strategy
+        rate: Requests per second
+        capacity: Bucket/window capacity
+    
+    Example:
+        action = APIRateLimitAction()
+        result = action.execute({"client_id": "user1"}, {
+            "strategy": "token_bucket",
+            "rate": 10.0,
+            "capacity": 20
+        })
+    """
+    
+    _limiters: Dict[str, RateLimiter] = {}
+    _lock = threading.Lock()
+    
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute rate limiting check."""
+        client_id = context.get("client_id", context.get("user_id", "default"))
+        strategy_str = params.get("strategy", "token_bucket")
+        rate = params.get("rate", 10.0)
+        capacity = params.get("capacity", 20)
+        
+        strategy = RateLimitStrategy(strategy_str)
+        
+        with self._lock:
+            if client_id not in self._limiters:
+                self._limiters[client_id] = RateLimiter(strategy)
+                self._limiters[client_id].add_client(client_id, rate, capacity)
+            
+            limiter = self._limiters[client_id]
+        
+        allowed = limiter.allow(client_id)
+        wait_time = limiter.get_wait_time(client_id) if not allowed else 0
         
         return {
-            "max_requests": self.config.max_requests,
-            "window_seconds": self.config.window_seconds,
-            "key": key
+            "allowed": allowed,
+            "wait_time": wait_time,
+            "client_id": client_id,
+            "strategy": strategy_str,
+            "rate": rate,
+            "capacity": capacity,
+            "checked_at": datetime.now().isoformat()
         }
