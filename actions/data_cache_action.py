@@ -1,370 +1,436 @@
-"""Data caching and cache management action module for RabAI AutoClick.
+"""Data Cache Action Module.
 
-Provides:
-- DataCacheAction: In-memory data caching
-- DataCacheEvictionAction: Cache eviction policies
-- DataCacheWarmerAction: Cache warming strategies
-- CacheStrategyAction: Advanced caching strategies
+Provides caching utilities: cache strategies, invalidation policies,
+distributed caching helpers, and cache performance monitoring.
+
+Example:
+    result = execute(context, {"action": "set", "key": "user:123", "value": {...}})
 """
-
-import time
-import json
-import hashlib
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Optional, Callable
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from enum import Enum
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+from collections import OrderedDict
+import hashlib
+import json
 
 
-class EvictionPolicy(str, Enum):
-    """Cache eviction policies."""
-    LRU = "lru"
-    LFU = "lfu"
-    FIFO = "fifo"
-    TTL = "ttl"
-    RANDOM = "random"
+@dataclass
+class CacheEntry:
+    """A cache entry."""
+    
+    key: str
+    value: Any
+    created_at: datetime = field(default_factory=datetime.now)
+    accessed_at: datetime = field(default_factory=datetime.now)
+    access_count: int = 0
+    ttl_seconds: Optional[float] = None
+    tags: list[str] = field(default_factory=list)
+    
+    @property
+    def is_expired(self) -> bool:
+        """Check if entry is expired."""
+        if self.ttl_seconds is None:
+            return False
+        age = (datetime.now() - self.created_at).total_seconds()
+        return age > self.ttl_seconds
+    
+    def touch(self) -> None:
+        """Update access time and count."""
+        self.accessed_at = datetime.now()
+        self.access_count += 1
 
 
-class DataCacheAction(BaseAction):
-    """In-memory data caching."""
-    action_type = "data_cache"
-    display_name = "数据缓存"
-    description = "内存数据缓存"
-
-    def __init__(self):
-        super().__init__()
-        self._cache: Dict[str, Dict] = {}
+class LRUCache:
+    """Least Recently Used cache implementation."""
+    
+    def __init__(self, max_size: int = 1000, ttl_seconds: Optional[float] = None) -> None:
+        """Initialize LRU cache.
+        
+        Args:
+            max_size: Maximum number of entries
+            ttl_seconds: Default TTL for entries
+        """
+        self.max_size = max_size
+        self.ttl_seconds = ttl_seconds
+        self._cache: OrderedDict[str, CacheEntry] = OrderedDict()
         self._hits = 0
         self._misses = 0
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "get")
-            key = params.get("key", "")
-
-            if operation == "set":
-                if not key:
-                    return ActionResult(success=False, message="key required")
-
-                self._cache[key] = {
-                    "value": params.get("value"),
-                    "created_at": time.time(),
-                    "ttl": params.get("ttl"),
-                    "access_count": 0,
-                    "last_accessed": time.time()
-                }
-                return ActionResult(success=True, data={"key": key}, message=f"Cached: {key}")
-
-            elif operation == "get":
-                if key not in self._cache:
-                    self._misses += 1
-                    return ActionResult(success=False, message=f"Cache miss: {key}")
-
-                entry = self._cache[key]
-                if entry["ttl"]:
-                    age = time.time() - entry["created_at"]
-                    if age > entry["ttl"]:
-                        del self._cache[key]
-                        self._misses += 1
-                        return ActionResult(success=False, message=f"Cache expired: {key}")
-
-                entry["access_count"] += 1
-                entry["last_accessed"] = time.time()
-                self._hits += 1
-
-                return ActionResult(
-                    success=True,
-                    data={
-                        "key": key,
-                        "value": entry["value"],
-                        "hits": entry["access_count"],
-                        "age_seconds": round(time.time() - entry["created_at"], 2)
-                    }
-                )
-
-            elif operation == "delete":
-                if key in self._cache:
-                    del self._cache[key]
-                return ActionResult(success=True, message=f"Deleted: {key}")
-
-            elif operation == "clear":
-                count = len(self._cache)
-                self._cache = {}
-                return ActionResult(success=True, data={"cleared": count})
-
-            elif operation == "stats":
-                total = self._hits + self._misses
-                hit_rate = self._hits / total if total > 0 else 0
-                return ActionResult(
-                    success=True,
-                    data={
-                        "size": len(self._cache),
-                        "hits": self._hits,
-                        "misses": self._misses,
-                        "hit_rate": round(hit_rate, 4),
-                        "total_requests": total
-                    }
-                )
-
-            elif operation == "list":
-                return ActionResult(
-                    success=True,
-                    data={
-                        "keys": list(self._cache.keys()),
-                        "count": len(self._cache)
-                    }
-                )
-
-            elif operation == "exists":
-                exists = key in self._cache
-                if exists and self._cache[key].get("ttl"):
-                    age = time.time() - self._cache[key]["created_at"]
-                    exists = age <= self._cache[key]["ttl"]
-                return ActionResult(success=True, data={"key": key, "exists": exists})
-
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Cache error: {str(e)}")
-
-
-class DataCacheEvictionAction(BaseAction):
-    """Cache eviction policies."""
-    action_type = "data_cache_eviction"
-    display_name = "缓存淘汰"
-    description = "缓存淘汰策略"
-
-    def __init__(self):
-        super().__init__()
-        self._cache: Dict[str, Dict] = {}
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "evict")
-            policy = params.get("policy", EvictionPolicy.LRU.value)
-            max_size = params.get("max_size", 1000)
-
-            if operation == "put":
-                key = params.get("key", "")
-                value = params.get("value")
-                self._cache[key] = {
-                    "value": value,
-                    "created_at": time.time(),
-                    "access_count": 0,
-                    "last_accessed": time.time(),
-                    "ttl": params.get("ttl")
-                }
-
-                if len(self._cache) > max_size:
-                    evicted = self._evict(policy, max_size)
-                    return ActionResult(success=True, data={"evicted": evicted})
-                return ActionResult(success=True, data={"key": key})
-
-            elif operation == "evict":
-                evicted = self._evict(policy, max_size)
-                return ActionResult(success=True, data={"evicted": evicted, "policy": policy, "remaining": len(self._cache)})
-
-            elif operation == "evict_expired":
-                now = time.time()
-                expired = []
-                for key, entry in list(self._cache.items()):
-                    if entry.get("ttl"):
-                        if now - entry["created_at"] > entry["ttl"]:
-                            del self._cache[key]
-                            expired.append(key)
-                return ActionResult(success=True, data={"expired": expired, "count": len(expired)})
-
-            elif operation == "stats":
-                return ActionResult(
-                    success=True,
-                    data={
-                        "size": len(self._cache),
-                        "max_size": max_size,
-                        "policy": policy,
-                        "fill_rate": round(len(self._cache) / max_size, 4)
-                    }
-                )
-
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Eviction error: {str(e)}")
-
-    def _evict(self, policy: str, max_size: int) -> List[str]:
-        evicted = []
-        while len(self._cache) > max_size:
-            if policy == EvictionPolicy.LRU.value:
-                lru_key = min(self._cache.keys(), key=lambda k: self._cache[k]["last_accessed"])
-                del self._cache[lru_key]
-                evicted.append(lru_key)
-            elif policy == EvictionPolicy.LFU.value:
-                lfu_key = min(self._cache.keys(), key=lambda k: self._cache[k]["access_count"])
-                del self._cache[lfu_key]
-                evicted.append(lfu_key)
-            elif policy == EvictionPolicy.FIFO.value:
-                fifo_key = min(self._cache.keys(), key=lambda k: self._cache[k]["created_at"])
-                del self._cache[fifo_key]
-                evicted.append(fifo_key)
-            elif policy == EvictionPolicy.RANDOM.value:
-                import random
-                rand_key = random.choice(list(self._cache.keys()))
-                del self._cache[rand_key]
-                evicted.append(rand_key)
-            else:
-                break
-        return evicted
+    
+    def get(self, key: str) -> Optional[Any]:
+        """Get value from cache.
+        
+        Args:
+            key: Cache key
+            
+        Returns:
+            Cached value or None
+        """
+        if key not in self._cache:
+            self._misses += 1
+            return None
+        
+        entry = self._cache[key]
+        
+        if entry.is_expired:
+            del self._cache[key]
+            self._misses += 1
+            return None
+        
+        entry.touch()
+        self._cache.move_to_end(key)
+        self._hits += 1
+        
+        return entry.value
+    
+    def set(
+        self,
+        key: str,
+        value: Any,
+        ttl_seconds: Optional[float] = None,
+        tags: Optional[list[str]] = None,
+    ) -> None:
+        """Set value in cache.
+        
+        Args:
+            key: Cache key
+            value: Value to cache
+            ttl_seconds: TTL for this entry
+            tags: Tags for this entry
+        """
+        if key in self._cache:
+            del self._cache[key]
+        elif len(self._cache) >= self.max_size:
+            self._cache.popitem(last=False)
+        
+        entry = CacheEntry(
+            key=key,
+            value=value,
+            ttl_seconds=ttl_seconds or self.ttl_seconds,
+            tags=tags or [],
+        )
+        self._cache[key] = entry
+    
+    def delete(self, key: str) -> bool:
+        """Delete entry from cache.
+        
+        Args:
+            key: Cache key
+            
+        Returns:
+            True if deleted
+        """
+        if key in self._cache:
+            del self._cache[key]
+            return True
+        return False
+    
+    def clear(self) -> None:
+        """Clear all cache entries."""
+        self._cache.clear()
+        self._hits = 0
+        self._misses = 0
+    
+    def invalidate_by_tags(self, tags: list[str]) -> int:
+        """Invalidate entries with any of the given tags.
+        
+        Args:
+            tags: Tags to match
+            
+        Returns:
+            Number of entries invalidated
+        """
+        to_remove = [
+            key for key, entry in self._cache.items()
+            if any(tag in entry.tags for tag in tags)
+        ]
+        
+        for key in to_remove:
+            del self._cache[key]
+        
+        return len(to_remove)
+    
+    def cleanup_expired(self) -> int:
+        """Remove all expired entries.
+        
+        Returns:
+            Number of entries removed
+        """
+        expired = [
+            key for key, entry in self._cache.items()
+            if entry.is_expired
+        ]
+        
+        for key in expired:
+            del self._cache[key]
+        
+        return len(expired)
+    
+    def get_stats(self) -> dict[str, Any]:
+        """Get cache statistics."""
+        total = self._hits + self._misses
+        hit_rate = self._hits / total if total > 0 else 0.0
+        
+        return {
+            "size": len(self._cache),
+            "max_size": self.max_size,
+            "hits": self._hits,
+            "misses": self._misses,
+            "hit_rate": hit_rate,
+            "total_requests": total,
+        }
 
 
-class DataCacheWarmerAction(BaseAction):
-    """Cache warming strategies."""
-    action_type = "data_cache_warmer"
-    display_name = "缓存预热"
-    description = "缓存预热策略"
-
-    def __init__(self):
-        super().__init__()
-        self._warm_data: Dict[str, Dict] = {}
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "warm")
-            strategy = params.get("strategy", "eager")
-
-            if operation == "add_warm_entry":
-                key = params.get("key", "")
-                value = params.get("value")
-                priority = params.get("priority", 0)
-                self._warm_data[key] = {
-                    "value": value,
-                    "priority": priority,
-                    "added_at": time.time()
-                }
-                return ActionResult(success=True, data={"key": key, "priority": priority})
-
-            elif operation == "warm":
-                target_cache = params.get("target_cache", {})
-                max_entries = params.get("max_entries", 100)
-                warmed = 0
-
-                sorted_entries = sorted(self._warm_data.items(), key=lambda x: x[1]["priority"], reverse=True)
-
-                for key, entry in sorted_entries[:max_entries]:
-                    target_cache[key] = entry["value"]
-                    warmed += 1
-
-                return ActionResult(
-                    success=True,
-                    data={
-                        "warmed": warmed,
-                        "strategy": strategy,
-                        "total_available": len(self._warm_data)
-                    }
-                )
-
-            elif operation == "adaptive":
-                frequent_keys = params.get("frequent_keys", [])
-                recent_keys = params.get("recent_keys", [])
-                target_cache = params.get("target_cache", {})
-
-                combined = list(set(frequent_keys[:50] + recent_keys[:50]))
-                warmed = 0
-                for key in combined:
-                    if key in self._warm_data:
-                        target_cache[key] = self._warm_data[key]["value"]
-                        warmed += 1
-
-                return ActionResult(
-                    success=True,
-                    data={
-                        "warmed": warmed,
-                        "combined_keys": len(combined)
-                    }
-                )
-
-            elif operation == "list":
-                return ActionResult(
-                    success=True,
-                    data={"entries": list(self._warm_data.keys()), "count": len(self._warm_data)}
-                )
-
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Cache warmer error: {str(e)}")
+class WriteThroughCache:
+    """Write-through caching strategy."""
+    
+    def __init__(
+        self,
+        cache: LRUCache,
+        store: Callable[[str, Any], None],
+    ) -> None:
+        """Initialize write-through cache.
+        
+        Args:
+            cache: LRU cache instance
+            store: Persistence function
+        """
+        self.cache = cache
+        self.store = store
+    
+    def get(self, key: str) -> Optional[Any]:
+        """Get value from cache or store."""
+        value = self.cache.get(key)
+        if value is not None:
+            return value
+        
+        return None
+    
+    def set(self, key: str, value: Any) -> None:
+        """Set value in cache and store."""
+        self.cache.set(key, value)
+        self.store(key, value)
+    
+    def delete(self, key: str) -> None:
+        """Delete from cache and store."""
+        self.cache.delete(key)
 
 
-class CacheStrategyAction(BaseAction):
-    """Advanced caching strategies."""
-    action_type = "cache_strategy"
-    display_name = "缓存策略"
-    description = "高级缓存策略"
+class WriteBehindCache:
+    """Write-behind (lazy write) caching strategy."""
+    
+    def __init__(self, cache: LRUCache) -> None:
+        """Initialize write-behind cache.
+        
+        Args:
+            cache: LRU cache instance
+        """
+        self.cache = cache
+        self._pending_writes: OrderedDict[str, Any] = OrderedDict()
+    
+    def get(self, key: str) -> Optional[Any]:
+        """Get value from cache."""
+        return self.cache.get(key)
+    
+    def set(self, key: str, value: Any) -> None:
+        """Set value in cache, mark for async write."""
+        self.cache.set(key, value)
+        self._pending_writes[key] = value
+    
+    def flush_writes(self, writer: Callable[[str, Any], None]) -> int:
+        """Flush pending writes to storage.
+        
+        Args:
+            writer: Function to persist key-value
+            
+        Returns:
+            Number of writes performed
+        """
+        count = 0
+        while self._pending_writes:
+            key, value = self._pending_writes.popitem()
+            writer(key, value)
+            count += 1
+        
+        return count
 
-    def __init__(self):
-        super().__init__()
-        self._cache_layers: Dict[str, Dict] = {}
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "strategize")
+class CacheKeyBuilder:
+    """Builds consistent cache keys."""
+    
+    def __init__(self, prefix: str = "") -> None:
+        """Initialize key builder.
+        
+        Args:
+            prefix: Key prefix
+        """
+        self.prefix = prefix
+    
+    def build(self, *parts: Any) -> str:
+        """Build cache key from parts.
+        
+        Args:
+            parts: Key components
+            
+        Returns:
+            Cache key string
+        """
+        normalized = [str(p) for p in parts]
+        key = ":".join(normalized)
+        
+        if self.prefix:
+            key = f"{self.prefix}:{key}"
+        
+        return key
+    
+    def build_hash(self, *parts: Any, max_length: int = 32) -> str:
+        """Build hashed cache key.
+        
+        Args:
+            parts: Key components
+            max_length: Maximum key length
+            
+        Returns:
+            Hashed cache key
+        """
+        key = self.build(*parts)
+        hash_value = hashlib.md5(key.encode()).hexdigest()[:max_length]
+        return f"{self.prefix}:{hash_value}" if self.prefix else hash_value
 
-            if operation == "setup":
-                layer_name = params.get("layer_name", "default")
-                layers = params.get("layers", ["memory", "disk"])
 
-                self._cache_layers[layer_name] = {
-                    "name": layer_name,
-                    "layers": layers,
-                    "created_at": time.time(),
-                    "hit_counts": {layer: 0 for layer in layers}
-                }
-                return ActionResult(success=True, data={"layer": layer_name, "layers": layers})
+class DistributedCache:
+    """Distributed cache with consistent hashing."""
+    
+    def __init__(self, nodes: list[str]) -> None:
+        """Initialize distributed cache.
+        
+        Args:
+            nodes: List of cache node addresses
+        """
+        self.nodes = nodes
+        self._ring: dict[int, str] = {}
+        self._build_ring()
+    
+    def _build_ring(self) -> None:
+        """Build consistent hashing ring."""
+        for node in self.nodes:
+            hash_value = int(hashlib.md5(node.encode()).hexdigest(), 16)
+            self._ring[hash_value] = node
+        
+        self._sorted_keys = sorted(self._ring.keys())
+    
+    def _get_node(self, key: str) -> str:
+        """Get node for a key using consistent hashing."""
+        if not self._sorted_keys:
+            return self.nodes[0] if self.nodes else ""
+        
+        hash_value = int(hashlib.md5(key.encode()).hexdigest(), 16)
+        
+        for ring_key in self._sorted_keys:
+            if hash_value <= ring_key:
+                return self._ring[ring_key]
+        
+        return self._ring[self._sorted_keys[0]]
+    
+    def get_node(self, key: str) -> str:
+        """Get primary node for key."""
+        return self._get_node(key)
+    
+    def get_replica_nodes(self, key: str, replica_count: int = 2) -> list[str]:
+        """Get replica nodes for key."""
+        primary = self._get_node(key)
+        replicas = [primary]
+        
+        all_nodes = list(self.nodes)
+        all_nodes.remove(primary)
+        
+        for _ in range(min(replica_count, len(all_nodes))):
+            if all_nodes:
+                replicas.append(all_nodes.pop(0))
+        
+        return replicas
+    
+    def add_node(self, node: str) -> None:
+        """Add node to cache cluster."""
+        if node not in self.nodes:
+            self.nodes.append(node)
+            self._build_ring()
+    
+    def remove_node(self, node: str) -> None:
+        """Remove node from cache cluster."""
+        if node in self.nodes:
+            self.nodes.remove(node)
+            self._build_ring()
 
-            elif operation == "get":
-                layer_name = params.get("layer_name", "default")
-                key = params.get("key", "")
 
-                if layer_name not in self._cache_layers:
-                    return ActionResult(success=False, message=f"Layer '{layer_name}' not found")
-
-                layers = self._cache_layers[layer_name]["layers"]
-                for layer in layers:
-                    self._cache_layers[layer_name]["hit_counts"][layer] += 1
-
-                return ActionResult(
-                    success=True,
-                    data={
-                        "layer": layer_name,
-                        "layers_checked": len(layers),
-                        "total_hits": sum(self._cache_layers[layer_name]["hit_counts"].values())
-                    }
-                )
-
-            elif operation == "invalidate":
-                layer_name = params.get("layer_name", "default")
-                key = params.get("key", "")
-                return ActionResult(success=True, message=f"Invalidated '{key}' in '{layer_name}'")
-
-            elif operation == "stats":
-                return ActionResult(
-                    success=True,
-                    data={
-                        "layers": {
-                            name: {"layers": info["layers"], "hits": info["hit_counts"]}
-                            for name, info in self._cache_layers.items()
-                        }
-                    }
-                )
-
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Strategy error: {str(e)}")
+def execute(context: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+    """Execute data cache action.
+    
+    Args:
+        context: Execution context
+        params: Parameters including action type
+        
+    Returns:
+        Result dictionary with status and data
+    """
+    action = params.get("action", "status")
+    result: dict[str, Any] = {"status": "success"}
+    
+    if action == "set":
+        cache = LRUCache(max_size=params.get("max_size", 1000))
+        cache.set(
+            params.get("key", ""),
+            params.get("value"),
+            params.get("ttl_seconds"),
+        )
+        result["data"] = {"set": True}
+    
+    elif action == "get":
+        cache = LRUCache()
+        value = cache.get(params.get("key", ""))
+        result["data"] = {"value": value}
+    
+    elif action == "delete":
+        cache = LRUCache()
+        deleted = cache.delete(params.get("key", ""))
+        result["data"] = {"deleted": deleted}
+    
+    elif action == "stats":
+        cache = LRUCache()
+        stats = cache.get_stats()
+        result["data"] = stats
+    
+    elif action == "invalidate_tags":
+        cache = LRUCache()
+        count = cache.invalidate_by_tags(params.get("tags", []))
+        result["data"] = {"invalidated": count}
+    
+    elif action == "cleanup":
+        cache = LRUCache()
+        count = cache.cleanup_expired()
+        result["data"] = {"cleaned": count}
+    
+    elif action == "build_key":
+        builder = CacheKeyBuilder(prefix=params.get("prefix", ""))
+        key = builder.build(*params.get("parts", []))
+        result["data"] = {"key": key}
+    
+    elif action == "build_hash_key":
+        builder = CacheKeyBuilder(prefix=params.get("prefix", ""))
+        key = builder.build_hash(*params.get("parts", []))
+        result["data"] = {"key": key}
+    
+    elif action == "get_node":
+        cache = DistributedCache(nodes=params.get("nodes", []))
+        node = cache.get_node(params.get("key", ""))
+        result["data"] = {"node": node}
+    
+    elif action == "clear":
+        cache = LRUCache()
+        cache.clear()
+        result["data"] = {"cleared": True}
+    
+    else:
+        result["status"] = "error"
+        result["error"] = f"Unknown action: {action}"
+    
+    return result
