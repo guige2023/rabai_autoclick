@@ -1,186 +1,275 @@
-"""Data Diff and Compare Engine.
+"""
+Data Diff Action Module.
 
-This module provides data comparison:
-- Record-level diffing
-- Field-level change tracking
-- Deep object comparison
-- Diff summarization
-
-Example:
-    >>> from actions.data_diff_action import DataDiffer
-    >>> differ = DataDiffer()
-    >>> diffs = differ.diff(record_a, record_b)
+Compare and compute differences between data sets.
 """
 
 from __future__ import annotations
 
-import logging
-import threading
-from typing import Any, Optional
 from dataclasses import dataclass, field
-from enum import Enum
-
-logger = logging.getLogger(__name__)
-
-
-class DiffType(Enum):
-    """Types of differences."""
-    ADDED = "added"
-    REMOVED = "removed"
-    CHANGED = "changed"
-    UNCHANGED = "unchanged"
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 
 @dataclass
 class DiffEntry:
-    """A single difference entry."""
+    """A difference entry."""
     path: str
-    diff_type: DiffType
+    diff_type: str
     old_value: Any = None
     new_value: Any = None
-    field_type: str = ""
 
 
 @dataclass
 class DiffResult:
     """Result of a diff operation."""
-    has_changes: bool
-    added_count: int
-    removed_count: int
-    changed_count: int
-    diffs: list[DiffEntry]
-    summary: str = ""
+    added: List[DiffEntry] = field(default_factory=list)
+    removed: List[DiffEntry] = field(default_factory=list)
+    modified: List[DiffEntry] = field(default_factory=list)
+    unchanged: int = 0
 
 
-class DataDiffer:
-    """Compares data structures and records."""
+class DataDiffAction:
+    """
+    Compute differences between data structures.
 
-    def __init__(self, ignore_fields: Optional[list[str]] = None) -> None:
-        """Initialize the data differ.
+    Supports dicts, lists, and nested structures.
+    """
 
-        Args:
-            ignore_fields: Fields to ignore in comparisons.
-        """
-        self._ignore_fields = set(ignore_fields or [])
-        self._lock = threading.Lock()
-        self._stats = {"comparisons": 0, "changes_found": 0}
+    def __init__(self) -> None:
+        self._ignore_fields: Set[str] = set()
+
+    def set_ignore_fields(self, fields: List[str]) -> None:
+        """Set fields to ignore during comparison."""
+        self._ignore_fields = set(fields)
 
     def diff(
         self,
-        old: dict[str, Any],
-        new: dict[str, Any],
+        old: Any,
+        new: Any,
         path: str = "",
     ) -> DiffResult:
-        """Diff two records.
+        """
+        Compute diff between two values.
 
         Args:
-            old: Old record.
-            new: New record.
-            path: Current path for nested diffs.
+            old: Original value
+            new: New value
+            path: Current path in structure
 
         Returns:
-            DiffResult with all differences.
+            DiffResult with all differences
         """
-        self._stats["comparisons"] += 1
-        diffs = []
+        result = DiffResult()
 
+        if self._is_same(old, new):
+            if not self._is_container(old):
+                result.unchanged += 1
+            return result
+
+        if old is None:
+            result.added.append(DiffEntry(path=path, diff_type="added", new_value=new))
+        elif new is None:
+            result.removed.append(DiffEntry(path=path, diff_type="removed", old_value=old))
+        elif self._is_container(old) and self._is_container(new):
+            self._diff_containers(old, new, path, result)
+        else:
+            result.modified.append(DiffEntry(
+                path=path,
+                diff_type="modified",
+                old_value=old,
+                new_value=new,
+            ))
+
+        return result
+
+    def _is_same(self, old: Any, new: Any) -> bool:
+        """Check if values are the same."""
+        return old == new
+
+    def _is_container(self, value: Any) -> bool:
+        """Check if value is a container (dict or list)."""
+        return isinstance(value, (dict, list))
+
+    def _diff_containers(
+        self,
+        old: Any,
+        new: Any,
+        path: str,
+        result: DiffResult,
+    ) -> None:
+        """Diff two containers."""
+        if isinstance(old, dict) and isinstance(new, dict):
+            self._diff_dicts(old, new, path, result)
+        elif isinstance(old, list) and isinstance(new, list):
+            self._diff_lists(old, new, path, result)
+        else:
+            result.modified.append(DiffEntry(
+                path=path,
+                diff_type="modified",
+                old_value=old,
+                new_value=new,
+            ))
+
+    def _diff_dicts(
+        self,
+        old: Dict[str, Any],
+        new: Dict[str, Any],
+        path: str,
+        result: DiffResult,
+    ) -> None:
+        """Diff two dictionaries."""
         all_keys = set(old.keys()) | set(new.keys())
 
-        for key in all_keys:
+        for key in sorted(all_keys):
             if key in self._ignore_fields:
                 continue
 
-            current_path = f"{path}.{key}" if path else key
-            old_val = old.get(key)
-            new_val = new.get(key)
+            key_path = f"{path}.{key}" if path else key
 
             if key not in old:
-                diffs.append(DiffEntry(path=current_path, diff_type=DiffType.ADDED, new_value=new_val))
-                self._stats["changes_found"] += 1
+                result.added.append(DiffEntry(
+                    path=key_path,
+                    diff_type="added",
+                    new_value=new[key],
+                ))
             elif key not in new:
-                diffs.append(DiffEntry(path=current_path, diff_type=DiffType.REMOVED, old_value=old_val))
-                self._stats["changes_found"] += 1
-            elif self._values_differ(old_val, new_val):
-                if isinstance(old_val, dict) and isinstance(new_val, dict):
-                    nested = self.diff(old_val, new_val, current_path)
-                    diffs.extend(nested.diffs)
-                else:
-                    diffs.append(DiffEntry(path=current_path, diff_type=DiffType.CHANGED, old_value=old_val, new_value=new_val))
-                    self._stats["changes_found"] += 1
+                result.removed.append(DiffEntry(
+                    path=key_path,
+                    diff_type="removed",
+                    old_value=old[key],
+                ))
+            else:
+                sub_result = self.diff(old[key], new[key], key_path)
+                self._merge_diff_results(result, sub_result)
 
-        added = sum(1 for d in diffs if d.diff_type == DiffType.ADDED)
-        removed = sum(1 for d in diffs if d.diff_type == DiffType.REMOVED)
-        changed = sum(1 for d in diffs if d.diff_type == DiffType.CHANGED)
-
-        return DiffResult(
-            has_changes=len(diffs) > 0,
-            added_count=added,
-            removed_count=removed,
-            changed_count=changed,
-            diffs=diffs,
-            summary=f"{added} added, {removed} removed, {changed} changed",
-        )
-
-    def diff_list(
+    def _diff_lists(
         self,
-        old: list[dict[str, Any]],
-        new: list[dict[str, Any]],
-        key_field: str = "id",
-    ) -> DiffResult:
-        """Diff two lists of records.
+        old: List[Any],
+        new: List[Any],
+        path: str,
+        result: DiffResult,
+    ) -> None:
+        """Diff two lists."""
+        max_len = max(len(old), len(new))
+
+        for i in range(max_len):
+            idx_path = f"{path}[{i}]"
+
+            if i >= len(old):
+                result.added.append(DiffEntry(
+                    path=idx_path,
+                    diff_type="added",
+                    new_value=new[i],
+                ))
+            elif i >= len(new):
+                result.removed.append(DiffEntry(
+                    path=idx_path,
+                    diff_type="removed",
+                    old_value=old[i],
+                ))
+            else:
+                sub_result = self.diff(old[i], new[i], idx_path)
+                self._merge_diff_results(result, sub_result)
+
+    def _merge_diff_results(
+        self,
+        target: DiffResult,
+        source: DiffResult,
+    ) -> None:
+        """Merge source diff result into target."""
+        target.added.extend(source.added)
+        target.removed.extend(source.removed)
+        target.modified.extend(source.modified)
+        target.unchanged += source.unchanged
+
+    def diff_summary(self, result: DiffResult) -> Dict[str, Any]:
+        """Get summary of diff."""
+        return {
+            "added_count": len(result.added),
+            "removed_count": len(result.removed),
+            "modified_count": len(result.modified),
+            "unchanged_count": result.unchanged,
+            "total_changes": len(result.added) + len(result.removed) + len(result.modified),
+        }
+
+    def apply_diff(
+        self,
+        data: Any,
+        diffs: List[DiffEntry],
+    ) -> Any:
+        """
+        Apply diff entries to data.
 
         Args:
-            old: Old list.
-            new: New list.
-            key_field: Field to use as key for matching.
+            data: Original data
+            diffs: List of diffs to apply
 
         Returns:
-            DiffResult with list differences.
+            Modified data
         """
-        old_index = {r.get(key_field): r for r in old}
-        new_index = {r.get(key_field): r for r in new}
+        if isinstance(data, dict):
+            return self._apply_dict_diff(data, diffs)
+        elif isinstance(data, list):
+            return self._apply_list_diff(data, diffs)
+        return data
 
-        all_keys = set(old_index.keys()) | set(new_index.keys())
-        diffs = []
+    def _apply_dict_diff(
+        self,
+        data: Dict[str, Any],
+        diffs: List[DiffEntry],
+    ) -> Dict[str, Any]:
+        """Apply diffs to a dictionary."""
+        result = data.copy()
 
-        for key in all_keys:
-            old_rec = old_index.get(key)
-            new_rec = new_index.get(key)
+        for diff in diffs:
+            path_parts = diff.path.split(".")
 
-            if old_rec is None:
-                diffs.append(DiffEntry(path=f"[{key}]", diff_type=DiffType.ADDED, new_value=new_rec))
-                self._stats["changes_found"] += 1
-            elif new_rec is None:
-                diffs.append(DiffEntry(path=f"[{key}]", diff_type=DiffType.REMOVED, old_value=old_rec))
-                self._stats["changes_found"] += 1
-            else:
-                rec_diff = self.diff(old_rec, new_rec, path=f"[{key}]")
-                diffs.extend(rec_diff.diffs)
+            if diff.diff_type == "added":
+                current = result
+                for part in path_parts[:-1]:
+                    if part not in current:
+                        current[part] = {}
+                    current = current[part]
+                current[path_parts[-1]] = diff.new_value
 
-        added = sum(1 for d in diffs if d.diff_type == DiffType.ADDED)
-        removed = sum(1 for d in diffs if d.diff_type == DiffType.REMOVED)
-        changed = sum(1 for d in diffs if d.diff_type == DiffType.CHANGED)
+            elif diff.diff_type == "removed":
+                current = result
+                for part in path_parts[:-1]:
+                    current = current.get(part, {})
+                current.pop(path_parts[-1], None)
 
-        return DiffResult(
-            has_changes=len(diffs) > 0,
-            added_count=added,
-            removed_count=removed,
-            changed_count=changed,
-            diffs=diffs,
-            summary=f"{added} added, {removed} removed, {changed} changed",
-        )
+            elif diff.diff_type == "modified":
+                current = result
+                for part in path_parts[:-1]:
+                    current = current.get(part, {})
+                current[path_parts[-1]] = diff.new_value
 
-    def _values_differ(self, old: Any, new: Any) -> bool:
-        """Check if two values differ."""
-        if type(old) != type(new):
-            return True
-        if isinstance(old, dict):
-            return old != new
-        if isinstance(old, (list, tuple)):
-            return old != new
-        return old != new
+        return result
 
-    def get_stats(self) -> dict[str, int]:
-        """Get diff statistics."""
-        with self._lock:
-            return dict(self._stats)
+    def _apply_list_diff(
+        self,
+        data: List[Any],
+        diffs: List[DiffEntry],
+    ) -> List[Any]:
+        """Apply diffs to a list."""
+        import re
+
+        result = data.copy()
+
+        for diff in diffs:
+            match = re.match(r'\[(\d+)\]', diff.path)
+            if not match:
+                continue
+
+            idx = int(match.group(1))
+
+            if diff.diff_type == "added":
+                result.insert(idx, diff.new_value)
+            elif diff.diff_type == "removed":
+                if 0 <= idx < len(result):
+                    result.pop(idx)
+            elif diff.diff_type == "modified":
+                if 0 <= idx < len(result):
+                    result[idx] = diff.new_value
+
+        return result

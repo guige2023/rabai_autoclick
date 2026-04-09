@@ -1,262 +1,262 @@
-"""Data Filter Engine.
+"""
+Data Filter Action Module.
 
-This module provides advanced data filtering:
-- Multi-condition filtering
-- Field projection
-- Custom filter functions
-- Filter optimization
-
-Example:
-    >>> from actions.data_filter_action import DataFilter
-    >>> f = DataFilter()
-    >>> result = f.filter(records, conditions=[{"field": "status", "op": "==", "value": "active"}])
+Filter data with predicates and conditions.
 """
 
 from __future__ import annotations
 
-import logging
-import threading
 import re
-from typing import Any, Callable, Optional
-from dataclasses import dataclass, field
-from enum import Enum
-
-logger = logging.getLogger(__name__)
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Pattern, Union
 
 
-class FilterOperator(Enum):
-    """Filter operators."""
-    EQ = "eq"
-    NE = "ne"
-    GT = "gt"
-    GE = "ge"
-    LT = "lt"
-    LE = "le"
-    IN = "in"
-    NOT_IN = "not_in"
-    CONTAINS = "contains"
-    STARTS_WITH = "starts_with"
-    ENDS_WITH = "ends_with"
-    REGEX = "regex"
-    EXISTS = "exists"
-    EMPTY = "empty"
+Predicate = Callable[[Dict[str, Any]], bool]
 
 
 @dataclass
 class FilterCondition:
-    """A single filter condition."""
+    """A filter condition."""
     field: str
     operator: str
-    value: Any = None
+    value: Any
 
 
-@dataclass
-class FilterResult:
-    """Result of a filter operation."""
-    passed: bool
-    passed_count: int
-    filtered_count: int
-    total_count: int
+class DataFilterAction:
+    """
+    Filter data with various conditions.
 
-
-class DataFilter:
-    """Advanced data filtering engine."""
-
-    OPERATORS = {
-        "==": lambda a, b: a == b,
-        "!=": lambda a, b: a != b,
-        "eq": lambda a, b: a == b,
-        "ne": lambda a, b: a != b,
-        ">": lambda a, b: a > b,
-        "gt": lambda a, b: a > b,
-        ">=": lambda a, b: a >= b,
-        "ge": lambda a, b: a >= b,
-        "<": lambda a, b: a < b,
-        "lt": lambda a, b: a < b,
-        "<=": lambda a, b: a <= b,
-        "le": lambda a, b: a <= b,
-    }
+    Supports field comparisons, patterns, and custom predicates.
+    """
 
     def __init__(self) -> None:
-        """Initialize the data filter."""
-        self._lock = threading.Lock()
-        self._stats = {"records_filtered": 0, "conditions_applied": 0}
+        self._predicates: List[Predicate] = []
+
+    def add_predicate(
+        self,
+        predicate: Predicate,
+    ) -> "DataFilterAction":
+        """
+        Add a custom predicate.
+
+        Args:
+            predicate: Function returning True to keep item
+
+        Returns:
+            Self for chaining
+        """
+        self._predicates.append(predicate)
+        return self
 
     def filter(
         self,
-        records: list[dict[str, Any]],
-        conditions: list[FilterCondition],
-        mode: str = "AND",
-    ) -> list[dict[str, Any]]:
-        """Filter records by conditions.
+        data: List[Dict[str, Any]],
+        conditions: Optional[List[FilterCondition]] = None,
+        predicate: Optional[Predicate] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Filter data.
 
         Args:
-            records: List of record dicts.
-            conditions: List of FilterConditions.
-            mode: "AND" or "OR" combination.
+            data: Data to filter
+            conditions: List of conditions
+            predicate: Optional custom predicate
 
         Returns:
-            Filtered records.
+            Filtered data
         """
-        with self._lock:
-            self._stats["conditions_applied"] += len(conditions)
+        result = data
 
-        if not conditions:
-            with self._lock:
-                self._stats["records_filtered"] += len(records)
-            return list(records)
+        if conditions:
+            result = self._apply_conditions(result, conditions)
 
-        result = []
-        for record in records:
-            if mode == "AND":
-                if all(self._evaluate_condition(record, cond) for cond in conditions):
-                    result.append(record)
-            else:
-                if any(self._evaluate_condition(record, cond) for cond in conditions):
-                    result.append(record)
+        for pred in self._predicates:
+            result = [item for item in result if pred(item)]
 
-        with self._lock:
-            self._stats["records_filtered"] += len(result)
+        if predicate:
+            result = [item for item in result if predicate(item)]
 
         return result
 
-    def _evaluate_condition(self, record: dict[str, Any], cond: FilterCondition) -> bool:
-        """Evaluate a single condition against a record."""
-        value = record.get(cond.field)
-
-        op = cond.operator.lower()
-
-        if op == "in":
-            return value in cond.value
-        elif op == "not_in":
-            return value not in cond.value
-        elif op == "contains":
-            return cond.value in str(value) if value is not None else False
-        elif op == "starts_with":
-            return str(value).startswith(cond.value) if value is not None else False
-        elif op == "ends_with":
-            return str(value).endswith(cond.value) if value is not None else False
-        elif op == "regex":
-            try:
-                return bool(re.match(cond.value, str(value)))
-            except re.error:
-                return False
-        elif op == "exists":
-            return value is not None
-        elif op == "empty":
-            return value is None or value == "" or value == []
-        elif op in self.OPERATORS:
-            try:
-                return self.OPERATORS[op](value, cond.value)
-            except (TypeError, ValueError):
-                return False
-
-        return False
-
-    def filter_and_project(
+    def _apply_conditions(
         self,
-        records: list[dict[str, Any]],
-        conditions: list[FilterCondition],
-        fields: list[str],
-    ) -> list[dict[str, Any]]:
-        """Filter records and project specified fields.
+        data: List[Dict[str, Any]],
+        conditions: List[FilterCondition],
+    ) -> List[Dict[str, Any]]:
+        """Apply conditions to data."""
+        result = data
 
-        Args:
-            records: List of record dicts.
-            conditions: Filter conditions.
-            fields: Fields to include in output.
+        for condition in conditions:
+            result = [
+                item
+                for item in result
+                if self._check_condition(item, condition)
+            ]
 
-        Returns:
-            Filtered and projected records.
-        """
-        filtered = self.filter(records, conditions)
-        return [{k: r.get(k) for k in fields if k in r} for r in filtered]
-
-    def create_condition(
-        self,
-        field: str,
-        operator: str,
-        value: Any = None,
-    ) -> FilterCondition:
-        """Create a filter condition.
-
-        Args:
-            field: Field name.
-            operator: Operator name.
-            value: Comparison value.
-
-        Returns:
-            FilterCondition.
-        """
-        return FilterCondition(field=field, operator=operator, value=value)
-
-    def exclude_fields(
-        self,
-        records: list[dict[str, Any]],
-        fields: list[str],
-    ) -> list[dict[str, Any]]:
-        """Exclude fields from records.
-
-        Args:
-            records: List of records.
-            fields: Fields to exclude.
-
-        Returns:
-            Records without excluded fields.
-        """
-        fields_set = set(fields)
-        return [{k: v for k, v in r.items() if k not in fields_set} for r in records]
-
-    def distinct(
-        self,
-        records: list[dict[str, Any]],
-        field: str,
-    ) -> list[Any]:
-        """Get distinct values for a field.
-
-        Args:
-            records: List of records.
-            field: Field name.
-
-        Returns:
-            List of distinct values.
-        """
-        seen = set()
-        result = []
-        for r in records:
-            val = r.get(field)
-            if val not in seen:
-                seen.add(val)
-                result.append(val)
         return result
 
-    def sort_and_filter(
+    def _check_condition(
         self,
-        records: list[dict[str, Any]],
-        conditions: list[FilterCondition],
-        sort_by: str,
-        reverse: bool = False,
-        limit: Optional[int] = None,
-    ) -> list[dict[str, Any]]:
-        """Filter, sort, and limit records.
+        item: Dict[str, Any],
+        condition: FilterCondition,
+    ) -> bool:
+        """Check if item matches condition."""
+        field_value = item.get(condition.field)
+
+        ops = {
+            "==": lambda a, b: a == b,
+            "!=": lambda a, b: a != b,
+            ">": lambda a, b: a > b,
+            ">=": lambda a, b: a >= b,
+            "<": lambda a, b: a < b,
+            "<=": lambda a, b: a <= b,
+            "in": lambda a, b: a in b if b else False,
+            "not in": lambda a, b: a not in b if b else True,
+            "contains": lambda a, b: b in a if a else False,
+            "startswith": lambda a, b: str(a).startswith(b) if a else False,
+            "endswith": lambda a, b: str(a).endswith(b) if a else False,
+            "regex": lambda a, b: bool(re.search(b, str(a))) if a else False,
+            "is_null": lambda a, b: a is None,
+            "is_not_null": lambda a, b: a is not None,
+            "exists": lambda a, b: condition.field in item,
+        }
+
+        op_func = ops.get(condition.operator)
+
+        if op_func is None:
+            return True
+
+        try:
+            return op_func(field_value, condition.value)
+        except (TypeError, ValueError):
+            return False
+
+    def eq(self, field: str, value: Any) -> FilterCondition:
+        """Create equals condition."""
+        return FilterCondition(field, "==", value)
+
+    def ne(self, field: str, value: Any) -> FilterCondition:
+        """Create not equals condition."""
+        return FilterCondition(field, "!=", value)
+
+    def gt(self, field: str, value: Any) -> FilterCondition:
+        """Create greater than condition."""
+        return FilterCondition(field, ">", value)
+
+    def gte(self, field: str, value: Any) -> FilterCondition:
+        """Create greater than or equals condition."""
+        return FilterCondition(field, ">=", value)
+
+    def lt(self, field: str, value: Any) -> FilterCondition:
+        """Create less than condition."""
+        return FilterCondition(field, "<", value)
+
+    def lte(self, field: str, value: Any) -> FilterCondition:
+        """Create less than or equals condition."""
+        return FilterCondition(field, "<=", value)
+
+    def contains(self, field: str, value: Any) -> FilterCondition:
+        """Create contains condition."""
+        return FilterCondition(field, "contains", value)
+
+    def regex(self, field: str, pattern: str) -> FilterCondition:
+        """Create regex match condition."""
+        return FilterCondition(field, "regex", pattern)
+
+    def is_null(self, field: str) -> FilterCondition:
+        """Create is null condition."""
+        return FilterCondition(field, "is_null", None)
+
+    def is_not_null(self, field: str) -> FilterCondition:
+        """Create is not null condition."""
+        return FilterCondition(field, "is_not_null", None)
+
+    def in_list(self, field: str, values: List[Any]) -> FilterCondition:
+        """Create in list condition."""
+        return FilterCondition(field, "in", values)
+
+    def filter_by_function(
+        self,
+        data: List[Dict[str, Any]],
+        func: Callable[[Dict[str, Any]], bool],
+    ) -> List[Dict[str, Any]]:
+        """
+        Filter using a function.
 
         Args:
-            records: List of records.
-            conditions: Filter conditions.
-            sort_by: Field to sort by.
-            reverse: Sort descending.
-            limit: Maximum records.
+            data: Data to filter
+            func: Filter function
 
         Returns:
-            Processed records.
+            Filtered data
         """
-        filtered = self.filter(records, conditions)
-        sorted_recs = sorted(filtered, key=lambda r: r.get(sort_by, ""), reverse=reverse)
-        if limit:
-            sorted_recs = sorted_recs[:limit]
-        return sorted_recs
+        return [item for item in data if func(item)]
 
-    def get_stats(self) -> dict[str, int]:
-        """Get filter statistics."""
-        with self._lock:
-            return dict(self._stats)
+    def exclude_by_function(
+        self,
+        data: List[Dict[str, Any]],
+        func: Callable[[Dict[str, Any]], bool],
+    ) -> List[Dict[str, Any]]:
+        """
+        Exclude items matching a function.
+
+        Args:
+            data: Data to filter
+            func: Exclusion function
+
+        Returns:
+            Filtered data
+        """
+        return [item for item in data if not func(item)]
+
+    def filter_unique(
+        self,
+        data: List[Dict[str, Any]],
+        fields: List[str],
+    ) -> List[Dict[str, Any]]:
+        """
+        Filter to unique values by fields.
+
+        Args:
+            data: Data to filter
+            fields: Fields to check for uniqueness
+
+        Returns:
+            Deduplicated data
+        """
+        seen: set = set()
+        result = []
+
+        for item in data:
+            key = tuple(item.get(f) for f in fields)
+
+            if key not in seen:
+                seen.add(key)
+                result.append(item)
+
+        return result
+
+    def partition_by(
+        self,
+        data: List[Dict[str, Any]],
+        field: str,
+    ) -> Dict[Any, List[Dict[str, Any]]]:
+        """
+        Partition data by field value.
+
+        Args:
+            data: Data to partition
+            field: Field to partition by
+
+        Returns:
+            Dict mapping field value to items
+        """
+        result: Dict[Any, List[Dict[str, Any]]] = {}
+
+        for item in data:
+            key = item.get(field)
+            if key not in result:
+                result[key] = []
+            result[key].append(item)
+
+        return result
