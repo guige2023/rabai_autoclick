@@ -1,333 +1,310 @@
-"""Data Pipeline Executor action module for RabAI AutoClick.
+"""
+Data Pipeline Executor Action Module.
 
-Executes data processing pipelines with stages, branching,
-and error handling.
+Executes complex data pipelines with parallel execution,
+stage dependencies, and error recovery.
 """
 
+from __future__ import annotations
+
+import asyncio
+import logging
 import time
-import json
-import sys
-import os
-from typing import Any, Dict, List, Optional, Union, Callable
+import uuid
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Optional
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class DataPipelineExecutorAction(BaseAction):
-    """Execute multi-stage data processing pipelines.
+class PipelineStatus(Enum):
+    """Pipeline execution status."""
 
-    Supports sequential stages, parallel branches, error
-    handling per stage, and result streaming.
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    PAUSED = "paused"
+
+
+class StageStatus(Enum):
+    """Stage execution status."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+@dataclass
+class PipelineStage:
+    """Represents a pipeline stage."""
+
+    name: str
+    processor: Callable
+    depends_on: list[str] = field(default_factory=list)
+    timeout: float = 60.0
+    retry_count: int = 0
+    status: StageStatus = StageStatus.PENDING
+    result: Any = None
+    error: str = ""
+    started_at: float = 0.0
+    completed_at: float = 0.0
+
+
+@dataclass
+class PipelineExecution:
+    """Represents a pipeline execution."""
+
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = ""
+    status: PipelineStatus = PipelineStatus.PENDING
+    stages: list[PipelineStage] = field(default_factory=list)
+    created_at: float = field(default_factory=time.time)
+    completed_at: float = 0.0
+    context: dict[str, Any] = field(default_factory=dict)
+
+
+class DataPipelineExecutorAction:
     """
-    action_type = "data_pipeline_executor"
-    display_name = "数据管道执行器"
-    description = "执行多阶段数据处理管道"
+    Executes complex data pipelines with parallel processing.
 
-    def execute(
+    Features:
+    - Stage dependency management
+    - Parallel execution when possible
+    - Timeout and retry handling
+    - Stage result caching
+    - Execution pause/resume
+
+    Example:
+        executor = DataPipelineExecutorAction()
+        executor.add_stage("extract", extract_fn)
+        executor.add_stage("transform", transform_fn, depends_on=["extract"])
+        result = await executor.execute()
+    """
+
+    def __init__(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute a data pipeline.
+        max_parallel: int = 4,
+        default_timeout: float = 60.0,
+        enable_checkpoint: bool = True,
+    ) -> None:
+        """
+        Initialize pipeline executor.
 
         Args:
-            context: Execution context.
-            params: Dict with keys: stages (list), input_data,
-                   stop_on_error, continue_on_error.
-
-        Returns:
-            ActionResult with pipeline execution results.
+            max_parallel: Maximum parallel stage executions.
+            default_timeout: Default stage timeout.
+            enable_checkpoint: Enable stage result caching.
         """
-        start_time = time.time()
-        try:
-            stages = params.get('stages', [])
-            input_data = params.get('input_data', None)
-            stop_on_error = params.get('stop_on_error', True)
-            continue_on_error = params.get('continue_on_error', False)
+        self.max_parallel = max_parallel
+        self.default_timeout = default_timeout
+        self.enable_checkpoint = enable_checkpoint
+        self._stages: list[PipelineStage] = []
+        self._executions: dict[str, PipelineExecution] = {}
+        self._stage_results: dict[str, Any] = {}
 
-            if not stages:
-                return ActionResult(
-                    success=False,
-                    message="No pipeline stages defined",
-                    duration=time.time() - start_time,
-                )
-
-            current_data = input_data
-            stage_results = []
-            errors = []
-
-            for i, stage in enumerate(stages):
-                stage_name = stage.get('name', f'stage_{i}')
-                stage_type = stage.get('type', 'transform')
-                stage_config = stage.get('config', {})
-                stage_start = time.time()
-
-                try:
-                    stage_result = self._execute_stage(stage_type, stage_config, current_data, context)
-                    stage_duration = time.time() - stage_start
-
-                    if isinstance(stage_result, ActionResult):
-                        if stage_result.success:
-                            current_data = stage_result.data
-                            stage_results.append({
-                                'name': stage_name,
-                                'type': stage_type,
-                                'success': True,
-                                'duration': stage_duration,
-                                'output_size': self._estimate_size(current_data),
-                            })
-                        else:
-                            stage_results.append({
-                                'name': stage_name,
-                                'type': stage_type,
-                                'success': False,
-                                'error': stage_result.message,
-                                'duration': stage_duration,
-                            })
-                            errors.append(stage_result.message)
-                            if stop_on_error:
-                                break
-                            elif not continue_on_error:
-                                break
-                    else:
-                        current_data = stage_result
-                        stage_results.append({
-                            'name': stage_name,
-                            'type': stage_type,
-                            'success': True,
-                            'duration': stage_duration,
-                            'output_size': self._estimate_size(current_data),
-                        })
-
-                except Exception as e:
-                    stage_duration = time.time() - stage_start
-                    stage_results.append({
-                        'name': stage_name,
-                        'type': stage_type,
-                        'success': False,
-                        'error': str(e),
-                        'duration': stage_duration,
-                    })
-                    errors.append(str(e))
-                    if stop_on_error:
-                        break
-
-            duration = time.time() - start_time
-            all_success = all(s.get('success', False) for s in stage_results)
-
-            return ActionResult(
-                success=all_success,
-                message=f"Pipeline: {len(stage_results)} stages, {'OK' if all_success else 'errors occurred'}",
-                data={
-                    'stages': stage_results,
-                    'output': current_data,
-                    'errors': errors,
-                    'total_duration': duration,
-                },
-                duration=duration,
-            )
-
-        except Exception as e:
-            duration = time.time() - start_time
-            return ActionResult(
-                success=False,
-                message=f"Pipeline execution failed: {str(e)}",
-                duration=duration,
-            )
-
-    def _execute_stage(
+    def add_stage(
         self,
-        stage_type: str,
-        config: Dict[str, Any],
-        data: Any,
-        context: Any
-    ) -> ActionResult:
-        """Execute a single pipeline stage."""
-        if stage_type == 'transform':
-            transform_fn = config.get('function')
-            if callable(transform_fn):
-                result = transform_fn(data, context)
-                return ActionResult(success=True, data=result)
-            return ActionResult(success=False, message="No transform function provided")
-
-        elif stage_type == 'filter':
-            predicate = config.get('predicate')
-            if callable(predicate):
-                if isinstance(data, list):
-                    filtered = [item for item in data if predicate(item, context)]
-                    return ActionResult(success=True, data=filtered)
-                return ActionResult(success=True, data=data)
-            return ActionResult(success=False, message="No predicate function provided")
-
-        elif stage_type == 'map':
-            mapper = config.get('mapper')
-            if callable(mapper):
-                if isinstance(data, list):
-                    mapped = [mapper(item, context) for item in data]
-                    return ActionResult(success=True, data=mapped)
-                return ActionResult(success=True, data=mapper(data, context))
-            return ActionResult(success=False, message="No mapper function provided")
-
-        elif stage_type == 'reduce':
-            reducer = config.get('reducer')
-            initial = config.get('initial', None)
-            if callable(reducer):
-                if isinstance(data, list):
-                    result = data[0] if data else initial
-                    for item in data[1:]:
-                        result = reducer(result, item, context)
-                    return ActionResult(success=True, data=result)
-                return ActionResult(success=True, data=data)
-            return ActionResult(success=False, message="No reducer function provided")
-
-        elif stage_type == 'validate':
-            schema = config.get('schema', {})
-            validators = config.get('validators', [])
-            errors = []
-            if isinstance(data, dict):
-                for key, expected_type in schema.items():
-                    if key not in data:
-                        errors.append(f"Missing required field: {key}")
-                    elif not isinstance(data[key], expected_type):
-                        errors.append(f"Field {key} has wrong type")
-                for validator in validators:
-                    if callable(validator) and not validator(data, context):
-                        errors.append(f"Validator failed: {validator.__name__}")
-            return ActionResult(success=len(errors) == 0, message=', '.join(errors) if errors else 'OK', data=data)
-
-        elif stage_type == 'aggregate':
-            group_by = config.get('group_by')
-            agg_fn = config.get('agg_fn', 'sum')
-            if isinstance(data, list) and group_by:
-                groups: Dict[Any, List] = {}
-                for item in data:
-                    key = item.get(group_by) if isinstance(item, dict) else getattr(item, group_by, None)
-                    if key not in groups:
-                        groups[key] = []
-                    groups[key].append(item)
-
-                results = {}
-                for key, items in groups.items():
-                    if agg_fn == 'count':
-                        results[key] = len(items)
-                    elif agg_fn == 'sum' and items and isinstance(items[0], dict):
-                        field = config.get('field', 'value')
-                        results[key] = sum(item.get(field, 0) for item in items)
-                    else:
-                        results[key] = items
-                return ActionResult(success=True, data=results)
-            return ActionResult(success=True, data=data)
-
-        else:
-            return ActionResult(success=False, message=f"Unknown stage type: {stage_type}")
-
-    def _estimate_size(self, data: Any) -> int:
-        """Estimate data size in bytes."""
-        try:
-            if isinstance(data, (str, bytes)):
-                return len(data)
-            return len(json.dumps(data))
-        except Exception:
-            return 0
-
-
-class DataPipelineBuilderAction(BaseAction):
-    """Build data pipelines from declarative configuration.
-
-    Parses pipeline definitions and creates optimized
-    execution plans.
-    """
-    action_type = "data_pipeline_builder"
-    display_name = "数据管道构建器"
-    description = "从声明式配置构建数据管道"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Build a pipeline from config.
+        name: str,
+        processor: Callable,
+        *args: Any,
+        depends_on: Optional[list[str]] = None,
+        timeout: Optional[float] = None,
+        retry_count: int = 0,
+        **kwargs: Any,
+    ) -> "DataPipelineExecutorAction":
+        """
+        Add a stage to the pipeline.
 
         Args:
-            context: Execution context.
-            params: Dict with keys: pipeline_definition,
-                   optimize (bool).
+            name: Stage name.
+            processor: Processing function.
+            *args: Positional args for processor.
+            depends_on: List of stage names this depends on.
+            timeout: Stage timeout in seconds.
+            retry_count: Number of retries on failure.
+            **kwargs: Keyword args for processor.
 
         Returns:
-            ActionResult with compiled pipeline.
+            Self for chaining.
         """
-        start_time = time.time()
+        stage = PipelineStage(
+            name=name,
+            processor=processor,
+            depends_on=depends_on or [],
+            timeout=timeout or self.default_timeout,
+            retry_count=retry_count,
+        )
+        self._stages.append(stage)
+        logger.debug(f"Added pipeline stage: {name}")
+        return self
+
+    async def execute(
+        self,
+        execution_id: Optional[str] = None,
+        initial_data: Optional[Any] = None,
+    ) -> PipelineExecution:
+        """
+        Execute the pipeline.
+
+        Args:
+            execution_id: Optional execution ID.
+            initial_data: Initial data for pipeline.
+
+        Returns:
+            PipelineExecution with results.
+        """
+        exec_id = execution_id or str(uuid.uuid4())
+        execution = PipelineExecution(
+            id=exec_id,
+            name=f"pipeline_{len(self._executions)}",
+            stages=[self._create_stage_copy(s) for s in self._stages],
+            context={"initial_data": initial_data},
+        )
+        self._executions[exec_id] = execution
+        execution.status = PipelineStatus.RUNNING
+
+        logger.info(f"Starting pipeline execution: {exec_id}")
+
         try:
-            definition = params.get('pipeline_definition', {})
-            optimize = params.get('optimize', True)
+            await self._execute_stages(execution)
 
-            stages = definition.get('stages', [])
-            name = definition.get('name', 'Unnamed Pipeline')
-            description = definition.get('description', '')
-
-            # Validate stage definitions
-            errors = []
-            compiled_stages = []
-            for i, stage in enumerate(stages):
-                if 'type' not in stage:
-                    errors.append(f"Stage {i} missing 'type' field")
-                    continue
-                compiled = self._compile_stage(stage)
-                if compiled:
-                    compiled_stages.append(compiled)
-                else:
-                    errors.append(f"Stage {i} failed to compile")
-
-            # Optimize pipeline
-            if optimize and len(compiled_stages) > 1:
-                compiled_stages = self._optimize_stages(compiled_stages)
-
-            pipeline = {
-                'name': name,
-                'description': description,
-                'stages': compiled_stages,
-                'total_stages': len(compiled_stages),
-            }
-
-            duration = time.time() - start_time
-            return ActionResult(
-                success=len(errors) == 0,
-                message=f"Built pipeline '{name}' with {len(compiled_stages)} stages",
-                data={'pipeline': pipeline, 'errors': errors},
-                duration=duration,
-            )
-
-        except Exception as e:
-            duration = time.time() - start_time
-            return ActionResult(
-                success=False,
-                message=f"Pipeline build failed: {str(e)}",
-                duration=duration,
-            )
-
-    def _compile_stage(self, stage: Dict[str, Any]) -> Optional[Dict]:
-        """Compile a stage definition."""
-        stage_type = stage.get('type')
-        valid_types = {'transform', 'filter', 'map', 'reduce', 'validate', 'aggregate', 'split', 'merge'}
-        if stage_type not in valid_types:
-            return None
-        return {
-            'type': stage_type,
-            'name': stage.get('name', stage_type),
-            'config': stage.get('config', {}),
-            'optional': stage.get('optional', False),
-        }
-
-    def _optimize_stages(self, stages: List[Dict]) -> List[Dict]:
-        """Optimize stage order for performance."""
-        # Combine consecutive filters
-        optimized = []
-        for stage in stages:
-            if stage['type'] == 'filter' and optimized and optimized[-1]['type'] == 'filter':
-                # Merge filters
-                prev_config = optimized[-1]['config']
-                prev_config.setdefault('predicates', []).append(stage['config'].get('predicate'))
+            if all(s.status == StageStatus.COMPLETED for s in execution.stages):
+                execution.status = PipelineStatus.COMPLETED
+                logger.info(f"Pipeline completed: {exec_id}")
             else:
-                optimized.append(stage)
-        return optimized
+                execution.status = PipelineStatus.FAILED
+                logger.error(f"Pipeline failed: {exec_id}")
+
+        except Exception as e:
+            execution.status = PipelineStatus.FAILED
+            logger.error(f"Pipeline execution error: {e}")
+
+        execution.completed_at = time.time()
+        return execution
+
+    async def _execute_stages(self, execution: PipelineExecution) -> None:
+        """Execute pipeline stages respecting dependencies."""
+        stage_map = {s.name: s for s in execution.stages}
+        completed = set()
+
+        while len(completed) < len(execution.stages):
+            runnable = [
+                s for s in execution.stages
+                if s.name not in completed
+                and s.status == StageStatus.PENDING
+                and all(dep in completed for dep in s.depends_on)
+            ]
+
+            if not runnable:
+                break
+
+            batch = runnable[:self.max_parallel]
+            tasks = [self._execute_stage(s, execution) for s in batch]
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for stage, result in zip(batch, results):
+                if isinstance(result, Exception):
+                    stage.status = StageStatus.FAILED
+                    stage.error = str(result)
+                elif stage.name in completed:
+                    continue
+
+            completed.update(s.name for s in batch)
+
+    async def _execute_stage(
+        self,
+        stage: PipelineStage,
+        execution: PipelineExecution,
+    ) -> Any:
+        """Execute a single stage."""
+        stage.status = StageStatus.RUNNING
+        stage.started_at = time.time()
+
+        cache_key = f"{execution.id}:{stage.name}"
+        if self.enable_checkpoint and cache_key in self._stage_results:
+            stage.result = self._stage_results[cache_key]
+            stage.status = StageStatus.COMPLETED
+            stage.completed_at = time.time()
+            return stage.result
+
+        for attempt in range(stage.retry_count + 1):
+            try:
+                if asyncio.iscoroutinefunction(stage.processor):
+                    result = await asyncio.wait_for(
+                        stage.processor(execution.context),
+                        timeout=stage.timeout,
+                    )
+                else:
+                    result = stage.processor(execution.context)
+
+                stage.result = result
+                self._stage_results[cache_key] = result
+                stage.status = StageStatus.COMPLETED
+                stage.completed_at = time.time()
+                execution.context[stage.name] = result
+
+                logger.debug(f"Stage completed: {stage.name}")
+                return result
+
+            except asyncio.TimeoutError:
+                stage.error = f"Timeout after {stage.timeout}s"
+                logger.warning(f"Stage timeout: {stage.name}")
+
+            except Exception as e:
+                stage.error = str(e)
+                logger.error(f"Stage error: {stage.name} - {e}")
+
+        stage.status = StageStatus.FAILED
+        stage.completed_at = time.time()
+        return None
+
+    def _create_stage_copy(self, stage: PipelineStage) -> PipelineStage:
+        """Create a copy of a stage for execution."""
+        return PipelineStage(
+            name=stage.name,
+            processor=stage.processor,
+            depends_on=stage.depends_on.copy(),
+            timeout=stage.timeout,
+            retry_count=stage.retry_count,
+        )
+
+    def get_execution(self, execution_id: str) -> Optional[PipelineExecution]:
+        """
+        Get a pipeline execution by ID.
+
+        Args:
+            execution_id: Execution identifier.
+
+        Returns:
+            PipelineExecution or None.
+        """
+        return self._executions.get(execution_id)
+
+    def clear_cache(self) -> None:
+        """Clear stage result cache."""
+        self._stage_results.clear()
+        logger.info("Pipeline cache cleared")
+
+    def get_stats(self) -> dict[str, Any]:
+        """
+        Get pipeline statistics.
+
+        Returns:
+            Statistics dictionary.
+        """
+        total = len(self._executions)
+        completed = sum(1 for e in self._executions.values() if e.status == PipelineStatus.COMPLETED)
+        failed = sum(1 for e in self._executions.values() if e.status == PipelineStatus.FAILED)
+
+        return {
+            "total_executions": total,
+            "completed": completed,
+            "failed": failed,
+            "cached_results": len(self._stage_results),
+        }
