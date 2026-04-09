@@ -1,338 +1,426 @@
-"""
-Color mixing and blending utilities for UI automation.
+"""Color mixing and blending utilities for UI automation.
 
-Provides functions for mixing colors, blending gradients,
-and generating color palettes for visual feedback.
+This module provides utilities for mixing colors, creating gradients,
+and applying color transformations for UI visualization and feedback.
 """
 
 from __future__ import annotations
 
+from typing import Sequence
+from dataclasses import dataclass
 import math
-from typing import List, Tuple, Optional, Sequence
 
 
-RGBA = Tuple[int, int, int, float]
-RGB = Tuple[int, int, int]
-HSL = Tuple[float, float, float]
-HSV = Tuple[float, float, float]
+@dataclass
+class Color:
+    """RGBA color representation.
+
+    Attributes:
+        r: Red component (0-255).
+        g: Green component (0-255).
+        b: Blue component (0-255).
+        a: Alpha component (0-255, default 255).
+    """
+    r: int
+    g: int
+    b: int
+    a: int = 255
+
+    def __post_init__(self) -> None:
+        """Clamp values to valid range."""
+        self.r = max(0, min(255, self.r))
+        self.g = max(0, min(255, self.g))
+        self.b = max(0, min(255, self.b))
+        self.a = max(0, min(255, self.a))
+
+    @property
+    def rgb(self) -> tuple[int, int, int]:
+        """RGB tuple (without alpha)."""
+        return (self.r, self.g, self.b)
+
+    @property
+    def rgba(self) -> tuple[int, int, int, int]:
+        """RGBA tuple."""
+        return (self.r, self.g, self.b, self.a)
+
+    @property
+    def hex(self) -> str:
+        """Hex string representation (#RRGGBB)."""
+        return f"#{self.r:02x}{self.g:02x}{self.b:02x}"
+
+    @property
+    def hex_alpha(self) -> str:
+        """Hex string with alpha (#RRGGBBAA)."""
+        return f"#{self.r:02x}{self.g:02x}{self.b:02x}{self.a:02x}"
+
+    @property
+    def luminance(self) -> float:
+        """Compute relative luminance (0.0 to 1.0)."""
+        def linearize(c: int) -> float:
+            c_norm = c / 255.0
+            if c_norm <= 0.03928:
+                return c_norm / 12.92
+            return math.pow((c_norm + 0.055) / 1.055, 2.4)
+
+        r_lin = linearize(self.r)
+        g_lin = linearize(self.g)
+        b_lin = linearize(self.b)
+
+        return 0.2126 * r_lin + 0.7152 * g_lin + 0.0722 * b_lin
+
+    @property
+    def is_dark(self) -> bool:
+        """Check if color is considered dark."""
+        return self.luminance < 0.5
+
+    @property
+    def is_light(self) -> bool:
+        """Check if color is considered light."""
+        return self.luminance >= 0.5
+
+    def with_alpha(self, alpha: int) -> Color:
+        """Create new color with different alpha.
+
+        Args:
+            alpha: New alpha value (0-255).
+
+        Returns:
+            New Color with modified alpha.
+        """
+        return Color(self.r, self.g, self.b, alpha)
+
+    def to_grayscale(self) -> Color:
+        """Convert to grayscale using luminance.
+
+        Returns:
+            Grayscale Color.
+        """
+        gray = int(0.299 * self.r + 0.587 * self.g + 0.114 * self.b)
+        return Color(gray, gray, gray, self.a)
+
+    def blend(self, other: Color, t: float) -> Color:
+        """Blend with another color.
+
+        Args:
+            other: Color to blend with.
+            t: Blend factor (0.0 = self, 1.0 = other).
+
+        Returns:
+            Blended Color.
+        """
+        t = max(0.0, min(1.0, t))
+        return Color(
+            r=int(self.r + (other.r - self.r) * t),
+            g=int(self.g + (other.g - self.g) * t),
+            b=int(self.b + (other.b - self.b) * t),
+            a=int(self.a + (other.a - self.a) * t)
+        )
 
 
-def hex_to_rgb(hex_color: str) -> RGB:
-    """Convert hex color string to RGB tuple.
-    
+def from_hex(hex_str: str) -> Color:
+    """Parse color from hex string.
+
+    Supports formats: #RGB, #RRGGBB, #RRGGBBAA
+
     Args:
-        hex_color: Hex color string (e.g., '#FF5733' or 'FF5733')
-    
+        hex_str: Hex color string.
+
     Returns:
-        RGB tuple (r, g, b) with values 0-255
-    
+        Parsed Color.
+
     Raises:
-        ValueError: If hex string is invalid
+        ValueError: If hex string is invalid.
     """
-    hex_color = hex_color.lstrip('#')
-    if len(hex_color) not in (3, 6):
-        raise ValueError(f"Invalid hex color: {hex_color}")
-    
-    if len(hex_color) == 3:
-        hex_color = ''.join(c * 2 for c in hex_color)
-    
-    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    hex_str = hex_str.lstrip("#")
+
+    if len(hex_str) == 3:
+        hex_str = "".join(c * 2 for c in hex_str)
+
+    if len(hex_str) == 6:
+        hex_str += "FF"
+
+    if len(hex_str) != 8:
+        raise ValueError(f"Invalid hex color: #{hex_str}")
+
+    try:
+        return Color(
+            r=int(hex_str[0:2], 16),
+            g=int(hex_str[2:4], 16),
+            b=int(hex_str[4:6], 16),
+            a=int(hex_str[6:8], 16)
+        )
+    except ValueError as e:
+        raise ValueError(f"Invalid hex color: #{hex_str}") from e
 
 
-def rgb_to_hex(rgb: RGB, include_hash: bool = True) -> str:
-    """Convert RGB tuple to hex color string.
-    
+def from_hsv(h: float, s: float, v: float, a: int = 255) -> Color:
+    """Create color from HSV values.
+
     Args:
-        rgb: RGB tuple (r, g, b) with values 0-255
-        include_hash: Whether to include '#' prefix
-    
+        h: Hue (0.0 to 360.0).
+        s: Saturation (0.0 to 1.0).
+        v: Value (0.0 to 1.0).
+        a: Alpha (0-255).
+
     Returns:
-        Hex color string
+        Color in RGBA.
     """
-    r, g, b = (max(0, min(255, int(c))) for c in rgb)
-    result = f"{r:02X}{g:02X}{b:02X}"
-    return f"#{result}" if include_hash else result
+    h = h % 360.0
+    s = max(0.0, min(1.0, s))
+    v = max(0.0, min(1.0, v))
+
+    c = v * s
+    x = c * (1 - abs((h / 60.0) % 2 - 1))
+    m = v - c
+
+    if 0 <= h < 60:
+        r, g, b = c, x, 0.0
+    elif 60 <= h < 120:
+        r, g, b = x, c, 0.0
+    elif 120 <= h < 180:
+        r, g, b = 0.0, c, x
+    elif 180 <= h < 240:
+        r, g, b = 0.0, x, c
+    elif 240 <= h < 300:
+        r, g, b = x, 0.0, c
+    else:
+        r, g, b = c, 0.0, x
+
+    return Color(
+        r=int((r + m) * 255),
+        g=int((g + m) * 255),
+        b=int((b + m) * 255),
+        a=a
+    )
 
 
-def rgb_to_hsl(rgb: RGB) -> HSL:
-    """Convert RGB to HSL color space.
-    
+def to_hsv(color: Color) -> tuple[float, float, float]:
+    """Convert Color to HSV.
+
     Args:
-        rgb: RGB tuple (r, g, b) with values 0-255
-    
+        color: Color to convert.
+
     Returns:
-        HSL tuple (h, s, l) where h is degrees (0-360),
-        s and l are percentages (0-1)
+        Tuple of (hue, saturation, value).
     """
-    r, g, b = (c / 255.0 for c in rgb)
+    r = color.r / 255.0
+    g = color.g / 255.0
+    b = color.b / 255.0
+
     max_c = max(r, g, b)
     min_c = min(r, g, b)
-    l = (max_c + min_c) / 2.0
-    
-    if max_c == min_c:
-        return (0.0, 0.0, l)
-    
-    d = max_c - min_c
-    s = d / (2.0 - max_c - min_c) if l > 0.5 else d / (max_c + min_c)
-    
-    if max_c == r:
-        h = ((g - b) / d + (6 if g < b else 0)) / 6.0
+    delta = max_c - min_c
+
+    if delta == 0:
+        h = 0.0
+    elif max_c == r:
+        h = 60.0 * (((g - b) / delta) % 6)
     elif max_c == g:
-        h = ((b - r) / d + 2) / 6.0
+        h = 60.0 * (((b - r) / delta) + 2)
     else:
-        h = ((r - g) / d + 4) / 6.0
-    
-    return (h * 360.0, s, l)
+        h = 60.0 * (((r - g) / delta) + 4)
+
+    s = 0.0 if max_c == 0 else delta / max_c
+    v = max_c
+
+    return (h, s, v)
 
 
-def hsl_to_rgb(hsl: HSL) -> RGB:
-    """Convert HSL to RGB color space.
-    
+def mix_colors(colors: Sequence[Color], weights: Sequence[float] | None = None) -> Color:
+    """Mix multiple colors together.
+
     Args:
-        hsl: HSL tuple (h, s, l) where h is degrees (0-360),
-            s and l are percentages (0-1)
-    
+        colors: Sequence of colors to mix.
+        weights: Optional weights for each color (must sum to 1).
+
     Returns:
-        RGB tuple (r, g, b) with values 0-255
-    """
-    h, s, l = hsl
-    h = h / 360.0
-    
-    if s == 0:
-        gray = int(l * 255)
-        return (gray, gray, gray)
-    
-    def hue_to_rgb(p: float, q: float, t: float) -> float:
-        if t < 0: t += 1
-        if t > 1: t -= 1
-        if t < 1/6: return p + (q - p) * 6 * t
-        if t < 1/2: return q
-        if t < 2/3: return p + (q - p) * (2/3 - t) * 6
-        return p
-    
-    q = l * (1 + s) if l < 0.5 else l + s - l * s
-    p = 2 * l - q
-    
-    r = int(hue_to_rgb(p, q, h + 1/3) * 255)
-    g = int(hue_to_rgb(p, q, h) * 255)
-    b = int(hue_to_rgb(p, q, h - 1/3) * 255)
-    
-    return (r, g, b)
-
-
-def mix_colors(color1: RGB, color2: RGB, ratio: float = 0.5) -> RGB:
-    """Mix two RGB colors together.
-    
-    Args:
-        color1: First RGB color
-        color2: Second RGB color
-        ratio: Mix ratio (0.0 = all color1, 1.0 = all color2)
-    
-    Returns:
-        Mixed RGB color
-    """
-    ratio = max(0.0, min(1.0, ratio))
-    r = int(color1[0] * (1 - ratio) + color2[0] * ratio)
-    g = int(color1[1] * (1 - ratio) + color2[1] * ratio)
-    b = int(color1[2] * (1 - ratio) + color2[2] * ratio)
-    return (r, g, b)
-
-
-def blend_colors_linear(colors: Sequence[RGB], positions: Optional[Sequence[float]] = None) -> List[RGB]:
-    """Blend multiple colors with linear interpolation.
-    
-    Args:
-        colors: Sequence of RGB colors to blend
-        positions: Optional positions (0.0 to 1.0) for each color
-    
-    Returns:
-        List of blended RGB colors at interpolated positions
+        Mixed Color.
     """
     if not colors:
-        return []
+        return Color(0, 0, 0)
+
     if len(colors) == 1:
-        return [colors[0]]
-    
-    if positions is None:
-        positions = [i / (len(colors) - 1) for i in range(len(colors))]
-    
-    result = []
-    for pos in positions:
-        pos = max(0.0, min(1.0, pos))
-        
-        for i in range(len(colors) - 1):
-            p1, p2 = positions[i], positions[i + 1]
-            if p1 <= pos <= p2:
-                if p2 == p1:
-                    ratio = 0.0
-                else:
-                    ratio = (pos - p1) / (p2 - p1)
-                blended = mix_colors(colors[i], colors[i + 1], ratio)
-                result.append(blended)
-                break
-    
-    return result
+        return colors[0]
+
+    if weights is None:
+        weights = [1.0 / len(colors)] * len(colors)
+    else:
+        total = sum(weights)
+        if total > 0:
+            weights = [w / total for w in weights]
+        else:
+            weights = [1.0 / len(colors)] * len(colors)
+
+    r = sum(c.r * w for c, w in zip(colors, weights))
+    g = sum(c.g * w for c, w in zip(colors, weights))
+    b = sum(c.b * w for c, w in zip(colors, weights))
+    a = sum(c.a * w for c, w in zip(colors, weights))
+
+    return Color(int(r), int(g), int(b), int(a))
 
 
-def generate_gradient(colors: Sequence[RGB], steps: int) -> List[RGB]:
-    """Generate a gradient between multiple colors.
-    
+def generate_gradient(
+    start_color: Color,
+    end_color: Color,
+    steps: int
+) -> list[Color]:
+    """Generate a linear gradient between two colors.
+
     Args:
-        colors: Sequence of RGB colors
-        steps: Number of color steps in output
-    
+        start_color: Starting color.
+        end_color: Ending color.
+        steps: Number of color steps in gradient.
+
     Returns:
-        List of RGB colors forming the gradient
+        List of Colors forming the gradient.
     """
-    if steps < 1:
-        return []
-    if steps == 1:
-        return [colors[0]] if colors else []
-    
-    positions = [i / (len(colors) - 1) for i in range(len(colors))]
-    target_positions = [i / (steps - 1) for i in range(steps)]
-    
-    return blend_colors_linear(colors, target_positions)
+    if steps < 2:
+        return [start_color]
+
+    gradient: list[Color] = []
+
+    for i in range(steps):
+        t = i / (steps - 1)
+        gradient.append(start_color.blend(end_color, t))
+
+    return gradient
 
 
-def complementary_color(rgb: RGB) -> RGB:
-    """Get the complementary (opposite) color.
-    
+def generate_radial_gradient(
+    center_color: Color,
+    edge_color: Color,
+    radius: float
+) -> list[tuple[tuple[float, float], Color]]:
+    """Generate radial gradient points.
+
     Args:
-        rgb: RGB color tuple
-    
+        center_color: Color at center.
+        edge_color: Color at edge.
+        radius: Radius of gradient.
+
     Returns:
-        Complementary RGB color
+        List of (position, color) tuples.
     """
-    return (255 - rgb[0], 255 - rgb[1], 255 - rgb[2])
-
-
-def analogous_colors(rgb: RGB, angle: float = 30.0) -> List[RGB]:
-    """Get analogous colors (adjacent on color wheel).
-    
-    Args:
-        rgb: Source RGB color
-        angle: Angle offset in degrees (default 30)
-    
-    Returns:
-        List of analogous RGB colors
-    """
-    hsl = rgb_to_hsl(rgb)
-    h = hsl[0]
-    
-    colors = []
-    for offset in (-angle, 0, angle):
-        new_h = (h + offset) % 360
-        colors.append(hsl_to_rgb((new_h, hsl[1], hsl[2])))
-    
-    return colors
-
-
-def triadic_colors(rgb: RGB) -> List[RGB]:
-    """Get triadic colors (evenly spaced on color wheel).
-    
-    Args:
-        rgb: Source RGB color
-    
-    Returns:
-        List of three triadic RGB colors
-    """
-    hsl = rgb_to_hsl(rgb)
-    h = hsl[0]
-    
     return [
-        hsl_to_rgb(((h + offset) % 360, hsl[1], hsl[2]))
-        for offset in (0, 120, 240)
+        ((0.0, 0.0), center_color),
+        ((radius * 0.5, 0.0), center_color.blend(edge_color, 0.5)),
+        ((radius, 0.0), edge_color),
     ]
 
 
-def adjust_brightness(rgb: RGB, factor: float) -> RGB:
-    """Adjust color brightness.
-    
+def complementary(color: Color) -> Color:
+    """Get complementary color (opposite on color wheel).
+
     Args:
-        rgb: Source RGB color
-        factor: Brightness factor (0.0 = black, 1.0 = original, >1.0 = brighter)
-    
+        color: Source color.
+
     Returns:
-        Adjusted RGB color
+        Complementary Color.
     """
-    return tuple(max(0, min(255, int(c * factor))) for c in rgb)
+    h, s, v = to_hsv(color)
+    new_h = (h + 180.0) % 360.0
+    return from_hsv(new_h, s, v, color.a)
 
 
-def adjust_saturation(rgb: RGB, factor: float) -> RGB:
+def analogous(color: Color, angle: float = 30.0) -> tuple[Color, Color]:
+    """Get analogous colors (adjacent on color wheel).
+
+    Args:
+        color: Source color.
+        angle: Angle offset (default 30 degrees).
+
+    Returns:
+        Tuple of (rotated_negative, rotated_positive).
+    """
+    h, s, v = to_hsv(color)
+
+    h1 = (h - angle) % 360.0
+    h2 = (h + angle) % 360.0
+
+    return (
+        from_hsv(h1, s, v, color.a),
+        from_hsv(h2, s, v, color.a)
+    )
+
+
+def triadic(color: Color) -> tuple[Color, Color]:
+    """Get triadic colors (120 degrees apart).
+
+    Args:
+        color: Source color.
+
+    Returns:
+        Tuple of two triadic colors.
+    """
+    h, s, v = to_hsv(color)
+
+    return (
+        from_hsv((h + 120.0) % 360.0, s, v, color.a),
+        from_hsv((h + 240.0) % 360.0, s, v, color.a)
+    )
+
+
+def saturate(color: Color, amount: float) -> Color:
     """Adjust color saturation.
-    
+
     Args:
-        rgb: Source RGB color
-        factor: Saturation factor (0.0 = grayscale, 1.0 = original)
-    
+        color: Source color.
+        amount: Saturation adjustment (-1.0 to 1.0).
+
     Returns:
-        Adjusted RGB color
+        Adjusted Color.
     """
-    hsl = rgb_to_hsl(rgb)
-    return hsl_to_rgb((hsl[0], hsl[1] * factor, hsl[2]))
+    h, s, v = to_hsv(color)
+    new_s = max(0.0, min(1.0, s + amount))
+    return from_hsv(h, new_s, v, color.a)
 
 
-def desaturate(rgb: RGB, amount: float = 0.5) -> RGB:
-    """Desaturate a color (move towards gray).
-    
+def lighten(color: Color, amount: float) -> Color:
+    """Lighten color.
+
     Args:
-        rgb: Source RGB color
-        amount: Desaturation amount (0.0 = no change, 1.0 = full gray)
-    
+        color: Source color.
+        amount: Lightness adjustment (-1.0 to 1.0).
+
     Returns:
-        Desaturated RGB color
+        Adjusted Color.
     """
-    gray = int(0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2])
-    return mix_colors(rgb, (gray, gray, gray), amount)
+    h, s, v = to_hsv(color)
+    new_v = max(0.0, min(1.0, v + amount))
+    return from_hsv(h, s, new_v, color.a)
 
 
-def luminance(rgb: RGB) -> float:
-    """Calculate relative luminance of RGB color.
-    
-    Uses the formula from WCAG 2.0.
-    
+def darken(color: Color, amount: float) -> Color:
+    """Darken color.
+
     Args:
-        rgb: RGB color tuple
-    
+        color: Source color.
+        amount: Darken amount (-1.0 to 1.0).
+
     Returns:
-        Luminance value between 0.0 and 1.0
+        Adjusted Color.
     """
-    def linearize(c: int) -> float:
-        c = c / 255.0
-        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
-    
-    return (0.2126 * linearize(rgb[0]) + 
-            0.7152 * linearize(rgb[1]) + 
-            0.0722 * linearize(rgb[2]))
+    return lighten(color, -amount)
 
 
-def contrast_ratio(rgb1: RGB, rgb2: RGB) -> float:
-    """Calculate contrast ratio between two colors.
-    
-    Uses WCAG 2.0 formula.
-    
-    Args:
-        rgb1: First RGB color
-        rgb2: Second RGB color
-    
-    Returns:
-        Contrast ratio (1.0 = no contrast, 21.0 = max contrast)
-    """
-    l1 = luminance(rgb1)
-    l2 = luminance(rgb2)
-    lighter = max(l1, l2)
-    darker = min(l1, l2)
-    return (lighter + 0.05) / (darker + 0.05)
-
-
-def get_readable_text_color(bg_color: RGB) -> RGB:
-    """Get a readable text color (black or white) for given background.
-    
-    Args:
-        bg_color: Background RGB color
-    
-    Returns:
-        Black (0,0,0) or white (255,255,255) for best contrast
-    """
-    return (0, 0, 0) if luminance(bg_color) > 0.179 else (255, 255, 255)
+# Predefined color palettes
+MATERIAL_COLORS = {
+    "red": Color(244, 67, 54),
+    "pink": Color(233, 30, 99),
+    "purple": Color(156, 39, 176),
+    "deep_purple": Color(103, 58, 183),
+    "indigo": Color(63, 81, 181),
+    "blue": Color(33, 150, 243),
+    "cyan": Color(0, 188, 212),
+    "teal": Color(0, 150, 136),
+    "green": Color(76, 175, 80),
+    "light_green": Color(139, 195, 74),
+    "lime": Color(205, 220, 57),
+    "yellow": Color(255, 235, 59),
+    "amber": Color(255, 193, 7),
+    "orange": Color(255, 152, 0),
+    "deep_orange": Color(255, 87, 34),
+    "brown": Color(121, 85, 72),
+    "grey": Color(158, 158, 158),
+    "blue_grey": Color(96, 125, 139),
+}
