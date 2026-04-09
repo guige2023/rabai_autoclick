@@ -1,386 +1,239 @@
-"""
-API request builder module.
-
-Provides fluent builder for constructing HTTP requests with
-authentication, headers, and retry logic.
-
-Author: Aito Auto Agent
-"""
+"""API request builder and middleware chain action."""
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import (
-    Any,
-    Callable,
-    Optional,
-)
-import json
+from typing import Any, Callable, Optional
+from urllib.parse import urlencode, urljoin
 
 
-class HttpMethod(Enum):
-    """HTTP method types."""
-    GET = "GET"
-    POST = "POST"
-    PUT = "PUT"
-    PATCH = "PATCH"
-    DELETE = "DELETE"
-    HEAD = "HEAD"
-    OPTIONS = "OPTIONS"
-
-
-class AuthType(Enum):
-    """Authentication type."""
-    NONE = auto()
-    BASIC = auto()
-    BEARER = auto()
-    API_KEY = auto()
-    OAUTH2 = auto()
+RequestMiddleware = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 @dataclass
 class RequestConfig:
-    """Configuration for a single request."""
-    method: HttpMethod
-    url: str
+    """Configuration for an API request."""
+
+    method: str = "GET"
+    url: str = ""
     headers: dict[str, str] = field(default_factory=dict)
-    params: dict[str, str] = field(default_factory=dict)
-    body: Optional[Any] = None
-    timeout: float = 30.0
-    allow_redirects: bool = True
+    params: dict[str, Any] = field(default_factory=dict)
+    body: Optional[dict[str, Any]] = None
+    timeout_seconds: float = 30.0
     verify_ssl: bool = True
+    allow_redirects: bool = True
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class RetryConfig:
-    """Retry configuration for failed requests."""
-    max_attempts: int = 3
-    initial_delay_ms: int = 100
-    max_delay_ms: int = 10000
-    exponential_base: float = 2.0
-    jitter: bool = True
-    retry_on_status: list[int] = field(default_factory=lambda: [429, 500, 502, 503, 504])
+class BuiltRequest:
+    """A fully built request ready for execution."""
+
+    method: str
+    url: str
+    headers: dict[str, str]
+    params: dict[str, Any]
+    body: Optional[dict[str, Any]]
+    timeout_seconds: float
+    verify_ssl: bool
+    allow_redirects: bool
+    middleware_applied: list[str] = field(default_factory=list)
 
 
-@dataclass
-class AuthConfig:
-    """Authentication configuration."""
-    auth_type: AuthType = AuthType.NONE
-    username: Optional[str] = None
-    password: Optional[str] = None
-    token: Optional[str] = None
-    api_key: Optional[str] = None
-    api_key_header: str = "X-API-Key"
+class APIMiddleware:
+    """Base class for request middleware."""
+
+    name: str = "base"
+
+    def process(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Process a request dict."""
+        return request
 
 
-class RequestBuilder:
-    """
-    Fluent builder for HTTP requests.
+class AuthMiddleware(APIMiddleware):
+    """Add authentication headers."""
 
-    Example:
-        response = (
-            RequestBuilder()
-            .get("https://api.example.com/users")
-            .header("Accept", "application/json")
-            .header("Authorization", "Bearer token123")
-            .param("page", "1")
-            .timeout(10.0)
-            .execute()
-        )
-    """
+    name = "auth"
+
+    def __init__(self, api_key: Optional[str] = None, token: Optional[str] = None):
+        self.api_key = api_key
+        self.token = token
+
+    def process(self, request: dict[str, Any]) -> dict[str, Any]:
+        headers = request.get("headers", {})
+        if self.api_key:
+            headers["X-API-Key"] = self.api_key
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        request["headers"] = headers
+        return request
+
+
+class ContentTypeMiddleware(APIMiddleware):
+    """Set content type header."""
+
+    name = "content_type"
+
+    def __init__(self, content_type: str = "application/json"):
+        self.content_type = content_type
+
+    def process(self, request: dict[str, Any]) -> dict[str, Any]:
+        headers = request.get("headers", {})
+        if request.get("body") and "Content-Type" not in headers:
+            headers["Content-Type"] = self.content_type
+        request["headers"] = headers
+        return request
+
+
+class UserAgentMiddleware(APIMiddleware):
+    """Set User-Agent header."""
+
+    name = "user_agent"
+
+    def __init__(self, user_agent: str = "RabAiBot/1.0"):
+        self.user_agent = user_agent
+
+    def process(self, request: dict[str, Any]) -> dict[str, Any]:
+        headers = request.get("headers", {})
+        headers["User-Agent"] = self.user_agent
+        request["headers"] = headers
+        return request
+
+
+class RequestIDMiddleware(APIMiddleware):
+    """Add unique request ID."""
+
+    name = "request_id"
+    _counter = 0
 
     def __init__(self):
-        self._method = HttpMethod.GET
-        self._url = ""
-        self._headers: dict[str, str] = {}
-        self._params: dict[str, str] = {}
-        self._body: Optional[Any] = None
-        self._timeout: float = 30.0
-        self._allow_redirects = True
-        self._verify_ssl = True
-        self._auth: Optional[AuthConfig] = None
-        self._retry: Optional[RetryConfig] = None
-        self._on_response: Optional[Callable] = None
-        self._on_error: Optional[Callable] = None
+        import time
 
-    def method(self, method: HttpMethod) -> RequestBuilder:
-        """Set HTTP method."""
-        self._method = method
+        self._prefix = f"req-{int(time.time() * 1000)}-"
+
+    def process(self, request: dict[str, Any]) -> dict[str, Any]:
+        import threading
+
+        RequestIDMiddleware._counter += 1
+        request_id = f"{self._prefix}{RequestIDMiddleware._counter}"
+        headers = request.get("headers", {})
+        headers["X-Request-ID"] = request_id
+        request["headers"] = headers
+        request["metadata"] = request.get("metadata", {})
+        request["metadata"]["request_id"] = request_id
+        return request
+
+
+class APIRequestBuilderAction:
+    """Builds API requests with middleware chain support."""
+
+    def __init__(self, base_url: Optional[str] = None):
+        """Initialize request builder.
+
+        Args:
+            base_url: Base URL to join with relative paths.
+        """
+        self._base_url = base_url
+        self._middleware: list[APIMiddleware] = []
+        self._default_headers: dict[str, str] = {}
+
+    def add_middleware(self, middleware: APIMiddleware) -> "APIRequestBuilderAction":
+        """Add middleware to the chain."""
+        self._middleware.append(middleware)
         return self
 
-    def get(self, url: str) -> RequestBuilder:
-        """Start GET request."""
-        return self.method(HttpMethod.GET).url(url)
-
-    def post(self, url: str) -> RequestBuilder:
-        """Start POST request."""
-        return self.method(HttpMethod.POST).url(url)
-
-    def put(self, url: str) -> RequestBuilder:
-        """Start PUT request."""
-        return self.method(HttpMethod.PUT).url(url)
-
-    def patch(self, url: str) -> RequestBuilder:
-        """Start PATCH request."""
-        return self.method(HttpMethod.PATCH).url(url)
-
-    def delete(self, url: str) -> RequestBuilder:
-        """Start DELETE request."""
-        return self.method(HttpMethod.DELETE).url(url)
-
-    def url(self, url: str) -> RequestBuilder:
-        """Set request URL."""
-        self._url = url
+    def set_default_headers(self, headers: dict[str, str]) -> "APIRequestBuilderAction":
+        """Set default headers for all requests."""
+        self._default_headers.update(headers)
         return self
 
-    def header(self, name: str, value: str) -> RequestBuilder:
-        """Add a header."""
-        self._headers[name] = value
-        return self
+    def build(self, config: RequestConfig) -> BuiltRequest:
+        """Build a request from configuration.
 
-    def headers(self, headers: dict[str, str]) -> RequestBuilder:
-        """Set multiple headers."""
-        self._headers.update(headers)
-        return self
+        Args:
+            config: Request configuration.
 
-    def param(self, name: str, value: str) -> RequestBuilder:
-        """Add query parameter."""
-        self._params[name] = value
-        return self
+        Returns:
+            BuiltRequest ready for execution.
+        """
+        url = config.url
+        if self._base_url and not url.startswith(("http://", "https://")):
+            url = urljoin(self._base_url, url)
 
-    def params(self, params: dict[str, str]) -> RequestBuilder:
-        """Set multiple query parameters."""
-        self._params.update(params)
-        return self
+        if config.params:
+            query_string = urlencode(config.params)
+            separator = "&" if "?" in url else "?"
+            url = f"{url}{separator}{query_string}"
 
-    def body(self, data: Any) -> RequestBuilder:
-        """Set request body."""
-        self._body = data
-        return self
+        request_dict: dict[str, Any] = {
+            "method": config.method.upper(),
+            "url": url,
+            "headers": {**self._default_headers, **config.headers},
+            "params": config.params,
+            "body": config.body,
+            "timeout_seconds": config.timeout_seconds,
+            "verify_ssl": config.verify_ssl,
+            "allow_redirects": config.allow_redirects,
+            "metadata": config.metadata,
+        }
 
-    def json_body(self, data: dict) -> RequestBuilder:
-        """Set JSON request body."""
-        self._body = data
-        self._headers["Content-Type"] = "application/json"
-        return self
+        applied = []
+        for mw in self._middleware:
+            request_dict = mw.process(request_dict)
+            applied.append(mw.name)
 
-    def form_body(self, data: dict) -> RequestBuilder:
-        """Set form-encoded body."""
-        self._body = data
-        self._headers["Content-Type"] = "application/x-www-form-urlencoded"
-        return self
+        return BuiltRequest(
+            method=request_dict["method"],
+            url=request_dict["url"],
+            headers=request_dict["headers"],
+            params=request_dict["params"],
+            body=request_dict["body"],
+            timeout_seconds=request_dict["timeout_seconds"],
+            verify_ssl=request_dict["verify_ssl"],
+            allow_redirects=request_dict["allow_redirects"],
+            middleware_applied=applied,
+        )
 
-    def timeout(self, seconds: float) -> RequestBuilder:
-        """Set request timeout."""
-        self._timeout = seconds
-        return self
-
-    def allow_redirects(self, allow: bool) -> RequestBuilder:
-        """Set whether to follow redirects."""
-        self._allow_redirects = allow
-        return self
-
-    def verify_ssl(self, verify: bool) -> RequestBuilder:
-        """Set SSL verification."""
-        self._verify_ssl = verify
-        return self
-
-    def auth_basic(self, username: str, password: str) -> RequestBuilder:
-        """Set basic authentication."""
-        import base64
-        credentials = base64.b64encode(
-            f"{username}:{password}".encode()
-        ).decode()
-        self._headers["Authorization"] = f"Basic {credentials}"
-        return self
-
-    def auth_bearer(self, token: str) -> RequestBuilder:
-        """Set bearer token authentication."""
-        self._headers["Authorization"] = f"Bearer {token}"
-        return self
-
-    def auth_api_key(self, key: str, header: str = "X-API-Key") -> RequestBuilder:
-        """Set API key authentication."""
-        self._headers[header] = key
-        return self
-
-    def retry(
+    def build_get(
         self,
-        max_attempts: int = 3,
-        delay_ms: int = 100,
-        max_delay_ms: int = 10000
-    ) -> RequestBuilder:
-        """Configure retry behavior."""
-        self._retry = RetryConfig(
-            max_attempts=max_attempts,
-            initial_delay_ms=delay_ms,
-            max_delay_ms=max_delay_ms
-        )
-        return self
+        url: str,
+        params: Optional[dict[str, Any]] = None,
+        **kwargs,
+    ) -> BuiltRequest:
+        """Build a GET request."""
+        return self.build(RequestConfig(method="GET", url=url, params=params or {}, **kwargs))
 
-    def on_response(self, callback: Callable) -> RequestBuilder:
-        """Set response callback."""
-        self._on_response = callback
-        return self
+    def build_post(
+        self,
+        url: str,
+        body: Optional[dict[str, Any]] = None,
+        **kwargs,
+    ) -> BuiltRequest:
+        """Build a POST request."""
+        return self.build(RequestConfig(method="POST", url=url, body=body, **kwargs))
 
-    def on_error(self, callback: Callable) -> RequestBuilder:
-        """Set error callback."""
-        self._on_error = callback
-        return self
+    def build_put(
+        self,
+        url: str,
+        body: Optional[dict[str, Any]] = None,
+        **kwargs,
+    ) -> BuiltRequest:
+        """Build a PUT request."""
+        return self.build(RequestConfig(method="PUT", url=url, body=body, **kwargs))
 
-    def build(self) -> RequestConfig:
-        """Build request configuration."""
-        return RequestConfig(
-            method=self._method,
-            url=self._url,
-            headers=self._headers.copy(),
-            params=self._params.copy(),
-            body=self._body,
-            timeout=self._timeout,
-            allow_redirects=self._allow_redirects,
-            verify_ssl=self._verify_ssl
-        )
+    def build_delete(
+        self,
+        url: str,
+        **kwargs,
+    ) -> BuiltRequest:
+        """Build a DELETE request."""
+        return self.build(RequestConfig(method="DELETE", url=url, **kwargs))
 
-    def execute(self) -> dict:
-        """Execute the request and return response."""
-        config = self.build()
-
-        import requests
-
-        method_func = getattr(requests, config.method.value.lower())
-
-        attempt = 0
-        max_attempts = self._retry.max_attempts if self._retry else 1
-
-        while attempt < max_attempts:
-            try:
-                response = method_func(
-                    url=config.url,
-                    headers=config.headers,
-                    params=config.params,
-                    json=config.body if isinstance(config.body, dict) else None,
-                    data=config.body if not isinstance(config.body, dict) else None,
-                    timeout=config.timeout,
-                    allow_redirects=config.allow_redirects,
-                    verify=config.verify_ssl
-                )
-
-                if self._on_response:
-                    self._on_response(response)
-
-                if response.status_code < 400:
-                    return {
-                        "success": True,
-                        "status_code": response.status_code,
-                        "data": response.json() if response.content else None,
-                        "headers": dict(response.headers)
-                    }
-                else:
-                    should_retry = (
-                        self._retry and
-                        response.status_code in self._retry.retry_on_status
-                    )
-
-                    if not should_retry or attempt >= max_attempts - 1:
-                        return {
-                            "success": False,
-                            "status_code": response.status_code,
-                            "error": response.text,
-                            "headers": dict(response.headers)
-                        }
-
-            except requests.exceptions.RequestException as e:
-                if self._on_error:
-                    self._on_error(e)
-
-                if attempt >= max_attempts - 1:
-                    return {
-                        "success": False,
-                        "error": str(e)
-                    }
-
-            if self._retry and attempt < max_attempts - 1:
-                delay = min(
-                    self._retry.initial_delay_ms * (self._retry.exponential_base ** attempt),
-                    self._retry.max_delay_ms
-                )
-
-                if self._retry.jitter:
-                    import random
-                    delay *= (0.5 + random.random())
-
-                time.sleep(delay / 1000)
-
-            attempt += 1
-
-        return {"success": False, "error": "Max attempts exceeded"}
-
-
-class BatchRequestBuilder:
-    """
-    Builder for batched API requests.
-
-    Example:
-        responses = (
-            BatchRequestBuilder()
-            .add(RequestBuilder().get("https://api.example.com/users/1"))
-            .add(RequestBuilder().get("https://api.example.com/users/2"))
-            .execute_all()
-        )
-    """
-
-    def __init__(self):
-        self._requests: list[RequestBuilder] = []
-        self._concurrency: int = 5
-
-    def add(self, builder: RequestBuilder) -> BatchRequestBuilder:
-        """Add a request to the batch."""
-        self._requests.append(builder)
-        return self
-
-    def add_many(self, builders: list[RequestBuilder]) -> BatchRequestBuilder:
-        """Add multiple requests to the batch."""
-        self._requests.extend(builders)
-        return self
-
-    def concurrency(self, max_concurrent: int) -> BatchRequestBuilder:
-        """Set maximum concurrent requests."""
-        self._concurrency = max_concurrent
-        return self
-
-    def execute_all(self) -> list[dict]:
-        """Execute all requests."""
-        import concurrent.futures
-
-        results = []
-
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=self._concurrency
-        ) as executor:
-            futures = {
-                executor.submit(req.execute): i
-                for i, req in enumerate(self._requests)
-            }
-
-            results = [None] * len(self._requests)
-
-            for future in concurrent.futures.as_completed(futures):
-                index = futures[future]
-                try:
-                    results[index] = future.result()
-                except Exception as e:
-                    results[index] = {"success": False, "error": str(e)}
-
-        return results
-
-
-def create_request_builder() -> RequestBuilder:
-    """Factory to create a RequestBuilder."""
-    return RequestBuilder()
-
-
-def create_batch_builder() -> BatchRequestBuilder:
-    """Factory to create a BatchRequestBuilder."""
-    return BatchRequestBuilder()
+    def build_patch(
+        self,
+        url: str,
+        body: Optional[dict[str, Any]] = None,
+        **kwargs,
+    ) -> BuiltRequest:
+        """Build a PATCH request."""
+        return self.build(RequestConfig(method="PATCH", url=url, body=body, **kwargs))

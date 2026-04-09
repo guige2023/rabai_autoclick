@@ -1,196 +1,225 @@
-"""Data deduplicator action module for RabAI AutoClick.
+"""Data deduplication and uniqueness enforcement action."""
 
-Provides data deduplication with support for exact and
-fuzzy matching based on specified fields.
-"""
+from __future__ import annotations
 
-import sys
-import os
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
-from collections import defaultdict
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional, Sequence
 
 
-class DataDeduplicatorAction(BaseAction):
-    """Data deduplicator action for removing duplicate records.
-    
-    Supports exact deduplication by key fields and fuzzy
-    deduplication with similarity thresholds.
-    """
-    action_type = "data_deduplicator"
-    display_name = "数据去重"
-    description = "数据去重与重复检测"
-    
-    def execute(
+@dataclass
+class DedupeConfig:
+    """Configuration for deduplication."""
+
+    key_fields: list[str]
+    strategy: str = "first"  # "first", "last", "largest", "smallest"
+    compare_fields: Optional[list[str]] = None
+    case_sensitive: bool = True
+    normalize_whitespace: bool = True
+
+
+@dataclass
+class DedupeResult:
+    """Result of deduplication."""
+
+    original_count: int
+    deduplicated_count: int
+    removed_count: int
+    removed_ids: list[int]
+    kept_ids: list[int]
+
+
+class DataDeduplicatorAction:
+    """Removes duplicate records from datasets."""
+
+    def __init__(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute deduplication.
-        
+        default_config: Optional[DedupeConfig] = None,
+    ):
+        """Initialize deduplicator.
+
         Args:
-            context: Execution context.
-            params: Dict with keys:
-                data: Data to deduplicate
-                key_fields: Fields to use for deduplication
-                method: 'exact' or 'fuzzy'
-                threshold: Similarity threshold for fuzzy (0-1)
-                keep: 'first', 'last', or 'none'.
-        
-        Returns:
-            ActionResult with deduplicated data.
+            default_config: Default deduplication configuration.
         """
-        data = params.get('data', [])
-        key_fields = params.get('key_fields')
-        method = params.get('method', 'exact')
-        threshold = params.get('threshold', 0.9)
-        keep = params.get('keep', 'first')
-        
-        if not data:
-            return ActionResult(success=False, message="No data provided")
-        
-        if method == 'exact':
-            return self._exact_deduplicate(data, key_fields, keep)
-        elif method == 'fuzzy':
-            return self._fuzzy_deduplicate(data, key_fields, threshold, keep)
-        else:
-            return ActionResult(success=False, message=f"Unknown method: {method}")
-    
-    def _exact_deduplicate(
+        self._default_config = default_config
+        self._seen_keys: dict[str, Any] = {}
+
+    def _normalize_key(self, value: str, case_sensitive: bool, normalize_ws: bool) -> str:
+        """Normalize a string key."""
+        if not case_sensitive:
+            value = value.lower()
+        if normalize_ws:
+            value = " ".join(value.split())
+        return value
+
+    def _extract_key(self, record: dict[str, Any], config: DedupeConfig) -> str:
+        """Extract deduplication key from record."""
+        key_parts = []
+        for field_name in config.key_fields:
+            value = record.get(field_name)
+            if value is None:
+                key_parts.append("__null__")
+            else:
+                str_value = str(value)
+                key_parts.append(
+                    self._normalize_key(
+                        str_value,
+                        case_sensitive=config.case_sensitive,
+                        normalize_ws=config.normalize_whitespace,
+                    )
+                )
+        return "||".join(key_parts)
+
+    def _compare_records(
         self,
-        data: List[Any],
-        key_fields: Optional[List[str]],
-        keep: str
-    ) -> ActionResult:
-        """Exact deduplication by key fields."""
-        if not key_fields:
-            seen: Set[Tuple] = set()
-            result = []
-            duplicates = 0
-            
-            for item in data:
-                if isinstance(item, dict):
-                    key = tuple(item.get(f) for f in key_fields)
-                else:
-                    key = (item,)
-                
-                if key not in seen:
-                    seen.add(key)
-                    result.append(item)
-                else:
-                    duplicates += 1
-                    if keep == 'none':
-                        pass
-                    elif keep == 'last':
-                        result[-1] = item
-        else:
-            result = list(data)
-            duplicates = 0
-        
-        return ActionResult(
-            success=True,
-            message=f"Deduplicated: {len(data)} -> {len(result)} ({duplicates} removed)",
-            data={
-                'items': result,
-                'count': len(result),
-                'original_count': len(data),
-                'duplicates_removed': duplicates,
-                'method': 'exact'
-            }
+        existing: dict[str, Any],
+        new: dict[str, Any],
+        config: DedupeConfig,
+    ) -> bool:
+        """Compare two records for equality."""
+        compare_fields = config.compare_fields or config.key_fields
+        for field_name in compare_fields:
+            v1 = existing.get(field_name)
+            v2 = new.get(field_name)
+            if v1 != v2:
+                return False
+        return True
+
+    def _should_keep_record(
+        self,
+        record: dict[str, Any],
+        key: str,
+        config: DedupeConfig,
+    ) -> bool:
+        """Determine if a record should be kept."""
+        if key not in self._seen_keys:
+            return True
+
+        existing = self._seen_keys[key]
+
+        if config.strategy == "first":
+            return False
+        elif config.strategy == "last":
+            self._seen_keys[key] = record
+            return False
+        elif config.strategy == "largest":
+            primary_field = config.key_fields[0] if config.key_fields else None
+            if primary_field:
+                existing_val = existing.get(primary_field, 0)
+                new_val = record.get(primary_field, 0)
+                if new_val > existing_val:
+                    self._seen_keys[key] = record
+                return False
+        elif config.strategy == "smallest":
+            primary_field = config.key_fields[0] if config.key_fields else None
+            if primary_field:
+                existing_val = existing.get(primary_field, float("inf"))
+                new_val = record.get(primary_field, float("inf"))
+                if new_val < existing_val:
+                    self._seen_keys[key] = record
+                return False
+
+        return False
+
+    def deduplicate(
+        self,
+        records: Sequence[dict[str, Any]],
+        config: Optional[DedupeConfig] = None,
+    ) -> DedupeResult:
+        """Deduplicate a sequence of records.
+
+        Args:
+            records: Input records.
+            config: Deduplication configuration.
+
+        Returns:
+            DedupeResult with statistics.
+        """
+        config = config or self._default_config
+        if not config:
+            raise ValueError("No deduplication config provided")
+
+        self._seen_keys.clear()
+        kept_ids = []
+        removed_ids = []
+
+        for idx, record in enumerate(records):
+            key = self._extract_key(record, config)
+            should_keep = self._should_keep_record(record, key, config)
+
+            if should_keep:
+                if key not in self._seen_keys:
+                    self._seen_keys[key] = record
+                kept_ids.append(idx)
+            else:
+                removed_ids.append(idx)
+
+        return DedupeResult(
+            original_count=len(records),
+            deduplicated_count=len(kept_ids),
+            removed_count=len(removed_ids),
+            removed_ids=removed_ids,
+            kept_ids=kept_ids,
         )
-    
-    def _fuzzy_deduplicate(
+
+    def deduplicate_with_custom_key(
         self,
-        data: List[Any],
-        key_fields: Optional[List[str]],
-        threshold: float,
-        keep: str
-    ) -> ActionResult:
-        """Fuzzy deduplication with similarity matching."""
-        if not key_fields:
-            return ActionResult(success=False, message="key_fields required for fuzzy deduplication")
-        
-        result = []
-        duplicates = 0
-        
-        for item in data:
-            if not isinstance(item, dict):
-                result.append(item)
-                continue
-            
-            is_duplicate = False
-            
-            for existing in result:
-                if not isinstance(existing, dict):
-                    continue
-                
-                similarity = self._calculate_similarity(item, existing, key_fields)
-                
-                if similarity >= threshold:
-                    is_duplicate = True
-                    duplicates += 1
-                    
-                    if keep == 'last':
-                        idx = result.index(existing)
-                        result[idx] = item
-                    
-                    break
-            
-            if not is_duplicate:
-                result.append(item)
-        
-        return ActionResult(
-            success=True,
-            message=f"Fuzzy deduplicated: {len(data)} -> {len(result)} ({duplicates} removed)",
-            data={
-                'items': result,
-                'count': len(result),
-                'original_count': len(data),
-                'duplicates_removed': duplicates,
-                'threshold': threshold,
-                'method': 'fuzzy'
-            }
+        records: Sequence[dict[str, Any]],
+        key_func: Callable[[dict[str, Any]], Any],
+        strategy: str = "first",
+    ) -> DedupeResult:
+        """Deduplicate using a custom key function."""
+        self._seen_keys.clear()
+        kept_ids = []
+        removed_ids = []
+
+        for idx, record in enumerate(records):
+            key = str(key_func(record))
+            if key not in self._seen_keys:
+                self._seen_keys[key] = record
+                kept_ids.append(idx)
+            else:
+                if strategy == "last":
+                    self._seen_keys[key] = record
+                removed_ids.append(idx)
+
+        return DedupeResult(
+            original_count=len(records),
+            deduplicated_count=len(kept_ids),
+            removed_count=len(removed_ids),
+            removed_ids=removed_ids,
+            kept_ids=kept_ids,
         )
-    
-    def _calculate_similarity(
+
+    def find_duplicates(
         self,
-        item1: Dict,
-        item2: Dict,
-        key_fields: List[str]
-    ) -> float:
-        """Calculate similarity between two items."""
-        if not key_fields:
-            return 0.0
-        
-        matches = 0
-        total = len(key_fields)
-        
-        for field in key_fields:
-            val1 = item1.get(field)
-            val2 = item2.get(field)
-            
-            if val1 == val2:
-                matches += 1
-            elif val1 is not None and val2 is not None:
-                if isinstance(val1, str) and isinstance(val2, str):
-                    if self._string_similarity(val1, val2) >= 0.8:
-                        matches += 0.5
-        
-        return matches / total if total > 0 else 0.0
-    
-    def _string_similarity(self, s1: str, s2: str) -> float:
-        """Calculate string similarity using simple ratio."""
-        if s1 == s2:
-            return 1.0
-        
-        longer = s1 if len(s1) >= len(s2) else s2
-        shorter = s2 if len(s1) >= len(s2) else s1
-        
-        if len(longer) == 0:
-            return 1.0
-        
-        matches = sum(1 for c1, c2 in zip(longer, shorter) if c1 == c2)
-        
-        return matches / len(longer)
+        records: Sequence[dict[str, Any]],
+        config: Optional[DedupeConfig] = None,
+    ) -> list[tuple[int, int]]:
+        """Find duplicate pairs in records.
+
+        Returns:
+            List of (idx1, idx2) tuples for duplicate pairs.
+        """
+        config = config or self._default_config
+        if not config:
+            raise ValueError("No deduplication config provided")
+
+        key_to_indices: dict[str, list[int]] = {}
+
+        for idx, record in enumerate(records):
+            key = self._extract_key(record, config)
+            if key not in key_to_indices:
+                key_to_indices[key] = []
+            key_to_indices[key].append(idx)
+
+        duplicates = []
+        for indices in key_to_indices.values():
+            if len(indices) > 1:
+                for i in range(len(indices) - 1):
+                    duplicates.append((indices[i], indices[i + 1]))
+
+        return duplicates
+
+    def reset(self) -> None:
+        """Reset internal state."""
+        self._seen_keys.clear()

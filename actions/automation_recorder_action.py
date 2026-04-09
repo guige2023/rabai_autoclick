@@ -1,268 +1,247 @@
-"""Automation Recorder Action Module.
+"""Automation recording and playback action."""
 
-Records and manages automation session recordings with metadata,
-search, categorization, and export capabilities.
-"""
+from __future__ import annotations
 
+import asyncio
 import time
-import json
-import logging
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from datetime import datetime
+from enum import Enum
+from typing import Any, Callable, Optional
 
-logger = logging.getLogger(__name__)
+
+class StepType(str, Enum):
+    """Type of automation step."""
+
+    CLICK = "click"
+    TYPE = "type"
+    PRESS = "press"
+    WAIT = "wait"
+    SCROLL = "scroll"
+    HOVER = "hover"
+    SCREENSHOT = "screenshot"
+    CUSTOM = "custom"
 
 
 @dataclass
-class Recording:
-    recording_id: str
-    name: str
-    created_at: float
-    duration_sec: float
-    action_count: int
-    category: str
-    tags: List[str]
-    file_path: str
-    metadata: Dict[str, Any]
+class AutomationStep:
+    """A single step in an automation sequence."""
 
-
-@dataclass
-class RecordedAction:
-    index: int
+    step_type: StepType
     timestamp: float
-    relative_time: float
-    action_type: str
-    params: Dict[str, Any]
-    screen_region: Optional[str] = None
+    data: dict[str, Any]
+    duration_ms: float = 0
     result: Optional[Any] = None
+    error: Optional[str] = None
+
+
+@dataclass
+class RecordedSession:
+    """A recorded automation session."""
+
+    session_id: str
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    steps: list[AutomationStep] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PlaybackResult:
+    """Result of playing back a session."""
+
+    session_id: str
+    total_steps: int
+    successful_steps: int
+    failed_steps: int
+    duration_ms: float
+    errors: list[str] = field(default_factory=list)
 
 
 class AutomationRecorderAction:
-    """Records and manages automation session recordings."""
+    """Records and replays automation sequences."""
 
     def __init__(
         self,
-        storage_dir: str = "/tmp/automation_recordings",
+        on_step: Optional[Callable[[AutomationStep], None]] = None,
+        on_error: Optional[Callable[[AutomationStep, Exception], None]] = None,
+    ):
+        """Initialize recorder.
+
+        Args:
+            on_step: Callback for each step executed.
+            on_error: Callback when step fails.
+        """
+        self._on_step = on_step
+        self._on_error = on_error
+        self._sessions: dict[str, RecordedSession] = {}
+        self._current_session: Optional[RecordedSession] = None
+        self._handlers: dict[StepType, Callable[[dict[str, Any]], Any]] = {}
+
+    def register_handler(
+        self,
+        step_type: StepType,
+        handler: Callable[[dict[str, Any]], Any],
     ) -> None:
-        self.storage_dir = Path(storage_dir)
-        self.storage_dir.mkdir(parents=True, exist_ok=True)
-        self._recordings: Dict[str, Recording] = {}
-        self._current_recording: Optional[str] = None
-        self._current_actions: List[RecordedAction] = []
-        self._recording_start: float = 0.0
-        self._listeners: Dict[str, List[Callable]] = {
-            "recording_start": [],
-            "recording_stop": [],
-            "action_recorded": [],
-        }
-        self._load_index()
+        """Register a handler for a step type."""
+        self._handlers[step_type] = handler
 
-    def start_recording(
-        self,
-        name: str,
-        category: str = "general",
-        tags: Optional[List[str]] = None,
-    ) -> str:
-        recording_id = f"rec_{int(time.time() * 1000)}"
-        self._current_recording = recording_id
-        self._current_actions = []
-        self._recording_start = time.time()
-        self._notify("recording_start", {"recording_id": recording_id, "name": name})
-        logger.info(f"Started recording {recording_id}: {name}")
-        return recording_id
+    def _get_default_handler(self, step_type: StepType) -> Callable[[dict[str, Any]], Any]:
+        """Get default handler for step type."""
+        def default_handler(data: dict[str, Any]) -> Any:
+            return {"handled": True, "type": step_type.value, "data": data}
 
-    def record_action(
-        self,
-        action_type: str,
-        params: Dict[str, Any],
-        result: Optional[Any] = None,
-        screen_region: Optional[str] = None,
-    ) -> None:
-        if not self._current_recording:
-            return
-        relative = time.time() - self._recording_start
-        action = RecordedAction(
-            index=len(self._current_actions),
-            timestamp=time.time(),
-            relative_time=relative,
-            action_type=action_type,
-            params=params,
-            screen_region=screen_region,
-            result=result,
+        return default_handler
+
+    async def start_recording(self, session_id: Optional[str] = None) -> str:
+        """Start a new recording session."""
+        import uuid
+
+        session_id = session_id or str(uuid.uuid4())[:8]
+        session = RecordedSession(
+            session_id=session_id,
+            started_at=datetime.now(),
         )
-        self._current_actions.append(action)
-        self._notify("action_recorded", action)
+        self._sessions[session_id] = session
+        self._current_session = session
+        return session_id
 
-    def stop_recording(
-        self,
-        name: str,
-        category: str = "general",
-        tags: Optional[List[str]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Optional[str]:
-        if not self._current_recording:
-            return None
-        recording_id = self._current_recording
-        duration = time.time() - self._recording_start
-        file_path = self._save_recording(recording_id, self._current_actions)
-        recording = Recording(
-            recording_id=recording_id,
-            name=name,
-            created_at=self._recording_start,
-            duration_sec=duration,
-            action_count=len(self._current_actions),
-            category=category,
-            tags=tags or [],
-            file_path=str(file_path),
-            metadata=metadata or {},
-        )
-        self._recordings[recording_id] = recording
-        self._current_recording = None
-        self._current_actions = []
-        self._save_index()
-        self._notify("recording_stop", recording)
-        logger.info(f"Stopped recording {recording_id}: {name}")
-        return recording_id
-
-    def _save_recording(
-        self,
-        recording_id: str,
-        actions: List[RecordedAction],
-    ) -> Path:
-        file_path = self.storage_dir / f"{recording_id}.json"
-        data = {
-            "recording_id": recording_id,
-            "actions": [
-                {
-                    "index": a.index,
-                    "timestamp": a.timestamp,
-                    "relative_time": a.relative_time,
-                    "action_type": a.action_type,
-                    "params": a.params,
-                    "screen_region": a.screen_region,
-                    "result": str(a.result) if a.result else None,
-                }
-                for a in actions
-            ],
-        }
-        with open(file_path, "w") as f:
-            json.dump(data, f, indent=2)
-        return file_path
-
-    def load_recording(self, recording_id: str) -> Optional[List[RecordedAction]]:
-        recording = self._recordings.get(recording_id)
-        if not recording:
-            return None
-        file_path = Path(recording.file_path)
-        if not file_path.exists():
-            return None
-        with open(file_path) as f:
-            data = json.load(f)
-        return [
-            RecordedAction(
-                index=a["index"],
-                timestamp=a["timestamp"],
-                relative_time=a["relative_time"],
-                action_type=a["action_type"],
-                params=a["params"],
-                screen_region=a.get("screen_region"),
-                result=a.get("result"),
-            )
-            for a in data.get("actions", [])
-        ]
-
-    def delete_recording(self, recording_id: str) -> bool:
-        recording = self._recordings.pop(recording_id, None)
-        if not recording:
-            return False
-        path = Path(recording.file_path)
-        if path.exists():
-            path.unlink()
-        self._save_index()
-        return True
-
-    def list_recordings(
-        self,
-        category: Optional[str] = None,
-        tag: Optional[str] = None,
-        limit: int = 100,
-    ) -> List[Dict[str, Any]]:
-        results = []
-        for rec in self._recordings.values():
-            if category and rec.category != category:
-                continue
-            if tag and tag not in rec.tags:
-                continue
-            results.append(
-                {
-                    "recording_id": rec.recording_id,
-                    "name": rec.name,
-                    "created_at": rec.created_at,
-                    "duration_sec": rec.duration_sec,
-                    "action_count": rec.action_count,
-                    "category": rec.category,
-                    "tags": rec.tags,
-                    "metadata": rec.metadata,
-                }
-            )
-        results.sort(key=lambda x: x["created_at"], reverse=True)
-        return results[:limit]
-
-    def export_recording(
-        self,
-        recording_id: str,
-        format: str = "json",
-    ) -> Optional[str]:
-        actions = self.load_recording(recording_id)
-        if not actions:
-            return None
-        if format == "json":
-            return json.dumps(
-                [{"action_type": a.action_type, "params": a.params, "time": a.relative_time} for a in actions],
-                indent=2,
-            )
+    async def stop_recording(self) -> Optional[RecordedSession]:
+        """Stop the current recording session."""
+        if self._current_session:
+            self._current_session.completed_at = datetime.now()
+            session = self._current_session
+            self._current_session = None
+            return session
         return None
 
-    def add_listener(self, event: str, callback: Callable) -> None:
-        if event in self._listeners:
-            self._listeners[event].append(callback)
+    def add_step(self, step: AutomationStep) -> None:
+        """Add a step to the current recording."""
+        if self._current_session:
+            self._current_session.steps.append(step)
 
-    def _notify(self, event: str, data: Any) -> None:
-        for cb in self._listeners.get(event, []):
+    async def record_step(
+        self,
+        step_type: StepType,
+        data: dict[str, Any],
+        duration_ms: float = 0,
+    ) -> AutomationStep:
+        """Record a single step."""
+        step = AutomationStep(
+            step_type=step_type,
+            timestamp=time.time(),
+            data=data,
+            duration_ms=duration_ms,
+        )
+
+        handler = self._handlers.get(step_type) or self._get_default_handler(step_type)
+
+        try:
+            if asyncio.iscoroutinefunction(handler):
+                step.result = await handler(data)
+            else:
+                step.result = handler(data)
+        except Exception as e:
+            step.error = str(e)
+            if self._on_error:
+                self._on_error(step, e)
+
+        self.add_step(step)
+
+        if self._on_step:
+            self._on_step(step)
+
+        return step
+
+    async def playback(
+        self,
+        session_id: str,
+        speed_factor: float = 1.0,
+        stop_on_error: bool = True,
+    ) -> PlaybackResult:
+        """Play back a recorded session.
+
+        Args:
+            session_id: Session to play back.
+            speed_factor: Playback speed (1.0 = normal).
+            stop_on_error: Stop playback on first error.
+
+        Returns:
+            PlaybackResult with execution statistics.
+        """
+        session = self._sessions.get(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+
+        start_time = time.time()
+        successful = 0
+        failed = 0
+        errors = []
+
+        for step in session.steps:
+            wait_time = step.duration_ms / 1000 / speed_factor
+            if wait_time > 0:
+                await asyncio.sleep(wait_time)
+
+            handler = self._handlers.get(step.step_type) or self._get_default_handler(
+                step.step_type
+            )
+
             try:
-                cb(data)
+                if asyncio.iscoroutinefunction(handler):
+                    await handler(step.data)
+                else:
+                    handler(step.data)
+                successful += 1
             except Exception as e:
-                logger.error(f"Recorder listener error for {event}: {e}")
+                failed += 1
+                error_msg = f"Step {step.step_type.value} failed: {e}"
+                errors.append(error_msg)
+                if stop_on_error:
+                    break
 
-    def _load_index(self) -> None:
-        index_path = self.storage_dir / "recordings_index.json"
-        if index_path.exists():
-            try:
-                with open(index_path) as f:
-                    raw = json.load(f)
-                    for item in raw.get("recordings", []):
-                        self._recordings[item["recording_id"]] = Recording(**item)
-            except Exception as e:
-                logger.warning(f"Failed to load recordings index: {e}")
+        duration_ms = (time.time() - start_time) * 1000
 
-    def _save_index(self) -> None:
-        index_path = self.storage_dir / "recordings_index.json"
-        data = {
-            "recordings": [
+        return PlaybackResult(
+            session_id=session_id,
+            total_steps=len(session.steps),
+            successful_steps=successful,
+            failed_steps=failed,
+            duration_ms=duration_ms,
+            errors=errors,
+        )
+
+    def get_session(self, session_id: str) -> Optional[RecordedSession]:
+        """Get a recorded session."""
+        return self._sessions.get(session_id)
+
+    def list_sessions(self) -> list[str]:
+        """List all recorded session IDs."""
+        return list(self._sessions.keys())
+
+    def delete_session(self, session_id: str) -> bool:
+        """Delete a recorded session."""
+        return self._sessions.pop(session_id, None) is not None
+
+    def export_session(self, session_id: str) -> dict[str, Any]:
+        """Export session as dict."""
+        session = self._sessions.get(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+
+        return {
+            "session_id": session.session_id,
+            "started_at": session.started_at.isoformat(),
+            "completed_at": session.completed_at.isoformat() if session.completed_at else None,
+            "steps": [
                 {
-                    "recording_id": r.recording_id,
-                    "name": r.name,
-                    "created_at": r.created_at,
-                    "duration_sec": r.duration_sec,
-                    "action_count": r.action_count,
-                    "category": r.category,
-                    "tags": r.tags,
-                    "file_path": r.file_path,
-                    "metadata": r.metadata,
+                    "type": s.step_type.value,
+                    "timestamp": s.timestamp,
+                    "data": s.data,
+                    "duration_ms": s.duration_ms,
+                    "error": s.error,
                 }
-                for r in self._recordings.values()
-            ]
+                for s in session.steps
+            ],
+            "metadata": session.metadata,
         }
-        with open(index_path, "w") as f:
-            json.dump(data, f, indent=2)
