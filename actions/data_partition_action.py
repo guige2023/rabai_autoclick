@@ -1,115 +1,234 @@
 """
-Data Partition Action - Partitions data by various strategies.
+Data Partition Action Module
 
-This module provides data partitioning including
-by value, range, and quantiles.
+Data partitioning strategies for efficient processing of large datasets.
+Supports hash, range, round-robin, and composite partitioning.
+
+MIT License - Copyright (c) 2025 RabAi Research
 """
 
 from __future__ import annotations
 
+import logging
+import hashlib
 from dataclasses import dataclass, field
-from typing import Any
-from collections import defaultdict
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+
+class PartitionStrategy(Enum):
+    """Partitioning strategies."""
+
+    HASH = "hash"
+    RANGE = "range"
+    ROUND_ROBIN = "round_robin"
+    LIST = "list"
+    COMPOSITE = "composite"
 
 
 @dataclass
 class Partition:
-    """A data partition."""
+    """A single data partition."""
+
+    partition_id: int
     name: str
-    range_start: Any = None
-    range_end: Any = None
-    data: list[dict[str, Any]] = field(default_factory=list)
+    data: List[Dict[str, Any]] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class PartitionResult:
-    """Result of partitioning operation."""
-    partitions: list[Partition]
-    partition_count: int
-    record_count: int
+class PartitionConfig:
+    """Configuration for partitioning."""
+
+    strategy: PartitionStrategy = PartitionStrategy.HASH
+    num_partitions: int = 4
+    partition_key: str = "id"
+    custom_hash_fn: Optional[Callable[[Any], int]] = None
+    range_boundaries: Optional[List[Any]] = None
 
 
-class DataPartitioner:
-    """Partitions data into segments."""
-    
-    def partition_by_value(
-        self,
-        data: list[dict[str, Any]],
-        field: str,
-    ) -> dict[Any, list[dict[str, Any]]]:
-        """Partition by unique values."""
-        result = defaultdict(list)
-        for record in data:
-            key = record.get(field)
-            result[key].append(record)
-        return dict(result)
-    
-    def partition_by_range(
-        self,
-        data: list[dict[str, Any]],
-        field: str,
-        ranges: list[tuple[Any, Any]],
-    ) -> list[Partition]:
-        """Partition by value ranges."""
-        partitions = [Partition(name=f"p_{i}", range_start=r[0], range_end=r[1]) for i, r in enumerate(ranges)]
-        
-        for record in data:
-            value = record.get(field)
-            for partition in partitions:
-                if partition.range_start <= value < partition.range_end:
-                    partition.data.append(record)
-                    break
-        
-        return [p for p in partitions if p.data]
-    
-    def partition_by_quantiles(
-        self,
-        data: list[dict[str, Any]],
-        field: str,
-        num_partitions: int = 4,
-    ) -> list[Partition]:
-        """Partition by quantiles."""
-        values = sorted([r.get(field) for r in data if field in r])
-        if not values:
-            return []
-        
-        quantile_size = len(values) // num_partitions
-        ranges = []
-        for i in range(num_partitions):
-            start = values[i * quantile_size] if i * quantile_size < len(values) else values[-1]
-            end = values[min((i + 1) * quantile_size - 1, len(values) - 1)]
-            ranges.append((start, end))
-        
-        return self.partition_by_range(data, field, ranges)
+class HashPartitioner:
+    """Hash-based partitioner."""
+
+    def __init__(self, num_partitions: int, partition_key: str):
+        self.num_partitions = num_partitions
+        self.partition_key = partition_key
+
+    def partition(self, item: Dict[str, Any]) -> int:
+        """Get partition number for an item."""
+        key_value = item.get(self.partition_key, 0)
+        if isinstance(key_value, str):
+            hash_value = int(hashlib.md5(key_value.encode()).hexdigest(), 16)
+        else:
+            hash_value = hash(key_value)
+        return hash_value % self.num_partitions
+
+
+class RangePartitioner:
+    """Range-based partitioner."""
+
+    def __init__(self, boundaries: List[Any]):
+        self.boundaries = sorted(boundaries)
+
+    def partition(self, item: Dict[str, Any]) -> int:
+        """Get partition number for an item."""
+        for i, boundary in enumerate(self.boundaries):
+            if item.get("key", 0) < boundary:
+                return i
+        return len(self.boundaries)
+
+
+class RoundRobinPartitioner:
+    """Round-robin partitioner."""
+
+    def __init__(self, num_partitions: int):
+        self.num_partitions = num_partitions
+        self._current = 0
+
+    def partition(self, item: Dict[str, Any]) -> int:
+        """Get next partition number."""
+        partition = self._current
+        self._current = (self._current + 1) % self.num_partitions
+        return partition
+
+
+class ListPartitioner:
+    """List-based partitioner."""
+
+    def __init__(self, partition_key: str, partition_values: Dict[int, List[Any]]):
+        self.partition_key = partition_key
+        self.partition_values = partition_values
+
+    def partition(self, item: Dict[str, Any]) -> int:
+        """Get partition number for an item."""
+        value = item.get(self.partition_key)
+        for partition_id, values in self.partition_values.items():
+            if value in values:
+                return partition_id
+        return -1
 
 
 class DataPartitionAction:
-    """Data partition action for automation workflows."""
-    
-    def __init__(self) -> None:
-        self.partitioner = DataPartitioner()
-    
-    async def partition_by_value(
+    """
+    Main action class for data partitioning.
+
+    Features:
+    - Hash partitioning for uniform distribution
+    - Range partitioning for ordered data
+    - Round-robin for simple load balancing
+    - List partitioning for categorical data
+    - Custom partition functions
+
+    Usage:
+        action = DataPartitionAction(config)
+        partitions = action.partition(data)
+    """
+
+    def __init__(self, config: Optional[PartitionConfig] = None):
+        self.config = config or PartitionConfig()
+        self._partitioner: Optional[Any] = None
+        self._initialize_partitioner()
+
+    def _initialize_partitioner(self) -> None:
+        """Initialize the appropriate partitioner."""
+        if self.config.strategy == PartitionStrategy.HASH:
+            self._partitioner = HashPartitioner(
+                self.config.num_partitions,
+                self.config.partition_key,
+            )
+        elif self.config.strategy == PartitionStrategy.ROUND_ROBIN:
+            self._partitioner = RoundRobinPartitioner(self.config.num_partitions)
+        elif self.config.strategy == PartitionStrategy.RANGE:
+            self._partitioner = RangePartitioner(
+                self.config.range_boundaries or [1, 2, 3],
+            )
+        elif self.config.strategy == PartitionStrategy.LIST:
+            self._partitioner = ListPartitioner(
+                self.config.partition_key,
+                {i: [] for i in range(self.config.num_partitions)},
+            )
+
+    def partition(
         self,
-        data: list[dict[str, Any]],
-        field: str,
-    ) -> dict[Any, list[dict[str, Any]]]:
-        """Partition by field values."""
-        return self.partitioner.partition_by_value(data, field)
-    
-    async def partition_by_quantiles(
+        data: List[Dict[str, Any]],
+    ) -> List[Partition]:
+        """Partition data into multiple partitions."""
+        partitions = [
+            Partition(partition_id=i, name=f"partition_{i}")
+            for i in range(self.config.num_partitions)
+        ]
+
+        for item in data:
+            if self._partitioner:
+                partition_id = self._partitioner.partition(item)
+                if partition_id >= 0 and partition_id < len(partitions):
+                    partitions[partition_id].data.append(item)
+                else:
+                    partitions[0].data.append(item)
+            else:
+                partitions[0].data.append(item)
+
+        # Update metadata
+        for partition in partitions:
+            partition.metadata = {
+                "count": len(partition.data),
+                "strategy": self.config.strategy.value,
+            }
+
+        return partitions
+
+    def partition_with_key(
         self,
-        data: list[dict[str, Any]],
-        field: str,
-        num_partitions: int = 4,
-    ) -> PartitionResult:
-        """Partition by quantiles."""
-        partitions = self.partitioner.partition_by_quantiles(data, field, num_partitions)
-        return PartitionResult(
-            partitions=partitions,
-            partition_count=len(partitions),
-            record_count=len(data),
-        )
+        data: List[Dict[str, Any]],
+        key_fn: Callable[[Dict[str, Any]], Any],
+    ) -> Dict[Any, List[Dict[str, Any]]]:
+        """Partition data using a custom key function."""
+        result: Dict[Any, List[Dict[str, Any]]] = {}
+
+        for item in data:
+            key = key_fn(item)
+            if key not in result:
+                result[key] = []
+            result[key].append(item)
+
+        return result
+
+    def merge_partitions(
+        self,
+        partitions: List[Partition],
+    ) -> List[Dict[str, Any]]:
+        """Merge partitions back into a single list."""
+        result = []
+        for partition in partitions:
+            result.extend(partition.data)
+        return result
 
 
-__all__ = ["Partition", "PartitionResult", "DataPartitioner", "DataPartitionAction"]
+def demo_partition():
+    """Demonstrate partitioning."""
+    data = [
+        {"id": 1, "name": "Alice", "category": "A"},
+        {"id": 2, "name": "Bob", "category": "B"},
+        {"id": 3, "name": "Charlie", "category": "A"},
+        {"id": 4, "name": "Diana", "category": "C"},
+        {"id": 5, "name": "Eve", "category": "B"},
+        {"id": 6, "name": "Frank", "category": "A"},
+    ]
+
+    # Hash partition
+    config = PartitionConfig(
+        strategy=PartitionStrategy.HASH,
+        num_partitions=3,
+        partition_key="id",
+    )
+    action = DataPartitionAction(config)
+    partitions = action.partition(data)
+
+    for p in partitions:
+        print(f"{p.name}: {len(p.data)} items")
+
+
+if __name__ == "__main__":
+    demo_partition()
