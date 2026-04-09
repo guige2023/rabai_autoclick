@@ -1,26 +1,21 @@
+"""Data encoding action for encoding and decoding data.
+
+Provides various encoding schemes including base64,
+URL encoding, and custom transformations.
 """
-Data Encoding Action Module
-
-Provides data encoding and decoding capabilities.
-Supports base64, URL encoding, JSON, and custom encoding schemes.
-
-Author: rabai_autoclick team
-Version: 1.0.0
-"""
-
-from __future__ import annotations
 
 import base64
 import json
+import logging
 import urllib.parse
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Optional
 
+logger = logging.getLogger(__name__)
+
 
 class EncodingType(Enum):
-    """Encoding type."""
     BASE64 = "base64"
     URL = "url"
     JSON = "json"
@@ -30,248 +25,218 @@ class EncodingType(Enum):
 
 
 @dataclass
-class EncodingResult:
-    """Result of an encoding operation."""
-    success: bool
-    original: Any
-    encoded: Any
-    encoding_type: EncodingType
-    duration_ms: float = 0.0
-    error: Optional[str] = None
-
-
-@dataclass
-class DecodingResult:
-    """Result of a decoding operation."""
-    success: bool
-    encoded: Any
-    decoded: Any
-    encoding_type: EncodingType
-    duration_ms: float = 0.0
-    error: Optional[str] = None
+class EncodingConfig:
+    encoding: EncodingType
+    custom_encoder: Optional[Callable[[str], str]] = None
+    custom_decoder: Optional[Callable[[str], str]] = None
 
 
 class DataEncodingAction:
+    """Encode and decode data using various schemes.
+
+    Args:
+        default_encoding: Default encoding type.
     """
-    Data encoding and decoding utilities.
-    
-    Example:
-        encoder = DataEncodingAction()
-        
-        result = encoder.encode("Hello World", EncodingType.BASE64)
-        decoded = encoder.decode(result.encoded, EncodingType.BASE64)
-    """
-    
-    def __init__(self):
+
+    def __init__(
+        self,
+        default_encoding: EncodingType = EncodingType.BASE64,
+    ) -> None:
+        self._default_encoding = default_encoding
+        self._encoding_configs: dict[str, EncodingConfig] = {}
         self._stats = {
-            "total_encodes": 0,
-            "total_decodes": 0,
-            "successful_encodes": 0,
-            "successful_decodes": 0,
-            "failed_operations": 0
+            "encode_count": 0,
+            "decode_count": 0,
+            "encode_errors": 0,
+            "decode_errors": 0,
         }
-    
+
     def encode(
         self,
-        data: Any,
-        encoding_type: EncodingType = EncodingType.BASE64,
-        custom_encoder: Optional[Callable[[Any], Any]] = None
-    ) -> EncodingResult:
-        """
-        Encode data.
-        
+        data: str,
+        encoding: Optional[EncodingType] = None,
+        custom_encoder: Optional[Callable[[str], str]] = None,
+    ) -> str:
+        """Encode a string.
+
         Args:
-            data: Data to encode
-            encoding_type: Type of encoding
-            custom_encoder: Optional custom encoder function
-            
+            data: String to encode.
+            encoding: Encoding type.
+            custom_encoder: Custom encoder function.
+
         Returns:
-            EncodingResult with encoded data
+            Encoded string.
         """
-        start_time = datetime.now()
-        self._stats["total_encodes"] += 1
-        
+        encoding = encoding or self._default_encoding
+
         try:
-            if custom_encoder:
-                encoded = custom_encoder(data)
-            elif encoding_type == EncodingType.BASE64:
-                if isinstance(data, str):
-                    data = data.encode('utf-8')
-                encoded = base64.b64encode(data).decode('ascii')
-            elif encoding_type == EncodingType.URL:
-                encoded = urllib.parse.quote(str(data))
-            elif encoding_type == EncodingType.HEX:
-                if isinstance(data, str):
-                    data = data.encode('utf-8')
-                encoded = data.hex()
-            elif encoding_type == EncodingType.UTF8:
-                if isinstance(data, str):
-                    encoded = data.encode('utf-8').decode('utf-8')
-                else:
-                    encoded = data
-            elif encoding_type == EncodingType.JSON:
-                encoded = json.dumps(data)
+            if encoding == EncodingType.BASE64:
+                result = base64.b64encode(data.encode()).decode()
+            elif encoding == EncodingType.URL:
+                result = urllib.parse.quote(data)
+            elif encoding == EncodingType.HEX:
+                result = data.encode().hex()
+            elif encoding == EncodingType.UTF8:
+                result = data.encode("utf-8").decode("utf-8")
+            elif encoding == EncodingType.CUSTOM and custom_encoder:
+                result = custom_encoder(data)
             else:
-                encoded = str(data)
-            
-            self._stats["successful_encodes"] += 1
-            duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-            
-            return EncodingResult(
-                success=True,
-                original=data,
-                encoded=encoded,
-                encoding_type=encoding_type,
-                duration_ms=duration_ms
-            )
-        
+                result = data
+
+            self._stats["encode_count"] += 1
+            return result
+
         except Exception as e:
-            self._stats["failed_operations"] += 1
-            duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-            
-            return EncodingResult(
-                success=False,
-                original=data,
-                encoded=None,
-                encoding_type=encoding_type,
-                duration_ms=duration_ms,
-                error=str(e)
-            )
-    
+            self._stats["encode_errors"] += 1
+            logger.error(f"Encoding error: {e}")
+            raise
+
     def decode(
         self,
-        data: Any,
-        encoding_type: EncodingType = EncodingType.BASE64,
-        custom_decoder: Optional[Callable[[Any], Any]] = None
-    ) -> DecodingResult:
-        """
-        Decode data.
-        
+        data: str,
+        encoding: Optional[EncodingType] = None,
+        custom_decoder: Optional[Callable[[str], str]] = None,
+    ) -> str:
+        """Decode a string.
+
         Args:
-            data: Data to decode
-            encoding_type: Type of encoding
-            custom_decoder: Optional custom decoder function
-            
+            data: String to decode.
+            encoding: Encoding type.
+            custom_decoder: Custom decoder function.
+
         Returns:
-            DecodingResult with decoded data
+            Decoded string.
         """
-        start_time = datetime.now()
-        self._stats["total_decodes"] += 1
-        
+        encoding = encoding or self._default_encoding
+
         try:
-            if custom_decoder:
-                decoded = custom_decoder(data)
-            elif encoding_type == EncodingType.BASE64:
-                if isinstance(data, str):
-                    data = data.encode('ascii')
-                decoded = base64.b64decode(data)
-                if isinstance(decoded, bytes):
-                    decoded = decoded.decode('utf-8')
-            elif encoding_type == EncodingType.URL:
-                decoded = urllib.parse.unquote(str(data))
-            elif encoding_type == EncodingType.HEX:
-                decoded = bytes.fromhex(data)
-                if isinstance(decoded, bytes):
-                    decoded = decoded.decode('utf-8')
-            elif encoding_type == EncodingType.UTF8:
-                decoded = data.decode('utf-8') if isinstance(data, bytes) else data
-            elif encoding_type == EncodingType.JSON:
-                decoded = json.loads(data)
+            if encoding == EncodingType.BASE64:
+                result = base64.b64decode(data.encode()).decode()
+            elif encoding == EncodingType.URL:
+                result = urllib.parse.unquote(data)
+            elif encoding == EncodingType.HEX:
+                result = bytes.fromhex(data).decode()
+            elif encoding == EncodingType.UTF8:
+                result = data
+            elif encoding == EncodingType.CUSTOM and custom_decoder:
+                result = custom_decoder(data)
             else:
-                decoded = data
-            
-            self._stats["successful_decodes"] += 1
-            duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-            
-            return DecodingResult(
-                success=True,
-                encoded=data,
-                decoded=decoded,
-                encoding_type=encoding_type,
-                duration_ms=duration_ms
-            )
-        
+                result = data
+
+            self._stats["decode_count"] += 1
+            return result
+
         except Exception as e:
-            self._stats["failed_operations"] += 1
-            duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-            
-            return DecodingResult(
-                success=False,
-                encoded=data,
-                decoded=None,
-                encoding_type=encoding_type,
-                duration_ms=duration_ms,
-                error=str(e)
-            )
-    
+            self._stats["decode_errors"] += 1
+            logger.error(f"Decoding error: {e}")
+            raise
+
     def encode_dict(
         self,
-        data: dict,
-        keys: Optional[list[str]] = None,
-        encoding_type: EncodingType = EncodingType.BASE64
-    ) -> dict:
-        """
-        Encode specific keys in a dictionary.
-        
+        data: dict[str, Any],
+        encoding: Optional[EncodingType] = None,
+    ) -> str:
+        """Encode a dictionary as JSON then encode the string.
+
         Args:
-            data: Dictionary to encode
-            keys: Keys to encode (None = encode all string values)
-            encoding_type: Type of encoding
-            
+            data: Dictionary to encode.
+            encoding: Encoding type.
+
         Returns:
-            Dictionary with encoded values
+            Encoded string.
         """
-        result = data.copy()
-        
-        for key, value in result.items():
-            if keys is None or key in keys:
-                if isinstance(value, str):
-                    result[key] = self.encode(value, encoding_type).encoded
-            elif isinstance(value, dict):
-                result[key] = self.encode_dict(value, keys, encoding_type)
-        
-        return result
-    
+        json_str = json.dumps(data)
+        return self.encode(json_str, encoding)
+
     def decode_dict(
         self,
-        data: dict,
-        keys: Optional[list[str]] = None,
-        encoding_type: EncodingType = EncodingType.BASE64
-    ) -> dict:
-        """Decode specific keys in a dictionary."""
-        result = data.copy()
-        
-        for key, value in result.items():
-            if keys is None or key in keys:
-                if isinstance(value, str):
-                    result[key] = self.decode(value, encoding_type).decoded
-            elif isinstance(value, dict):
-                result[key] = self.decode_dict(value, keys, encoding_type)
-        
-        return result
-    
-    def encode_batch(
+        data: str,
+        encoding: Optional[EncodingType] = None,
+    ) -> dict[str, Any]:
+        """Decode a string and parse as JSON dictionary.
+
+        Args:
+            data: String to decode.
+            encoding: Encoding type.
+
+        Returns:
+            Decoded dictionary.
+        """
+        decoded = self.decode(data, encoding)
+        return json.loads(decoded)
+
+    def batch_encode(
         self,
-        data: list[Any],
-        encoding_type: EncodingType = EncodingType.BASE64
-    ) -> list[EncodingResult]:
-        """Encode a batch of data."""
-        return [self.encode(item, encoding_type) for item in data]
-    
-    def decode_batch(
+        data_list: list[str],
+        encoding: Optional[EncodingType] = None,
+    ) -> list[str]:
+        """Encode multiple strings.
+
+        Args:
+            data_list: List of strings to encode.
+            encoding: Encoding type.
+
+        Returns:
+            List of encoded strings.
+        """
+        return [self.encode(d, encoding) for d in data_list]
+
+    def batch_decode(
         self,
-        data: list[Any],
-        encoding_type: EncodingType = EncodingType.BASE64
-    ) -> list[DecodingResult]:
-        """Decode a batch of data."""
-        return [self.decode(item, encoding_type) for item in data]
-    
+        data_list: list[str],
+        encoding: Optional[EncodingType] = None,
+    ) -> list[str]:
+        """Decode multiple strings.
+
+        Args:
+            data_list: List of strings to decode.
+            encoding: Encoding type.
+
+        Returns:
+            List of decoded strings.
+        """
+        return [self.decode(d, encoding) for d in data_list]
+
+    def register_encoding(
+        self,
+        name: str,
+        encoder: Callable[[str], str],
+        decoder: Callable[[str], str],
+    ) -> bool:
+        """Register a custom encoding scheme.
+
+        Args:
+            name: Encoding name.
+            encoder: Encoder function.
+            decoder: Decoder function.
+
+        Returns:
+            True if registered.
+        """
+        self._encoding_configs[name] = EncodingConfig(
+            encoding=EncodingType.CUSTOM,
+            custom_encoder=encoder,
+            custom_decoder=decoder,
+        )
+        return True
+
     def get_stats(self) -> dict[str, Any]:
-        """Get encoding statistics."""
+        """Get encoding statistics.
+
+        Returns:
+            Dictionary with stats.
+        """
         return {
             **self._stats,
-            "success_rate": (
-                (self._stats["successful_encodes"] + self._stats["successful_decodes"]) /
-                max(1, self._stats["total_encodes"] + self._stats["total_decodes"])
-            )
+            "default_encoding": self._default_encoding.value,
+            "registered_encodings": len(self._encoding_configs),
+        }
+
+    def reset_stats(self) -> None:
+        """Reset statistics counters."""
+        self._stats = {
+            "encode_count": 0,
+            "decode_count": 0,
+            "encode_errors": 0,
+            "decode_errors": 0,
         }
