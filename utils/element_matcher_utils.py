@@ -1,204 +1,381 @@
 """
-Element matcher utilities for matching elements with multiple criteria.
+Element matching and similarity utilities for UI automation.
 
-Provides flexible element matching based on properties like
-role, label, position, size, and custom predicates.
+Provides element matching based on various attributes,
+similarity scoring, and element deduplication.
+
+Author: Auto-generated
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Callable, Optional
+import hashlib
+from dataclasses import dataclass
+from typing import Any, Sequence
 
 
 @dataclass
-class ElementMatchCriteria:
-    """Criteria for matching elements."""
-    role: Optional[str] = None
-    label: Optional[str] = None
-    title: Optional[str] = None
-    value: Optional[str] = None
-    min_width: Optional[float] = None
-    max_width: Optional[float] = None
-    min_height: Optional[float] = None
-    max_height: Optional[float] = None
-    is_enabled: Optional[bool] = None
-    is_visible: Optional[bool] = None
-    predicate: Optional[Callable[[dict], bool]] = None
-    index: Optional[int] = None  # Match by index in list
+class ElementSignature:
+    """
+    A unique signature for an UI element.
+    
+    Used for element deduplication and matching.
+    """
+    tag: str
+    text: str
+    attrs: tuple[tuple[str, str], ...]
+    position_hash: str
+    
+    @classmethod
+    def from_element(
+        cls,
+        tag: str,
+        text: str,
+        attributes: dict[str, Any],
+        x: float = 0,
+        y: float = 0,
+    ) -> ElementSignature:
+        """Create signature from element properties."""
+        attr_items = tuple(
+            (k, str(v)) for k, v in sorted(attributes.items())
+            if v is not None
+        )
+        
+        pos_hash = hashlib.md5(f"{x},{y}".encode()).hexdigest()[:8]
+        
+        return cls(
+            tag=tag.lower(),
+            text=text or "",
+            attrs=attr_items,
+            position_hash=pos_hash,
+        )
+    
+    def matches(self, other: ElementSignature) -> bool:
+        """Check if this signature matches another."""
+        return (
+            self.tag == other.tag
+            and self.text == other.text
+            and self.attrs == other.attrs
+        )
+    
+    def similarity(self, other: ElementSignature) -> float:
+        """Calculate similarity score [0.0, 1.0]."""
+        score = 0.0
+        total = 4.0
+        
+        if self.tag == other.tag:
+            score += 1.0
+        if self.text == other.text:
+            score += 1.0
+        
+        # Attribute similarity
+        common_attrs = set(self.attrs) & set(other.attrs)
+        total_attrs = set(self.attrs) | set(other.attrs)
+        if total_attrs:
+            score += len(common_attrs) / len(total_attrs)
+        
+        # Position hash match
+        if self.position_hash == other.position_hash:
+            score += 1.0
+        
+        return score / total
 
 
 @dataclass
-class MatchResult:
-    """Result of an element match operation."""
-    element_id: Optional[str]
-    matched_criteria: list[str]
-    score: float
-    is_match: bool
-
+class MatchCriteria:
+    """Criteria for element matching."""
+    tag: str | None = None
+    text: str | None = None
+    text_contains: str | None = None
+    text_starts_with: str | None = None
+    attributes: dict[str, Any] | None = None
+    attribute_contains: dict[str, str] | None = None
+    visible: bool | None = None
+    enabled: bool | None = None
+    min_width: float | None = None
+    min_height: float | None = None
+    max_width: float | None = None
+    max_height: float | None = None
+    position_x: float | None = None
+    position_y: float | None = None
+    index: int | None = None
+    
 
 class ElementMatcher:
-    """Matches elements against criteria."""
-
-    def __init__(self):
-        self._last_match_result: Optional[MatchResult] = None
-
-    def match(
+    """
+    Matches elements against criteria.
+    
+    Example:
+        matcher = ElementMatcher()
+        if matcher.matches(element, MatchCriteria(tag="button", text="Submit")):
+            print("Found submit button")
+    """
+    
+    def __init__(self, strict: bool = False):
+        self._strict = strict
+    
+    def matches(
         self,
-        criteria: ElementMatchCriteria,
-        elements: list[dict],
-    ) -> list[tuple[str, float]]:
-        """Match elements against criteria and return scored results.
-
+        element: dict[str, Any],
+        criteria: MatchCriteria,
+    ) -> bool:
+        """
+        Check if element matches criteria.
+        
         Args:
-            criteria: Match criteria to apply
-            elements: List of element dictionaries
-
+            element: Element dictionary with keys like 'tag', 'text', 'attributes', etc.
+            criteria: Match criteria
+            
         Returns:
-            List of (element_id, score) tuples, sorted by score descending
+            True if all criteria match
+        """
+        # Tag match
+        if criteria.tag is not None:
+            if element.get("tag", "").lower() != criteria.tag.lower():
+                return False
+        
+        # Text exact match
+        if criteria.text is not None:
+            if element.get("text", "") != criteria.text:
+                return False
+        
+        # Text contains
+        if criteria.text_contains is not None:
+            text = element.get("text", "")
+            if criteria.text_contains not in text:
+                return False
+        
+        # Text starts with
+        if criteria.text_starts_with is not None:
+            text = element.get("text", "")
+            if not text.startswith(criteria.text_starts_with):
+                return False
+        
+        # Attribute exact match
+        if criteria.attributes:
+            elem_attrs = element.get("attributes", {})
+            for key, value in criteria.attributes.items():
+                if elem_attrs.get(key) != value:
+                    return False
+        
+        # Attribute contains
+        if criteria.attribute_contains:
+            elem_attrs = element.get("attributes", {})
+            for key, substr in criteria.attribute_contains.items():
+                value = str(elem_attrs.get(key, ""))
+                if substr not in value:
+                    return False
+        
+        # Visible check
+        if criteria.visible is not None:
+            if element.get("visible", True) != criteria.visible:
+                return False
+        
+        # Enabled check
+        if criteria.enabled is not None:
+            if element.get("enabled", True) != criteria.enabled:
+                return False
+        
+        # Size checks
+        bounds = element.get("bounds", {})
+        width = bounds.get("width", 0)
+        height = bounds.get("height", 0)
+        
+        if criteria.min_width is not None and width < criteria.min_width:
+            return False
+        if criteria.min_height is not None and height < criteria.min_height:
+            return False
+        if criteria.max_width is not None and width > criteria.max_width:
+            return False
+        if criteria.max_height is not None and height > criteria.max_height:
+            return False
+        
+        # Position checks
+        if criteria.position_x is not None:
+            if abs(bounds.get("x", 0) - criteria.position_x) > 1:
+                return False
+        if criteria.position_y is not None:
+            if abs(bounds.get("y", 0) - criteria.position_y) > 1:
+                return False
+        
+        return True
+    
+    def find_matches(
+        self,
+        elements: Sequence[dict[str, Any]],
+        criteria: MatchCriteria,
+    ) -> list[dict[str, Any]]:
+        """
+        Find all elements matching criteria.
+        
+        Args:
+            elements: List of element dictionaries
+            criteria: Match criteria
+            
+        Returns:
+            List of matching elements
         """
         results = []
-
-        for i, elem in enumerate(elements):
-            element_id = elem.get("id", elem.get("element_id", str(i)))
-            matched, score, details = self._score_element(criteria, elem, i)
-
-            if matched:
-                results.append((element_id, score))
-
-        # Sort by score descending
-        results.sort(key=lambda x: x[1], reverse=True)
+        for elem in elements:
+            if self.matches(elem, criteria):
+                results.append(elem)
         return results
-
-    def find_best_match(
+    
+    def find_first(
         self,
-        criteria: ElementMatchCriteria,
-        elements: list[dict],
-    ) -> Optional[str]:
-        """Find the best matching element."""
-        results = self.match(criteria, elements)
-        if results:
-            best_id, best_score = results[0]
-            if best_score >= 0.5:
-                return best_id
+        elements: Sequence[dict[str, Any]],
+        criteria: MatchCriteria,
+    ) -> dict[str, Any] | None:
+        """Find first element matching criteria."""
+        for elem in elements:
+            if self.matches(elem, criteria):
+                return elem
         return None
-
-    def find_all_matches(
+    
+    def index_of(
         self,
-        criteria: ElementMatchCriteria,
-        elements: list[dict],
-        min_score: float = 0.5,
-    ) -> list[str]:
-        """Find all elements matching the criteria."""
-        results = self.match(criteria, elements)
-        return [eid for eid, score in results if score >= min_score]
+        elements: Sequence[dict[str, Any]],
+        criteria: MatchCriteria,
+    ) -> int:
+        """Find index of first element matching criteria, or -1."""
+        for i, elem in enumerate(elements):
+            if self.matches(elem, criteria):
+                return i
+        return -1
 
-    def _score_element(
+
+class ElementDeduplicator:
+    """
+    Deduplicates elements based on their signatures.
+    
+    Example:
+        dedup = ElementDeduplicator()
+        unique_elements = dedup.deduplicate(elements)
+    """
+    
+    def __init__(self, similarity_threshold: float = 0.9):
+        self._threshold = similarity_threshold
+    
+    def deduplicate(
         self,
-        criteria: ElementMatchCriteria,
-        elem: dict,
-        index: int,
-    ) -> tuple[bool, float, list[str]]:
-        """Score a single element against criteria.
-
-        Returns:
-            (is_match, score, list of matched criteria names)
+        elements: Sequence[dict[str, Any]],
+        key_func: str = "auto",
+    ) -> list[dict[str, Any]]:
         """
-        score = 0.0
-        matched_criteria = []
-        total_weight = 0.0
-
-        # Role
-        if criteria.role is not None:
-            total_weight += 0.2
-            if elem.get("role", "").lower() == criteria.role.lower():
-                score += 0.2
-                matched_criteria.append("role")
-
-        # Label
-        if criteria.label is not None:
-            total_weight += 0.15
-            elem_label = elem.get("label", elem.get("name", "")).lower()
-            if criteria.label.lower() in elem_label or elem_label in criteria.label.lower():
-                score += 0.15
-                matched_criteria.append("label")
-
-        # Title
-        if criteria.title is not None:
-            total_weight += 0.15
-            elem_title = elem.get("title", "").lower()
-            if criteria.title.lower() in elem_title:
-                score += 0.15
-                matched_criteria.append("title")
-
-        # Width constraints
-        width = elem.get("width", elem.get("bounds", (0, 0, 0, 0))[2] if isinstance(elem.get("bounds"), tuple) else 0)
-        if criteria.min_width is not None:
-            total_weight += 0.05
-            if width >= criteria.min_width:
-                score += 0.05
-                matched_criteria.append("min_width")
-
-        if criteria.max_width is not None:
-            total_weight += 0.05
-            if width <= criteria.max_width:
-                score += 0.05
-                matched_criteria.append("max_width")
-
-        # Height constraints
-        height = elem.get("height", elem.get("bounds", (0, 0, 0, 0))[3] if isinstance(elem.get("bounds"), tuple) else 0)
-        if criteria.min_height is not None:
-            total_weight += 0.05
-            if height >= criteria.min_height:
-                score += 0.05
-                matched_criteria.append("min_height")
-
-        if criteria.max_height is not None:
-            total_weight += 0.05
-            if height <= criteria.max_height:
-                score += 0.05
-                matched_criteria.append("max_height")
-
-        # Enabled state
-        if criteria.is_enabled is not None:
-            total_weight += 0.1
-            if elem.get("is_enabled", True) == criteria.is_enabled:
-                score += 0.1
-                matched_criteria.append("is_enabled")
-
-        # Visible state
-        if criteria.is_visible is not None:
-            total_weight += 0.1
-            if elem.get("is_visible", True) == criteria.is_visible:
-                score += 0.1
-                matched_criteria.append("is_visible")
-
-        # Index
-        if criteria.index is not None:
-            total_weight += 0.05
-            if index == criteria.index:
-                score += 0.05
-                matched_criteria.append("index")
-
-        # Custom predicate
-        if criteria.predicate is not None:
-            total_weight += 0.1
-            try:
-                if criteria.predicate(elem):
-                    score += 0.1
-                    matched_criteria.append("predicate")
-            except Exception:
-                pass
-
-        # Normalize score
-        if total_weight > 0:
-            normalized_score = score / total_weight
+        Remove duplicate elements.
+        
+        Args:
+            elements: List of element dictionaries
+            key_func: Key function type ('auto', 'signature', 'position')
+            
+        Returns:
+            List of unique elements
+        """
+        if key_func == "signature":
+            return self._dedupe_by_signature(elements)
+        elif key_func == "position":
+            return self._dedupe_by_position(elements)
         else:
-            normalized_score = 0.0
+            return self._dedupe_auto(elements)
+    
+    def _dedupe_by_signature(
+        self, elements: Sequence[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        seen_signatures: set[str] = set()
+        unique = []
+        
+        for elem in elements:
+            sig = self._create_signature(elem)
+            if sig not in seen_signatures:
+                seen_signatures.add(sig)
+                unique.append(elem)
+        
+        return unique
+    
+    def _dedupe_by_position(
+        self, elements: Sequence[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        seen_positions: set[tuple[float, float]] = set()
+        unique = []
+        
+        for elem in elements:
+            bounds = elem.get("bounds", {})
+            pos = (bounds.get("x", 0), bounds.get("y", 0))
+            
+            if pos not in seen_positions:
+                seen_positions.add(pos)
+                unique.append(elem)
+        
+        return unique
+    
+    def _dedupe_auto(
+        self, elements: Sequence[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        unique = []
+        
+        for elem in elements:
+            is_duplicate = False
+            
+            for existing in unique:
+                sig1 = self._create_signature(elem)
+                sig2 = self._create_signature(existing)
+                
+                if sig1 == sig2:
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate:
+                unique.append(elem)
+        
+        return unique
+    
+    def _create_signature(self, elem: dict[str, Any]) -> str:
+        tag = elem.get("tag", "").lower()
+        text = elem.get("text", "") or ""
+        attrs = elem.get("attributes", {})
+        
+        sig_str = f"{tag}|{text}|{sorted(attrs.items())}"
+        return hashlib.md5(sig_str.encode()).hexdigest()
 
-        is_match = len(matched_criteria) > 0 and normalized_score >= 0.5
 
-        return (is_match, normalized_score, matched_criteria)
+def find_elements_by_role(
+    elements: Sequence[dict[str, Any]],
+    role: str,
+) -> list[dict[str, Any]]:
+    """Find elements by accessibility role."""
+    return [
+        e for e in elements
+        if e.get("role", "").lower() == role.lower()
+    ]
 
 
-__all__ = ["ElementMatcher", "ElementMatchCriteria", "MatchResult"]
+def find_elements_by_label(
+    elements: Sequence[dict[str, Any]],
+    label: str,
+    contains: bool = True,
+) -> list[dict[str, Any]]:
+    """Find elements by label text."""
+    results = []
+    for e in elements:
+        elem_label = e.get("label", "") or e.get("text", "")
+        if contains:
+            if label in elem_label:
+                results.append(e)
+        else:
+            if label == elem_label:
+                results.append(e)
+    return results
+
+
+def find_clickable_elements(
+    elements: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Find all clickable elements."""
+    clickable_roles = {"button", "link", "menuitem", "checkbox", "radio"}
+    
+    return [
+        e for e in elements
+        if e.get("clickable", False)
+        or e.get("role", "").lower() in clickable_roles
+        or "button" in e.get("tag", "").lower()
+    ]
