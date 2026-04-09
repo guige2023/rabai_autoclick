@@ -1,265 +1,186 @@
 """API Rate Limiter Action Module.
 
-Provides rate limiting with token bucket, sliding window,
-leaky bucket algorithms for API clients.
+Provides token bucket and sliding window rate limiting for API calls.
 """
+
 from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Set
-import logging
+from typing import Callable, Generic, TypeVar
 
-logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 
-class RateLimitAlgorithm(Enum):
-    """Rate limiting algorithm."""
+class RateLimitStrategy(Enum):
+    """Rate limiting strategies."""
     TOKEN_BUCKET = "token_bucket"
     SLIDING_WINDOW = "sliding_window"
-    LEAKY_BUCKET = "leaky_bucket"
     FIXED_WINDOW = "fixed_window"
 
 
 @dataclass
-class RateLimitConfig:
-    """Rate limit configuration."""
-    requests_per_second: float = 10.0
-    burst_size: int = 20
-    algorithm: RateLimitAlgorithm = RateLimitAlgorithm.TOKEN_BUCKET
+class TokenBucketConfig:
+    """Configuration for token bucket algorithm."""
+    capacity: int = 100
+    refill_rate: float = 10.0
+    initial_tokens: float | None = None
 
 
 @dataclass
-class RateLimitResult:
-    """Result of rate limit check."""
-    allowed: bool
-    remaining: int
-    retry_after: Optional[float] = None
-    reset_at: Optional[float] = None
+class SlidingWindowConfig:
+    """Configuration for sliding window algorithm."""
+    window_size_seconds: float = 60.0
+    max_requests: int = 100
 
 
-class APIRateLimiterAction:
-    """Rate limiter for API requests.
+class TokenBucket:
+    """Token bucket rate limiter implementation."""
 
-    Example:
-        limiter = APIRateLimiterAction(
-            RateLimitConfig(requests_per_second=10, burst_size=20)
-        )
+    def __init__(self, config: TokenBucketConfig) -> None:
+        self.capacity = config.capacity
+        self.refill_rate = config.refill_rate
+        self.tokens = config.initial_tokens if config.initial_tokens is not None else config.capacity
+        self.last_refill = time.monotonic()
+        self._lock = asyncio.Lock()
 
-        result = await limiter.acquire("user_123")
-        if result.allowed:
-            await api_call()
+    async def acquire(self, tokens: int = 1) -> bool:
+        """Acquire tokens from the bucket."""
+        async with self._lock:
+            self._refill()
+            if self.tokens >= tokens:
+                self.tokens -= tokens
+                return True
+            return False
+
+    async def wait_for_tokens(self, tokens: int = 1, timeout: float | None = None) -> bool:
+        """Wait until tokens are available."""
+        start = time.monotonic()
+        while True:
+            if await self.acquire(tokens):
+                return True
+            if timeout and (time.monotonic() - start) >= timeout:
+                return False
+            await asyncio.sleep(0.05)
+
+    def _refill(self) -> None:
+        """Refill tokens based on elapsed time."""
+        now = time.monotonic()
+        elapsed = now - self.last_refill
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
+        self.last_refill = now
+
+
+class SlidingWindowRateLimiter:
+    """Sliding window rate limiter implementation."""
+
+    def __init__(self, config: SlidingWindowConfig) -> None:
+        self.window_size = config.window_size_seconds
+        self.max_requests = config.max_requests
+        self.requests: deque[float] = deque()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> bool:
+        """Check if request is allowed under the limit."""
+        async with self._lock:
+            now = time.monotonic()
+            cutoff = now - self.window_size
+            while self.requests and self.requests[0] < cutoff:
+                self.requests.popleft()
+            if len(self.requests) < self.max_requests:
+                self.requests.append(now)
+                return True
+            return False
+
+    async def wait_for_slot(self, timeout: float | None = None) -> bool:
+        """Wait until a request slot becomes available."""
+        start = time.monotonic()
+        while True:
+            if await self.acquire():
+                return True
+            if timeout and (time.monotonic() - start) >= timeout:
+                return False
+            await asyncio.sleep(0.05)
+
+    def get_current_count(self) -> int:
+        """Get current request count in window."""
+        now = time.monotonic()
+        cutoff = now - self.window_size
+        while self.requests and self.requests[0] < cutoff:
+            self.requests.popleft()
+        return len(self.requests)
+
+
+@dataclass
+class RateLimiterStats:
+    """Statistics for rate limiter."""
+    total_requests: int = 0
+    allowed_requests: int = 0
+    rejected_requests: int = 0
+    total_wait_time: float = 0.0
+
+
+class APICallThrottle(Generic[T]):
+    """Throttled API call wrapper with rate limiting."""
+
+    def __init__(
+        self,
+        func: Callable[..., T],
+        strategy: RateLimitStrategy = RateLimitStrategy.TOKEN_BUCKET,
+        token_config: TokenBucketConfig | None = None,
+        sliding_config: SlidingWindowConfig | None = None,
+    ) -> None:
+        self.func = func
+        self.strategy = strategy
+        self.stats = RateLimiterStats()
+        if strategy == RateLimitStrategy.TOKEN_BUCKET:
+            config = token_config or TokenBucketConfig()
+            self._limiter: TokenBucket | SlidingWindowRateLimiter = TokenBucket(config)
         else:
-            await asyncio.sleep(result.retry_after)
-    """
+            config = sliding_config or SlidingWindowConfig()
+            self._limiter = SlidingWindowRateLimiter(config)
 
-    def __init__(self, config: Optional[RateLimitConfig] = None) -> None:
-        self.config = config or RateLimitConfig()
-        self._buckets: Dict[str, Dict] = {}
-        self._window_counts: Dict[str, List[float]] = {}
-        self._locks: Dict[str, asyncio.Lock] = {}
-        self._global_lock = asyncio.Lock()
+    async def call_async(self, *args, timeout: float | None = None, **kwargs) -> T | None:
+        """Make a throttled async API call."""
+        self.stats.total_requests += 1
+        wait_start = time.monotonic()
+        if isinstance(self._limiter, TokenBucket):
+            acquired = await self._limiter.wait_for_tokens(timeout=timeout)
+        else:
+            acquired = await self._limiter.wait_for_slot(timeout=timeout)
+        self.stats.total_wait_time += time.monotonic() - wait_start
+        if not acquired:
+            self.stats.rejected_requests += 1
+            return None
+        self.stats.allowed_requests += 1
+        return await self.func(*args, **kwargs)
 
-    async def acquire(
-        self,
-        key: str,
-        cost: int = 1,
-    ) -> RateLimitResult:
-        """Acquire rate limit token.
+    def call_sync(self, *args, **kwargs) -> T | None:
+        """Make a throttled sync API call (blocking)."""
+        self.stats.total_requests += 1
+        if isinstance(self._limiter, TokenBucket):
+            self._limiter._lock.lock()
+            self._limiter._refill()
+            while self._limiter.tokens < 1:
+                self._limiter._lock.unlock()
+                time.sleep(0.05)
+                self._limiter._lock.lock()
+                self._limiter._refill()
+            self._limiter.tokens -= 1
+            self._limiter._lock.unlock()
+        else:
+            raise NotImplementedError("Sync calls not supported for sliding window")
+        self.stats.allowed_requests += 1
+        return self.func(*args, **kwargs)
 
-        Args:
-            key: Identifier (user, API key, IP, etc.)
-            cost: Number of tokens to acquire
+    def get_stats(self) -> RateLimiterStats:
+        """Get rate limiter statistics."""
+        return self.stats
 
-        Returns:
-            RateLimitResult with acquisition status
-        """
-        async with self._global_lock:
-            if key not in self._locks:
-                self._locks[key] = asyncio.Lock()
-                self._init_bucket(key)
 
-        async with self._locks[key]:
-            if self.config.algorithm == RateLimitAlgorithm.TOKEN_BUCKET:
-                return await self._acquire_token_bucket(key, cost)
-            elif self.config.algorithm == RateLimitAlgorithm.SLIDING_WINDOW:
-                return await self._acquire_sliding_window(key, cost)
-            elif self.config.algorithm == RateLimitAlgorithm.LEAKY_BUCKET:
-                return await self._acquire_leaky_bucket(key, cost)
-            else:
-                return await self._acquire_fixed_window(key, cost)
-
-    def _init_bucket(self, key: str) -> None:
-        """Initialize rate limit bucket for key."""
-        self._buckets[key] = {
-            "tokens": float(self.config.burst_size),
-            "last_update": time.time(),
-        }
-        self._window_counts[key] = []
-
-    async def _acquire_token_bucket(
-        self,
-        key: str,
-        cost: int,
-    ) -> RateLimitResult:
-        """Token bucket rate limiting."""
-        bucket = self._buckets[key]
-        now = time.time()
-        elapsed = now - bucket["last_update"]
-
-        tokens_to_add = elapsed * self.config.requests_per_second
-        bucket["tokens"] = min(
-            self.config.burst_size,
-            bucket["tokens"] + tokens_to_add
-        )
-        bucket["last_update"] = now
-
-        if bucket["tokens"] >= cost:
-            bucket["tokens"] -= cost
-            return RateLimitResult(
-                allowed=True,
-                remaining=int(bucket["tokens"]),
-                reset_at=now + (cost / self.config.requests_per_second),
-            )
-
-        retry_after = (cost - bucket["tokens"]) / self.config.requests_per_second
-        return RateLimitResult(
-            allowed=False,
-            remaining=0,
-            retry_after=retry_after,
-            reset_at=now + retry_after,
-        )
-
-    async def _acquire_sliding_window(
-        self,
-        key: str,
-        cost: int,
-    ) -> RateLimitResult:
-        """Sliding window rate limiting."""
-        now = time.time()
-        window = 1.0 / self.config.requests_per_second
-
-        if key not in self._window_counts:
-            self._window_counts[key] = []
-
-        self._window_counts[key] = [
-            t for t in self._window_counts[key]
-            if now - t < window
-        ]
-
-        if len(self._window_counts[key]) + cost <= self.config.burst_size:
-            for _ in range(cost):
-                self._window_counts[key].append(now)
-
-            return RateLimitResult(
-                allowed=True,
-                remaining=self.config.burst_size - len(self._window_counts[key]),
-                reset_at=now + window,
-            )
-
-        oldest = self._window_counts[key][0] if self._window_counts[key] else now
-        retry_after = (oldest + window) - now
-
-        return RateLimitResult(
-            allowed=False,
-            remaining=0,
-            retry_after=max(0, retry_after),
-            reset_at=now + retry_after if retry_after > 0 else now + window,
-        )
-
-    async def _acquire_leaky_bucket(
-        self,
-        key: str,
-        cost: int,
-    ) -> RateLimitResult:
-        """Leaky bucket rate limiting."""
-        bucket = self._buckets[key]
-        now = time.time()
-        elapsed = now - bucket["last_update"]
-
-        leak_rate = self.config.requests_per_second
-        leaked = elapsed * leak_rate
-        bucket["tokens"] = max(0, bucket["tokens"] - leaked)
-        bucket["last_update"] = now
-
-        if bucket["tokens"] + cost <= self.config.burst_size:
-            bucket["tokens"] += cost
-            return RateLimitResult(
-                allowed=True,
-                remaining=self.config.burst_size - int(bucket["tokens"]),
-            )
-
-        retry_after = cost / leak_rate
-        return RateLimitResult(
-            allowed=False,
-            remaining=0,
-            retry_after=retry_after,
-            reset_at=now + retry_after,
-        )
-
-    async def _acquire_fixed_window(
-        self,
-        key: str,
-        cost: int,
-    ) -> RateLimitResult:
-        """Fixed window rate limiting."""
-        now = time.time()
-        window_size = 1.0 / self.config.requests_per_second
-        window_start = int(now / window_size) * window_size
-
-        if key not in self._window_counts:
-            self._window_counts[key] = {}
-
-        self._window_counts[key] = {
-            k: v for k, v in self._window_counts[key].items()
-            if float(k) >= window_start
-        }
-
-        current_count = sum(self._window_counts[key].values())
-
-        if current_count + cost <= self.config.burst_size:
-            self._window_counts[key][str(now)] = cost
-
-            return RateLimitResult(
-                allowed=True,
-                remaining=self.config.burst_size - (current_count + cost),
-                reset_at=window_start + window_size,
-            )
-
-        retry_after = (window_start + window_size) - now
-        return RateLimitResult(
-            allowed=False,
-            remaining=0,
-            retry_after=max(0, retry_after),
-            reset_at=window_start + window_size,
-        )
-
-    async def reset(self, key: str) -> None:
-        """Reset rate limit for key."""
-        async with self._global_lock:
-            if key in self._buckets:
-                self._init_bucket(key)
-            if key in self._window_counts:
-                self._window_counts[key] = []
-
-    async def reset_all(self) -> None:
-        """Reset all rate limits."""
-        async with self._global_lock:
-            keys = list(self._buckets.keys())
-            for key in keys:
-                self._init_bucket(key)
-            self._window_counts.clear()
-
-    def get_remaining(self, key: str) -> int:
-        """Get remaining requests for key."""
-        if key not in self._buckets:
-            return self.config.burst_size
-
-        if self.config.algorithm == RateLimitAlgorithm.TOKEN_BUCKET:
-            return int(self._buckets[key]["tokens"])
-        elif key in self._window_counts:
-            return max(0, self.config.burst_size - len(self._window_counts[key]))
-
-        return self.config.burst_size
+class RateLimitExceededError(Exception):
+    """Raised when rate limit is exceeded and timeout expires."""
+    pass
