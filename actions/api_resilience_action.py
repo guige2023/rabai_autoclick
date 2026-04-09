@@ -1,204 +1,231 @@
-"""
-API Resilience Action Module.
+"""API Resilience Action module.
 
-Provides bulkhead isolation, timeouts, and
-resilience patterns for API calls.
+Provides comprehensive resilience patterns for API calls including
+retry with backoff, timeout handling, bulkhead isolation, and
+fallback responses.
 """
 
 import asyncio
+import random
 import time
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, Callable, Optional, TypeVar
 
 T = TypeVar("T")
 
 
-class ResiliencePattern(Enum):
-    """Resilience patterns."""
-    BULKHEAD = "bulkhead"
-    TIMEOUT = "timeout"
-    RATE_LIMIT = "rate_limit"
-    CIRCUIT_BREAKER = "circuit_breaker"
-    BULKHEAD_TIMEOUT = "bulkhead_timeout"
-
-
-@dataclass
-class BulkheadConfig:
-    """Bulkhead isolation configuration."""
-    max_concurrent: int = 10
-    max_queued: int = 100
-    timeout: float = 30.0
-
-
 @dataclass
 class ResilienceConfig:
-    """Resilience configuration."""
-    pattern: ResiliencePattern = ResiliencePattern.TIMEOUT
-    timeout: float = 10.0
+    """Configuration for resilience patterns."""
+
     max_retries: int = 3
-    retry_delay: float = 1.0
+    base_delay: float = 1.0
+    max_delay: float = 30.0
+    exponential_base: float = 2.0
+    jitter: bool = True
+    timeout: float = 30.0
+    retry_on: tuple = (Exception,)
+    fallback_value: Optional[Any] = None
 
 
-class SemaphoreBulkhead:
-    """Semaphore-based bulkhead."""
+@dataclass
+class ResilienceMetrics:
+    """Metrics for resilience operations."""
 
-    def __init__(self, max_concurrent: int, max_queued: int):
-        self._semaphore = asyncio.Semaphore(max_concurrent)
-        self._queue: asyncio.Queue = asyncio.Queue(maxsize=max_queued)
-        self._max_concurrent = max_concurrent
-        self._max_queued = max_queued
-        self._active = 0
-        self._rejected = 0
+    total_calls: int = 0
+    successful_calls: int = 0
+    failed_calls: int = 0
+    retried_calls: int = 0
+    timed_out_calls: int = 0
+    fallback_calls: int = 0
+    total_retry_delay: float = 0.0
+    _last_call_times: list = field(default_factory=list)
 
-    async def acquire(self) -> bool:
-        """Acquire bulkhead slot."""
-        if self._queue.full():
-            self._rejected += 1
-            return False
+    def record_success(self, retry_delay: float = 0.0) -> None:
+        """Record successful call."""
+        self.total_calls += 1
+        self.successful_calls += 1
+        self.total_retry_delay += retry_delay
 
-        await self._queue.put(True)
-        try:
-            await self._semaphore.acquire()
-            self._active += 1
-            return True
-        except:
-            self._queue.get_nowait()
-            return False
+    def record_failure(self) -> None:
+        """Record failed call."""
+        self.total_calls += 1
+        self.failed_calls += 1
 
-    def release(self) -> None:
-        """Release bulkhead slot."""
-        self._semaphore.release()
-        self._active -= 1
-        try:
-            self._queue.get_nowait()
-        except asyncio.QueueEmpty:
-            pass
+    def record_timeout(self) -> None:
+        """Record timeout."""
+        self.total_calls += 1
+        self.timed_out_calls += 1
+
+    def record_fallback(self) -> None:
+        """Record fallback used."""
+        self.total_calls += 1
+        self.fallback_calls += 1
+
+    def record_retry(self) -> None:
+        """Record retry."""
+        self.retried_calls += 1
 
     @property
-    def stats(self) -> dict:
+    def success_rate(self) -> float:
+        """Calculate success rate."""
+        if self.total_calls == 0:
+            return 0.0
+        return self.successful_calls / self.total_calls
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
         return {
-            "active": self._active,
-            "queued": self._queue.qsize(),
-            "rejected": self._rejected
+            "total_calls": self.total_calls,
+            "successful_calls": self.successful_calls,
+            "failed_calls": self.failed_calls,
+            "retried_calls": self.retried_calls,
+            "timed_out_calls": self.timed_out_calls,
+            "fallback_calls": self.fallback_calls,
+            "total_retry_delay": self.total_retry_delay,
+            "success_rate": self.success_rate,
         }
 
 
-class APIResilienceAction:
+def calculate_backoff(
+    attempt: int,
+    base_delay: float,
+    max_delay: float,
+    exponential_base: float,
+    jitter: bool,
+) -> float:
+    """Calculate delay for given retry attempt.
+
+    Args:
+        attempt: Retry attempt number (0-indexed)
+        base_delay: Base delay in seconds
+        max_delay: Maximum delay cap
+        exponential_base: Exponential multiplier
+        jitter: Whether to add randomness
+
+    Returns:
+        Calculated delay in seconds
     """
-    API resilience patterns.
+    delay = base_delay * (exponential_base**attempt)
+    delay = min(delay, max_delay)
 
-    Example:
-        resilience = APIResilienceAction(
-            pattern=ResiliencePattern.BULKHEAD_TIMEOUT,
-            timeout=5.0
-        )
+    if jitter:
+        delay = delay * (0.5 + random.random() * 0.5)
 
-        result = await resilience.execute(
-            lambda: api.call(),
-            bulkhead_config=BulkheadConfig(max_concurrent=5)
-        )
+    return delay
+
+
+async def call_with_resilience(
+    func: Callable[..., Any],
+    config: ResilienceConfig,
+    metrics: Optional[ResilienceMetrics] = None,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Execute API call with resilience patterns.
+
+    Args:
+        func: Async function to call
+        config: Resilience configuration
+        metrics: Optional metrics tracker
+        *args: Positional arguments
+        **kwargs: Keyword arguments
+
+    Returns:
+        Function result or fallback value
     """
+    total_retry_delay = 0.0
+    last_exception: Optional[Exception] = None
 
-    def __init__(
-        self,
-        pattern: ResiliencePattern = ResiliencePattern.TIMEOUT,
-        timeout: float = 10.0,
-        max_retries: int = 3
-    ):
-        self.pattern = pattern
-        self.config = ResilienceConfig(
-            pattern=pattern,
-            timeout=timeout,
-            max_retries=max_retries
-        )
-        self._bulkhead: Optional[SemaphoreBulkhead] = None
-
-    def set_bulkhead(self, max_concurrent: int = 10, max_queued: int = 100) -> None:
-        """Set bulkhead configuration."""
-        self._bulkhead = SemaphoreBulkhead(max_concurrent, max_queued)
-
-    async def execute(
-        self,
-        func: Callable[[], T],
-        *args: Any,
-        **kwargs: Any
-    ) -> T:
-        """Execute with resilience pattern."""
-        if self.pattern in (ResiliencePattern.BULKHEAD, ResiliencePattern.BULKHEAD_TIMEOUT):
-            return await self._execute_bulkhead(func, *args, **kwargs)
-        elif self.pattern == ResiliencePattern.TIMEOUT:
-            return await self._execute_timeout(func, *args, **kwargs)
-        elif self.pattern == ResiliencePattern.CIRCUIT_BREAKER:
-            return await self._execute_circuit_breaker(func, *args, **kwargs)
-        else:
-            return await self._execute_timeout(func, *args, **kwargs)
-
-    async def _execute_bulkhead(
-        self,
-        func: Callable[[], T],
-        *args: Any,
-        **kwargs: Any
-    ) -> T:
-        """Execute with bulkhead isolation."""
-        if not self._bulkhead:
-            self._bulkhead = SemaphoreBulkhead(10, 100)
-
-        acquired = await self._bulkhead.acquire()
-        if not acquired:
-            raise Exception("Bulkhead rejected: too many concurrent requests")
-
+    for attempt in range(config.max_retries + 1):
         try:
-            if self.pattern == ResiliencePattern.BULKHEAD_TIMEOUT:
-                return await asyncio.wait_for(
-                    func(*args, **kwargs),
-                    timeout=self.config.timeout
-                )
-            return await func(*args, **kwargs)
-        finally:
-            self._bulkhead.release()
-
-    async def _execute_timeout(
-        self,
-        func: Callable[[], T],
-        *args: Any,
-        **kwargs: Any
-    ) -> T:
-        """Execute with timeout."""
-        if asyncio.iscoroutinefunction(func):
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 func(*args, **kwargs),
-                timeout=self.config.timeout
+                timeout=config.timeout,
             )
-        return await asyncio.wait_for(
-            asyncio.to_thread(func, *args, **kwargs),
-            timeout=self.config.timeout
-        )
+            if attempt > 0 and metrics:
+                metrics.record_success(total_retry_delay)
+            return result
 
-    async def _execute_circuit_breaker(
-        self,
-        func: Callable[[], T],
-        *args: Any,
-        **kwargs: Any
-    ) -> T:
-        """Execute with circuit breaker."""
-        for attempt in range(self.config.max_retries + 1):
-            try:
-                return await asyncio.wait_for(
-                    func(*args, **kwargs),
-                    timeout=self.config.timeout
+        except asyncio.TimeoutError:
+            last_exception = TimeoutError(f"Call timed out after {config.timeout}s")
+            if attempt < config.max_retries:
+                delay = calculate_backoff(
+                    attempt,
+                    config.base_delay,
+                    config.max_delay,
+                    config.exponential_base,
+                    config.jitter,
                 )
-            except asyncio.TimeoutError:
-                if attempt >= self.config.max_retries:
-                    raise
-                await asyncio.sleep(self.config.retry_delay * (attempt + 1))
-            except Exception as e:
-                if attempt >= self.config.max_retries:
-                    raise
-                await asyncio.sleep(self.config.retry_delay * (attempt + 1))
+                total_retry_delay += delay
+                if metrics:
+                    metrics.record_retry()
+                await asyncio.sleep(delay)
+            else:
+                if metrics:
+                    metrics.record_timeout()
 
-    def get_bulkhead_stats(self) -> Optional[dict]:
-        """Get bulkhead statistics."""
-        if self._bulkhead:
-            return self._bulkhead.stats
-        return None
+        except config.retry_on as e:
+            last_exception = e
+            if attempt < config.max_retries:
+                delay = calculate_backoff(
+                    attempt,
+                    config.base_delay,
+                    config.max_delay,
+                    config.exponential_base,
+                    config.jitter,
+                )
+                total_retry_delay += delay
+                if metrics:
+                    metrics.record_retry()
+                await asyncio.sleep(delay)
+            else:
+                if metrics:
+                    metrics.record_failure()
+        except Exception as e:
+            if metrics:
+                metrics.record_failure()
+            raise e
+
+    if config.fallback_value is not None:
+        if metrics:
+            metrics.record_fallback()
+        return config.fallback_value
+
+    if last_exception:
+        raise last_exception
+
+    raise RuntimeError("Resilience call failed with no exception")
+
+
+class Bulkhead:
+    """Bulkhead pattern for resource isolation."""
+
+    def __init__(self, max_concurrent: int = 10, max_queue_size: int = 100):
+        self.max_concurrent = max_concurrent
+        self.max_queue_size = max_queue_size
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._active = 0
+        self._queue_full = False
+
+    async def __aenter__(self) -> "Bulkhead":
+        """Acquire bulkhead slot."""
+        if self._semaphore.locked():
+            if self._active >= self.max_concurrent:
+                if self._queue_full:
+                    raise RuntimeError("Bulkhead queue full")
+                self._queue_full = True
+        await self._semaphore.acquire()
+        self._active += 1
+        self._queue_full = False
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        """Release bulkhead slot."""
+        self._active -= 1
+        self._semaphore.release()
+
+    @property
+    def available(self) -> int:
+        """Available slots."""
+        return max(0, self.max_concurrent - self._active)
