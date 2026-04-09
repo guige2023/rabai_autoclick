@@ -1,223 +1,100 @@
-"""API request/response compression utilities.
+"""API Compression Action Module.
 
-This module provides compression:
-- Gzip/Zlib compression
-- Brotli support
-- Streaming compression
-- Automatic decompression
-
-Example:
-    >>> from actions.api_compression_action import decompress_response, compress_payload
-    >>> data = decompress_response(response.content, encoding="gzip")
+Request/response compression utilities.
 """
 
 from __future__ import annotations
 
+import asyncio
 import gzip
+import io
 import zlib
-import logging
-from typing import Any, Callable, Optional
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Callable, Generic, TypeVar
 
-logger = logging.getLogger(__name__)
-
-
-def compress_gzip(data: bytes, level: int = 6) -> bytes:
-    """Compress data with gzip.
-
-    Args:
-        data: Bytes to compress.
-        level: Compression level (1-9).
-
-    Returns:
-        Compressed bytes.
-    """
-    return gzip.compress(data, level)
+T = TypeVar("T")
 
 
-def decompress_gzip(data: bytes) -> bytes:
-    """Decompress gzip data.
-
-    Args:
-        data: Compressed bytes.
-
-    Returns:
-        Decompressed bytes.
-    """
-    return gzip.decompress(data)
+class CompressionType(Enum):
+    """Compression types."""
+    GZIP = "gzip"
+    DEFLATE = "deflate"
+    BROTLI = "brotli"
+    IDENTITY = "identity"
 
 
-def compress_zlib(data: bytes, level: int = 6) -> bytes:
-    """Compress data with zlib.
-
-    Args:
-        data: Bytes to compress.
-        level: Compression level (1-9).
-
-    Returns:
-        Compressed bytes.
-    """
-    return zlib.compress(data, level)
+@dataclass
+class CompressionConfig:
+    """Compression configuration."""
+    algorithm: CompressionType = CompressionType.GZIP
+    level: int = 6
+    min_size_bytes: int = 1024
+    encodings: list[str] = ["gzip", "deflate", "br"]
 
 
-def decompress_zlib(data: bytes) -> bytes:
-    """Decompress zlib data.
+class CompressionUtil:
+    """Compression utilities for API data."""
 
-    Args:
-        data: Compressed bytes.
-
-    Returns:
-        Decompressed bytes.
-    """
-    return zlib.decompress(data)
-
-
-def compress_deflate(data: bytes) -> bytes:
-    """Compress data with zlib deflate.
-
-    Args:
-        data: Bytes to compress.
-
-    Returns:
-        Compressed bytes.
-    """
-    return zlib.compress(data)[2:-4]
-
-
-def decompress_deflate(data: bytes) -> bytes:
-    """Decompress deflate data.
-
-    Args:
-        data: Compressed bytes.
-
-    Returns:
-        Decompressed bytes.
-    """
-    return zlib.decompress(data, -zlib.MAX_WBITS)
-
-
-class CompressionMiddleware:
-    """Middleware for handling compression.
-
-    Example:
-        >>> mw = CompressionMiddleware()
-        >>> compressed = mw.compress(request.body, encoding="gzip")
-    """
-
-    SUPPORTED_ENCODINGS = ["gzip", "deflate", "zlib", "identity"]
-
-    def __init__(self, default_encoding: str = "gzip") -> None:
-        self.default_encoding = default_encoding
+    def __init__(self, config: CompressionConfig | None = None) -> None:
+        self.config = config or CompressionConfig()
 
     def compress(
         self,
         data: bytes,
-        encoding: Optional[str] = None,
-    ) -> tuple[bytes, str]:
-        """Compress data.
-
-        Args:
-            data: Bytes to compress.
-            encoding: Encoding type.
-
-        Returns:
-            Tuple of (compressed_data, encoding_used).
-        """
-        encoding = encoding or self.default_encoding
-        if encoding == "gzip":
-            return compress_gzip(data), "gzip"
-        elif encoding in ("deflate", "zlib"):
-            return compress_zlib(data), "deflate"
-        elif encoding == "identity":
-            return data, "identity"
-        logger.warning(f"Unknown encoding {encoding}, returning uncompressed")
-        return data, "identity"
+        algorithm: CompressionType | None = None
+    ) -> bytes:
+        """Compress data."""
+        algorithm = algorithm or self.config.algorithm
+        if len(data) < self.config.min_size_bytes:
+            return data
+        if algorithm == CompressionType.GZIP:
+            return self._gzip_compress(data)
+        elif algorithm == CompressionType.DEFLATE:
+            return self._deflate_compress(data)
+        return data
 
     def decompress(
         self,
         data: bytes,
-        encoding: Optional[str] = None,
+        algorithm: CompressionType | None = None
     ) -> bytes:
-        """Decompress data.
-
-        Args:
-            data: Compressed bytes.
-            encoding: Encoding type.
-
-        Returns:
-            Decompressed bytes.
-        """
-        if not encoding or encoding == "identity":
-            return data
-        if encoding == "gzip":
-            return decompress_gzip(data)
-        elif encoding in ("deflate", "zlib"):
-            try:
-                return decompress_zlib(data)
-            except zlib.error:
-                return decompress_deflate(data)
-        logger.warning(f"Unknown encoding {encoding}")
+        """Decompress data."""
+        algorithm = algorithm or self.config.algorithm
+        if algorithm == CompressionType.GZIP:
+            return self._gzip_decompress(data)
+        elif algorithm == CompressionType.DEFLATE:
+            return self._deflate_decompress(data)
         return data
 
-    def should_compress(
-        self,
-        content_type: str,
-        content_length: int,
-        min_size: int = 1024,
-    ) -> bool:
-        """Check if content should be compressed.
+    def _gzip_compress(self, data: bytes) -> bytes:
+        """Gzip compress."""
+        buf = io.BytesIO()
+        with gzip.GzipFile(file=buf, mode='wb', compresslevel=self.config.level) as f:
+            f.write(data)
+        return buf.getvalue()
 
-        Args:
-            content_type: MIME type.
-            content_length: Size in bytes.
-            min_size: Minimum size to compress.
+    def _gzip_decompress(self, data: bytes) -> bytes:
+        """Gzip decompress."""
+        return gzip.decompress(data)
 
-        Returns:
-            True if should compress.
-        """
-        if content_length < min_size:
-            return False
-        compressible_types = [
-            "text/", "application/json", "application/xml",
-            "application/javascript", "application/xhtml+xml",
-        ]
-        return any(content_type.startswith(t) for t in compressible_types)
+    def _deflate_compress(self, data: bytes) -> bytes:
+        """Deflate compress."""
+        return zlib.compress(data, level=self.config.level)
 
+    def _deflate_decompress(self, data: bytes) -> bytes:
+        """Deflate decompress."""
+        return zlib.decompress(data)
 
-def compress_request_body(
-    body: bytes,
-    encoding: str = "gzip",
-    min_size: int = 1024,
-) -> tuple[bytes, str]:
-    """Compress request body if beneficial.
-
-    Args:
-        body: Request body bytes.
-        encoding: Encoding to use.
-        min_size: Minimum size to compress.
-
-    Returns:
-        Tuple of (body, content_encoding).
-    """
-    if len(body) < min_size:
-        return body, "identity"
-    mw = CompressionMiddleware()
-    return mw.compress(body, encoding)
-
-
-def decompress_response_body(
-    body: bytes,
-    encoding: Optional[str] = None,
-) -> bytes:
-    """Decompress response body.
-
-    Args:
-        body: Response body bytes.
-        encoding: Content-Encoding header value.
-
-    Returns:
-        Decompressed body.
-    """
-    if not encoding or encoding == "identity":
-        return body
-    mw = CompressionMiddleware()
-    return mw.decompress(body, encoding)
+    def get_best_encoding(self, accept_encoding: str | None) -> CompressionType | None:
+        """Get best encoding from Accept-Encoding header."""
+        if not accept_encoding:
+            return None
+        encodings = [e.strip().split(';')[0].lower() for e in accept_encoding.split(',')]
+        if 'br' in encodings and self.config.algorithm == CompressionType.BROTLI:
+            return CompressionType.BROTLI
+        if 'gzip' in encodings:
+            return CompressionType.GZIP
+        if 'deflate' in encodings:
+            return CompressionType.DEFLATE
+        return None

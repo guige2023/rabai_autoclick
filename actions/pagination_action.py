@@ -1,109 +1,137 @@
+"""Pagination Action Module.
+
+Cursor-based and offset pagination utilities.
 """
-Pagination utilities - cursor-based, offset pagination, page navigation, infinite scroll.
-"""
-from typing import Any, Dict, List, Optional, Any
-import logging
 
-logger = logging.getLogger(__name__)
+from __future__ import annotations
 
+import base64
+import json
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Generic, TypeVar
 
-class BaseAction:
-    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-        raise NotImplementedError
-
-
-class PaginationAction(BaseAction):
-    """Pagination operations.
-
-    Provides offset pagination, cursor pagination, page navigation, total calculation.
-    """
-
-    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-        operation = params.get("operation", "paginate")
-        data = params.get("data", [])
-        page = int(params.get("page", 0))
-        page_size = int(params.get("page_size", 10))
-
-        try:
-            if operation == "paginate":
-                total = len(data)
-                total_pages = max(1, (total + page_size - 1) // page_size)
-                start = page * page_size
-                end = start + page_size
-                paged = data[start:end]
-                return {
-                    "success": True,
-                    "data": paged,
-                    "page": page,
-                    "page_size": page_size,
-                    "total": total,
-                    "total_pages": total_pages,
-                    "has_next": page < total_pages - 1,
-                    "has_prev": page > 0,
-                }
-
-            elif operation == "offset_limit":
-                offset = int(params.get("offset", 0))
-                limit = int(params.get("limit", page_size))
-                paged = data[offset:offset + limit]
-                return {"success": True, "data": paged, "offset": offset, "limit": limit, "total": len(data)}
-
-            elif operation == "cursor_paginate":
-                cursor = params.get("cursor")
-                page_size = int(params.get("page_size", 10))
-                sort_field = params.get("sort_field", "id")
-                sort_dir = params.get("sort_dir", "asc")
-                if cursor is None:
-                    start_idx = 0
-                else:
-                    try:
-                        start_idx = int(cursor)
-                    except ValueError:
-                        start_idx = 0
-                paged = data[start_idx:start_idx + page_size]
-                next_cursor = str(start_idx + page_size) if start_idx + page_size < len(data) else None
-                return {
-                    "success": True,
-                    "data": paged,
-                    "next_cursor": next_cursor,
-                    "page_size": page_size,
-                    "total": len(data),
-                }
-
-            elif operation == "total_pages":
-                total = len(data)
-                page_size = int(params.get("page_size", 10))
-                total_pages = max(1, (total + page_size - 1) // page_size)
-                return {"success": True, "total": total, "page_size": page_size, "total_pages": total_pages}
-
-            elif operation == "navigation":
-                total = len(data)
-                total_pages = max(1, (total + page_size - 1) // page_size)
-                current = page
-                window = int(params.get("window", 2))
-                pages = []
-                for p in range(max(0, current - window), min(total_pages, current + window + 1)):
-                    pages.append({"number": p, "is_current": p == current})
-                return {"success": True, "pages": pages, "current": current, "total_pages": total_pages, "has_next": current < total_pages - 1, "has_prev": current > 0}
-
-            elif operation == "slice":
-                start = int(params.get("start", 0))
-                end = int(params.get("end", page_size))
-                sliced = data[start:end]
-                return {"success": True, "data": sliced, "start": start, "end": end, "total": len(data)}
-
-            elif operation == "batch":
-                batch_size = int(params.get("batch_size", page_size))
-                batches = [data[i:i + batch_size] for i in range(0, len(data), batch_size)]
-                return {"success": True, "batches": batches, "count": len(batches), "batch_size": batch_size}
-
-            else:
-                return {"success": False, "error": f"Unknown operation: {operation}"}
-
-        except Exception as e:
-            logger.error(f"PaginationAction error: {e}")
-            return {"success": False, "error": str(e)}
+T = TypeVar("T")
 
 
-def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-    return PaginationAction().execute(context, params)
+class PaginationType(Enum):
+    """Pagination types."""
+    OFFSET = "offset"
+    CURSOR = "cursor"
+    KEYSET = "keyset"
+
+
+@dataclass
+class Page(Generic[T]):
+    """Single page of results."""
+    items: list[T]
+    page_size: int
+    has_next: bool
+    has_previous: bool
+    total_count: int | None = None
+    next_cursor: str | None = None
+    previous_cursor: str | None = None
+
+
+@dataclass
+class PaginationParams:
+    """Pagination parameters."""
+    page_size: int = 20
+    max_page_size: int = 100
+    offset: int | None = None
+    cursor: str | None = None
+
+
+class CursorPagination(Generic[T]):
+    """Cursor-based pagination."""
+
+    def __init__(self, encode_fn: callable = None, decode_fn: callable = None) -> None:
+        self._encode = encode_fn or self._default_encode
+        self._decode = decode_fn or self._default_decode
+
+    def encode_cursor(self, data: dict) -> str:
+        """Encode cursor from data."""
+        json_str = json.dumps(data, sort_keys=True)
+        return base64.urlsafe_b64encode(json_str.encode()).decode()
+
+    def decode_cursor(self, cursor: str) -> dict:
+        """Decode cursor to data."""
+        json_str = base64.urlsafe_b64decode(cursor.encode()).decode()
+        return json.loads(json_str)
+
+    def _default_encode(self, data: dict) -> str:
+        """Default encode function."""
+        return self.encode_cursor(data)
+
+    def _default_decode(self, cursor: str) -> dict:
+        """Default decode function."""
+        return self.decode_cursor(cursor)
+
+    def paginate(
+        self,
+        items: list[T],
+        has_more: bool,
+        cursor_data: dict | None = None
+    ) -> Page[T]:
+        """Create page with cursor."""
+        next_cursor = None
+        if has_more and cursor_data:
+            next_cursor = self._encode(cursor_data)
+        return Page(
+            items=items,
+            page_size=len(items),
+            has_next=has_more,
+            has_previous=cursor_data is not None,
+            next_cursor=next_cursor
+        )
+
+
+class OffsetPagination(Generic[T]):
+    """Offset-based pagination."""
+
+    def paginate(
+        self,
+        items: list[T],
+        total_count: int | None,
+        params: PaginationParams
+    ) -> Page[T]:
+        """Create page with offset."""
+        has_next = params.offset + len(items) < total_count if total_count else len(items) == params.page_size
+        has_previous = params.offset > 0
+        return Page(
+            items=items,
+            page_size=len(items),
+            has_next=has_next,
+            has_previous=has_previous,
+            total_count=total_count
+        )
+
+
+class KeysetPagination(Generic[T]):
+    """Keyset pagination for efficient large dataset traversal."""
+
+    def __init__(self, sort_field: str = "id", sort_direction: str = "asc") -> None:
+        self.sort_field = sort_field
+        self.sort_direction = sort_direction
+
+    def build_keyset(self, last_item: T) -> dict:
+        """Build keyset from last item."""
+        return {self.sort_field: getattr(last_item, self.sort_field, None)}
+
+    def paginate(
+        self,
+        items: list[T],
+        has_more: bool,
+        keyset: dict | None = None
+    ) -> Page[T]:
+        """Create page with keyset."""
+        next_keyset = None
+        if has_more and items:
+            next_keyset = self.build_keyset(items[-1])
+        return Page(
+            items=items,
+            page_size=len(items),
+            has_next=has_more,
+            has_previous=keyset is not None,
+            next_cursor=json.dumps(next_keyset) if next_keyset else None
+        )
