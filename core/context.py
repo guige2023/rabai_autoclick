@@ -267,23 +267,36 @@ class ContextManager:
     def safe_exec(
         self, 
         code: str, 
-        output_var: Optional[str] = None
+        output_var: Optional[str] = None,
+        timeout_seconds: float = 5.0,
+        max_instructions: int = 10000
     ) -> Any:
         """Execute Python code in a sandboxed environment.
         
         Only allows specific builtins and variables from context.
         Sets 'return_value' in local scope for output.
         
+        Features:
+        - Timing limits to prevent CPU exhaustion
+        - Instruction counting via bytecode analysis
+        
         Args:
             code: Python code to execute.
             output_var: Optional variable name to store return_value.
+            timeout_seconds: Maximum execution time (default 5.0s).
+            max_instructions: Maximum bytecode instructions (default 10000).
             
         Returns:
             The 'return_value' from execution if set.
             
         Raises:
+            TimeoutError: If execution exceeds time limit.
+            RuntimeError: If instruction limit exceeded.
             Exception: If execution fails.
         """
+        import signal
+        import sys
+        
         allowed_builtins: Dict[str, Any] = {
             'int': int,
             'float': float,
@@ -314,13 +327,61 @@ class ContextManager:
         local_vars: Dict[str, Any] = {'context': self._variables}
         local_vars.update(self._variables)
         
+        # Instruction counter using bytecode
+        def count_instructions(code_obj):
+            """Count bytecode instructions in a code object."""
+            import dis
+            instructions = 0
+            for instr in dis.get_instructions(code_obj):
+                instructions += 1
+            return instructions
+        
+        # Compile and check instruction count first
         try:
-            exec(code, {'__builtins__': allowed_builtins}, local_vars)
+            compiled = compile(code, '<string>', 'exec')
+            total_instructions = count_instructions(compiled)
+            
+            # Also count instructions in nested functions
+            for const in compiled.co_consts:
+                if hasattr(const, 'co_code'):
+                    total_instructions += count_instructions(const)
+            
+            if total_instructions > max_instructions:
+                raise RuntimeError(
+                    f"Code contains {total_instructions} instructions, "
+                    f"limit is {max_instructions}"
+                )
+        except SyntaxError:
+            raise
+        
+        # Timeout handler
+        def timeout_handler(signum, frame):
+            raise TimeoutError(
+                f"Execution exceeded time limit of {timeout_seconds} seconds"
+            )
+        
+        # Set up timeout if signal is available (Unix only)
+        old_handler = None
+        has_signal = hasattr(signal, 'SIGALRM')
+        
+        if has_signal:
+            old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(int(timeout_seconds) + 1)
+        
+        try:
+            exec(compiled, {'__builtins__': allowed_builtins}, local_vars)
             
             if output_var and 'return_value' in local_vars:
                 self.set(output_var, local_vars['return_value'])
             
             return local_vars.get('return_value', None)
+        except TimeoutError:
+            self._add_history({
+                "action": "exec_timeout",
+                "code": code,
+                "timeout_seconds": timeout_seconds,
+            })
+            raise
         except Exception as e:
             self._add_history({
                 "action": "exec_error",
@@ -328,6 +389,12 @@ class ContextManager:
                 "error": str(e),
             })
             raise
+        finally:
+            # Restore signal handler
+            if has_signal:
+                signal.alarm(0)
+                if old_handler is not None:
+                    signal.signal(signal.SIGALRM, old_handler)
     
     def _add_history(self, entry: Dict[str, Any]) -> None:
         """Add an action to the history log.
