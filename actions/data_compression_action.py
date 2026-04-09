@@ -1,327 +1,468 @@
 """
 Data Compression Action Module.
 
-Provides data compression and decompression utilities supporting multiple
-algorithms, streaming compression, and intelligent format selection.
-
-Author: RabAi Team
+Data compression with multiple algorithms, streaming support,
+and automatic algorithm selection based on data characteristics.
 """
 
-from __future__ import annotations
-
 import gzip
-import io
-import json
-import lzma
 import zlib
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from datetime import datetime
+import bz2
+import lzma
+import io
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+import logging
 
-import brotli
+logger = logging.getLogger(__name__)
 
 
 class CompressionAlgorithm(Enum):
     """Supported compression algorithms."""
-    GZIP = "gzip"
+    NONE = "none"
     ZLIB = "zlib"
+    GZIP = "gzip"
+    BZ2 = "bz2"
     LZMA = "lzma"
-    BROTLI = "brotli"
-    ZSTD = "zstd"
     LZ4 = "lz4"
+    ZSTD = "zstd"
 
 
 class CompressionLevel(Enum):
-    """Compression level presets."""
-    BEST_SPEED = 1
-    BEST_COMPRESSION = 9
-    DEFAULT = 6
+    """Compression levels."""
+    BEST_SPEED = "best_speed"
+    BEST_COMPRESSION = "best_compression"
+    DEFAULT = "default"
 
 
 @dataclass
 class CompressionResult:
-    """Result of a compression operation."""
+    """Result of compression operation."""
+    success: bool
     original_size: int
     compressed_size: int
     algorithm: CompressionAlgorithm
     compression_ratio: float
-    duration_ms: float
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def space_saved(self) -> int:
-        return self.original_size - self.compressed_size
-
-    @property
-    def space_saved_percent(self) -> float:
-        if self.original_size == 0:
-            return 0.0
-        return (1 - self.compressed_size / self.original_size) * 100
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "original_size": self.original_size,
-            "compressed_size": self.compressed_size,
-            "algorithm": self.algorithm.value,
-            "compression_ratio": self.compression_ratio,
-            "space_saved": self.space_saved,
-            "space_saved_percent": self.space_saved_percent,
-            "duration_ms": self.duration_ms,
-            "metadata": self.metadata,
-        }
+    data: Any
 
 
-class CompressionStrategy(ABC):
-    """Abstract base for compression strategies."""
-
-    @abstractmethod
-    def compress(self, data: bytes, level: int = 6) -> bytes:
-        """Compress data."""
-        pass
-
-    @abstractmethod
-    def decompress(self, data: bytes) -> bytes:
-        """Decompress data."""
-        pass
-
-
-class GzipStrategy(CompressionStrategy):
-    """Gzip compression implementation."""
-
-    def compress(self, data: bytes, level: int = 6) -> bytes:
-        return gzip.compress(data, compresslevel=level)
-
-    def decompress(self, data: bytes) -> bytes:
-        return gzip.decompress(data)
-
-
-class ZlibStrategy(CompressionStrategy):
-    """Zlib compression implementation."""
-
-    def compress(self, data: bytes, level: int = 6) -> bytes:
-        return zlib.compress(data, level=level)
-
-    def decompress(self, data: bytes) -> bytes:
-        return zlib.decompress(data)
-
-
-class LzmaStrategy(CompressionStrategy):
-    """LZMA compression implementation."""
-
-    def compress(self, data: bytes, level: int = 6) -> bytes:
-        return lzma.compress(data, preset=level)
-
-    def decompress(self, data: bytes) -> bytes:
-        return lzma.decompress(data)
-
-
-class BrotliStrategy(CompressionStrategy):
-    """Brotli compression implementation."""
-
-    def compress(self, data: bytes, level: int = 6) -> bytes:
-        return brotli.compress(data, quality=level)
-
-    def decompress(self, data: bytes) -> bytes:
-        return brotli.decompress(data)
-
-
-class DataCompressor:
+class DataCompressionAction:
     """
-    Data compression and decompression utility.
-
-    Supports multiple compression algorithms with configurable levels,
-    streaming operations, and automatic format detection.
+    Data compression with multiple algorithm support.
 
     Example:
-        >>> compressor = DataCompressor()
-        >>> result = compressor.compress(b"large dataset...", algorithm=CompressionAlgorithm.GZIP)
-        >>> decompressed = compressor.decompress(result.compressed_data)
+        compressor = DataCompressionAction()
+        result = compressor.compress(data, algorithm=CompressionAlgorithm.ZLIB)
+        decompressed = compressor.decompress(result.data, algorithm=CompressionAlgorithm.ZLIB)
     """
 
+    ALGORITHM_MAP = {
+        CompressionAlgorithm.ZLIB: ("zlib", zlib.compress, zlib.decompress),
+        CompressionAlgorithm.GZIP: ("gzip", gzip.compress, gzip.decompress),
+        CompressionAlgorithm.BZ2: ("bz2", bz2.compress, bz2.decompress),
+        CompressionAlgorithm.LZMA: ("lzma", lzma.compress, lzma.decompress),
+    }
+
     def __init__(self):
-        self._strategies: Dict[CompressionAlgorithm, CompressionStrategy] = {
-            CompressionAlgorithm.GZIP: GzipStrategy(),
-            CompressionAlgorithm.ZLIB: ZlibStrategy(),
-            CompressionAlgorithm.LZMA: LzmaStrategy(),
-            CompressionAlgorithm.BROTLI: BrotliStrategy(),
-        }
+        """Initialize data compression action."""
+        self._default_algorithm = CompressionAlgorithm.ZLIB
+        self._algorithm_selector: Optional[Callable] = None
+
+    def set_default_algorithm(self, algorithm: CompressionAlgorithm) -> None:
+        """Set default compression algorithm."""
+        self._default_algorithm = algorithm
+
+    def register_algorithm_selector(
+        self,
+        selector: Callable[[bytes], CompressionAlgorithm]
+    ) -> None:
+        """
+        Register custom algorithm selector.
+
+        Args:
+            selector: Function that selects algorithm based on data.
+        """
+        self._algorithm_selector = selector
 
     def compress(
         self,
-        data: Union[bytes, str],
-        algorithm: CompressionAlgorithm = CompressionAlgorithm.GZIP,
-        level: int = 6,
-    ) -> Tuple[bytes, CompressionResult]:
+        data: Any,
+        algorithm: Optional[CompressionAlgorithm] = None,
+        level: CompressionLevel = CompressionLevel.DEFAULT,
+        encoding: str = "utf-8"
+    ) -> CompressionResult:
         """
-        Compress data using specified algorithm.
+        Compress data.
+
+        Args:
+            data: Data to compress.
+            algorithm: Compression algorithm (auto-selects if None).
+            level: Compression level.
+            encoding: Text encoding for string data.
 
         Returns:
-            Tuple of (compressed_bytes, CompressionResult)
+            CompressionResult with compressed data.
         """
+        import tempfile
+        import shutil
+
         if isinstance(data, str):
-            data = data.encode("utf-8")
+            data_bytes = data.encode(encoding)
+        elif isinstance(data, bytes):
+            data_bytes = data
+        else:
+            data_bytes = str(data).encode(encoding)
 
-        import time
-        start = time.time()
+        original_size = len(data_bytes)
 
-        strategy = self._strategies.get(algorithm)
-        if not strategy:
-            raise ValueError(f"Unsupported algorithm: {algorithm}")
+        if algorithm is None:
+            if self._algorithm_selector:
+                algorithm = self._algorithm_selector(data_bytes)
+            else:
+                algorithm = self._default_algorithm
 
-        compressed = strategy.compress(data, level)
-        duration_ms = (time.time() - start) * 1000
+        if algorithm == CompressionAlgorithm.NONE:
+            return CompressionResult(
+                success=True,
+                original_size=original_size,
+                compressed_size=original_size,
+                algorithm=algorithm,
+                compression_ratio=1.0,
+                data=data_bytes
+            )
 
-        result = CompressionResult(
-            original_size=len(data),
-            compressed_size=len(compressed),
-            algorithm=algorithm,
-            compression_ratio=len(compressed) / len(data) if data else 0,
-            duration_ms=duration_ms,
-            metadata={"level": level},
-        )
+        compress_func, _ = self._get_algorithm_funcs(algorithm)
 
-        return compressed, result
+        if not compress_func:
+            return CompressionResult(
+                success=False,
+                original_size=original_size,
+                compressed_size=0,
+                algorithm=algorithm,
+                compression_ratio=0.0,
+                data=None
+            )
+
+        try:
+            level_value = self._get_compression_level(level, algorithm)
+
+            if algorithm in (CompressionAlgorithm.LZ4, CompressionAlgorithm.ZSTD):
+                result = self._compress_optional(data_bytes, algorithm, level)
+            else:
+                result = compress_func(data_bytes, level_value)
+
+            compressed_size = len(result)
+            ratio = compressed_size / original_size if original_size > 0 else 0.0
+
+            return CompressionResult(
+                success=True,
+                original_size=original_size,
+                compressed_size=compressed_size,
+                algorithm=algorithm,
+                compression_ratio=ratio,
+                data=result
+            )
+
+        except Exception as e:
+            logger.error(f"Compression failed: {e}")
+            return CompressionResult(
+                success=False,
+                original_size=original_size,
+                compressed_size=0,
+                algorithm=algorithm,
+                compression_ratio=0.0,
+                data=None
+            )
 
     def decompress(
         self,
         data: bytes,
         algorithm: CompressionAlgorithm,
-    ) -> bytes:
-        """Decompress data using specified algorithm."""
-        strategy = self._strategies.get(algorithm)
-        if not strategy:
-            raise ValueError(f"Unsupported algorithm: {algorithm}")
-        return strategy.decompress(data)
-
-    def decompress_auto(self, data: bytes) -> Tuple[bytes, CompressionAlgorithm]:
+        encoding: str = "utf-8"
+    ) -> Any:
         """
-        Auto-detect compression format and decompress.
+        Decompress data.
 
-        Tries each algorithm until one succeeds.
+        Args:
+            data: Compressed data bytes.
+            algorithm: Compression algorithm used.
+            encoding: Output encoding for string data.
+
+        Returns:
+            Decompressed data (bytes or string).
         """
-        for algo in CompressionAlgorithm:
-            strategy = self._strategies.get(algo)
-            if strategy:
-                try:
-                    decompressed = strategy.decompress(data)
-                    return decompressed, algo
-                except Exception:
-                    continue
-        raise ValueError("Could not auto-detect compression format")
+        if algorithm == CompressionAlgorithm.NONE:
+            return data
 
-    def compress_file(
+        _, decompress_func = self._get_algorithm_funcs(algorithm)
+
+        if not decompress_func:
+            if algorithm in (CompressionAlgorithm.LZ4, CompressionAlgorithm.ZSTD):
+                return self._decompress_optional(data, algorithm)
+            return None
+
+        try:
+            return decompress_func(data)
+        except Exception as e:
+            logger.error(f"Decompression failed: {e}")
+            return None
+
+    def compress_streaming(
         self,
-        input_path: str,
-        output_path: Optional[str] = None,
-        algorithm: CompressionAlgorithm = CompressionAlgorithm.GZIP,
-        chunk_size: int = 8192,
-    ) -> CompressionResult:
-        """Compress a file."""
-        import time
-        start = time.time()
+        input_stream: io.BytesIO,
+        output_stream: io.BytesIO,
+        algorithm: CompressionAlgorithm,
+        chunk_size: int = 8192
+    ) -> bool:
+        """
+        Compress data using streaming approach.
 
-        if output_path is None:
-            output_path = f"{input_path}.{algorithm.value}"
+        Args:
+            input_stream: Input BytesIO stream.
+            output_stream: Output BytesIO stream.
+            algorithm: Compression algorithm.
+            chunk_size: Chunk size for streaming.
 
-        strategy = self._strategies.get(algorithm)
-        if not strategy:
-            raise ValueError(f"Unsupported algorithm: {algorithm}")
+        Returns:
+            True if successful.
+        """
+        if algorithm == CompressionAlgorithm.NONE:
+            while True:
+                chunk = input_stream.read(chunk_size)
+                if not chunk:
+                    break
+                output_stream.write(chunk)
+            return True
 
-        original_size = 0
-        with open(input_path, "rb") as fin:
-            with open(output_path, "wb") as fout:
-                compressor = zlib.compressobj(level=6) if algorithm == CompressionAlgorithm.ZLIB else None
-                while True:
-                    chunk = fin.read(chunk_size)
-                    if not chunk:
-                        break
-                    original_size += len(chunk)
-                    compressed_chunk = strategy.compress(chunk) if compressor is None else compressor.compress(chunk)
-                    fout.write(compressed_chunk)
-                if compressor:
-                    fout.write(compressor.flush())
+        if algorithm not in self.ALGORITHM_MAP:
+            logger.error(f"Streaming not supported for algorithm: {algorithm}")
+            return False
 
-        compressed_size = 0
-        with open(output_path, "rb") as f:
-            compressed_size = f.seek(0, 2)
+        compressor = self._create_compressor(algorithm)
 
-        duration_ms = (time.time() - start) * 1000
+        if not compressor:
+            return False
 
-        return CompressionResult(
-            original_size=original_size,
-            compressed_size=compressed_size,
-            algorithm=algorithm,
-            compression_ratio=compressed_size / original_size if original_size else 0,
-            duration_ms=duration_ms,
-            metadata={"input_path": input_path, "output_path": output_path},
-        )
+        try:
+            while True:
+                chunk = input_stream.read(chunk_size)
+                if not chunk:
+                    break
 
-    def get_recommended_algorithm(
+                if algorithm in (CompressionAlgorithm.GZIP, CompressionAlgorithm.BZ2, CompressionAlgorithm.LZMA):
+                    compressed = compressor.compress(chunk)
+                else:
+                    compressed = zlib.compress(chunk, level=6)
+
+                output_stream.write(compressed)
+
+            if hasattr(compressor, 'flush'):
+                output_stream.write(compressor.flush())
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Streaming compression failed: {e}")
+            return False
+
+    def decompress_streaming(
+        self,
+        input_stream: io.BytesIO,
+        output_stream: io.BytesIO,
+        algorithm: CompressionAlgorithm,
+        chunk_size: int = 8192
+    ) -> bool:
+        """
+        Decompress data using streaming approach.
+
+        Args:
+            input_stream: Compressed input stream.
+            output_stream: Decompressed output stream.
+            algorithm: Compression algorithm.
+            chunk_size: Chunk size for streaming.
+
+        Returns:
+            True if successful.
+        """
+        if algorithm == CompressionAlgorithm.NONE:
+            while True:
+                chunk = input_stream.read(chunk_size)
+                if not chunk:
+                    break
+                output_stream.write(chunk)
+            return True
+
+        if algorithm not in self.ALGORITHM_MAP:
+            return False
+
+        try:
+            if algorithm == CompressionAlgorithm.ZLIB:
+                decompressor = zlib.decompressobj()
+            elif algorithm == CompressionAlgorithm.GZIP:
+                decompressor = gzip.GzipFile(fileobj=io.BytesIO())
+            else:
+                return False
+
+            while True:
+                chunk = input_stream.read(chunk_size)
+                if not chunk:
+                    break
+
+                if hasattr(decompressor, 'decompress'):
+                    output_stream.write(decompressor.decompress(chunk))
+                else:
+                    output_stream.write(chunk)
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Streaming decompression failed: {e}")
+            return False
+
+    def detect_algorithm(self, data: bytes) -> CompressionAlgorithm:
+        """
+        Detect compression algorithm from data.
+
+        Args:
+            data: Data to analyze.
+
+        Returns:
+            Detected CompressionAlgorithm.
+        """
+        if len(data) < 2:
+            return CompressionAlgorithm.NONE
+
+        if data[:2] == b'\x1f\x8b':
+            return CompressionAlgorithm.GZIP
+        elif data[:2] == b'BZ':
+            return CompressionAlgorithm.BZ2
+        elif data[:2] in (b'[\xfd', b'YZ'):
+            return CompressionAlgorithm.LZMA
+        elif data[:2] == b'\x28\xb5\x2f':
+            return CompressionAlgorithm.ZSTD
+
+        try:
+            zlib.decompress(data)
+            return CompressionAlgorithm.ZLIB
+        except Exception:
+            pass
+
+        return CompressionAlgorithm.NONE
+
+    def _get_algorithm_funcs(
+        self,
+        algorithm: CompressionAlgorithm
+    ) -> tuple:
+        """Get compress/decompress functions for algorithm."""
+        return self.ALGORITHM_MAP.get(algorithm, (None, None))
+
+    def _get_compression_level(
+        self,
+        level: CompressionLevel,
+        algorithm: CompressionAlgorithm
+    ) -> int:
+        """Get compression level value for algorithm."""
+        if algorithm == CompressionAlgorithm.ZLIB:
+            if level == CompressionLevel.BEST_SPEED:
+                return 1
+            elif level == CompressionLevel.BEST_COMPRESSION:
+                return 9
+            return 6
+
+        elif algorithm in (CompressionAlgorithm.GZIP, CompressionAlgorithm.BZ2):
+            if level == CompressionLevel.BEST_SPEED:
+                return 1
+            elif level == CompressionLevel.BEST_COMPRESSION:
+                return 9
+            return 6
+
+        elif algorithm == CompressionAlgorithm.LZMA:
+            if level == CompressionLevel.BEST_SPEED:
+                return 0
+            elif level == CompressionLevel.BEST_COMPRESSION:
+                return 9
+            return 6
+
+        return 6
+
+    def _create_compressor(self, algorithm: CompressionAlgorithm):
+        """Create compressor object for streaming."""
+        if algorithm == CompressionAlgorithm.ZLIB:
+            return zlib.compressobj(level=6)
+        elif algorithm == CompressionAlgorithm.GZIP:
+            return gzip.GzipFile(fileobj=io.BytesIO(), mode='wb')
+        return None
+
+    def _compress_optional(
         self,
         data: bytes,
-        sample_size: int = 10240,
-    ) -> CompressionAlgorithm:
-        """
-        Recommend best algorithm for data based on sampling.
-
-        Tests a sample of data with each algorithm to find best compression.
-        """
-        sample = data[:sample_size] if len(data) > sample_size else data
-        best_algo = CompressionAlgorithm.GZIP
-        best_ratio = float("inf")
-
-        for algo, strategy in self._strategies.items():
+        algorithm: CompressionAlgorithm,
+        level: CompressionLevel
+    ) -> bytes:
+        """Compress using optional libraries."""
+        if algorithm == CompressionAlgorithm.LZ4:
             try:
-                compressed = strategy.compress(sample)
-                ratio = len(compressed) / len(sample) if sample else 0
-                if ratio < best_ratio:
-                    best_ratio = ratio
-                    best_algo = algo
-            except Exception:
-                continue
+                import lz4.frame
+                return lz4.frame.compress(data)
+            except ImportError:
+                raise ImportError("lz4 required: pip install lz4")
 
-        return best_algo
+        elif algorithm == CompressionAlgorithm.ZSTD:
+            try:
+                import zstandard
+                return zstandard.ZstdCompressor().compress(data)
+            except ImportError:
+                raise ImportError("zstandard required: pip install zstandard")
 
-    def stream_compress(
+        return data
+
+    def _decompress_optional(
         self,
-        input_stream,
-        output_stream,
-        algorithm: CompressionAlgorithm = CompressionAlgorithm.GZIP,
-        chunk_size: int = 8192,
-    ) -> CompressionResult:
-        """Stream compress data from input to output."""
-        import time
-        start = time.time()
+        data: bytes,
+        algorithm: CompressionAlgorithm
+    ) -> bytes:
+        """Decompress using optional libraries."""
+        if algorithm == CompressionAlgorithm.LZ4:
+            try:
+                import lz4.frame
+                return lz4.frame.decompress(data)
+            except ImportError:
+                raise ImportError("lz4 required")
 
-        strategy = self._strategies.get(algorithm)
-        if not strategy:
-            raise ValueError(f"Unsupported algorithm: {algorithm}")
+        elif algorithm == CompressionAlgorithm.ZSTD:
+            try:
+                import zstandard
+                return zstandard.ZstdDecompressor().decompress(data)
+            except ImportError:
+                raise ImportError("zstandard required")
 
-        original_size = 0
-        compressed_size = 0
+        return data
 
-        while True:
-            chunk = input_stream.read(chunk_size)
-            if not chunk:
-                break
-            original_size += len(chunk)
-            compressed = strategy.compress(chunk)
-            compressed_size += len(compressed)
-            output_stream.write(compressed)
+    def estimate_compressed_size(
+        self,
+        data_size: int,
+        algorithm: CompressionAlgorithm
+    ) -> int:
+        """
+        Estimate compressed size.
 
-        duration_ms = (time.time() - start) * 1000
+        Args:
+            data_size: Original data size.
+            algorithm: Compression algorithm.
 
-        return CompressionResult(
-            original_size=original_size,
-            compressed_size=compressed_size,
-            algorithm=algorithm,
-            compression_ratio=compressed_size / original_size if original_size else 0,
-            duration_ms=duration_ms,
-        )
+        Returns:
+            Estimated compressed size in bytes.
+        """
+        ratios = {
+            CompressionAlgorithm.NONE: 1.0,
+            CompressionAlgorithm.ZLIB: 0.4,
+            CompressionAlgorithm.GZIP: 0.4,
+            CompressionAlgorithm.BZ2: 0.35,
+            CompressionAlgorithm.LZMA: 0.3,
+            CompressionAlgorithm.LZ4: 0.45,
+            CompressionAlgorithm.ZSTD: 0.35
+        }
 
-
-def create_compressor() -> DataCompressor:
-    """Factory to create a data compressor."""
-    return DataCompressor()
+        ratio = ratios.get(algorithm, 0.4)
+        return int(data_size * ratio)

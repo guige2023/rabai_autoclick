@@ -1,427 +1,352 @@
-"""Automation Recovery Action Module.
+"""
+Automation Recovery Action Module.
 
-Provides automation recovery, checkpoint, and
-failover capabilities for workflow automation.
+Fault recovery and retry orchestration with exponential
+backoff, jitter, and failure classification.
 """
 
-from typing import Any, Dict, List, Optional, Callable
-from dataclasses import dataclass, field
-from enum import Enum
-import json
+import asyncio
+import random
 import time
-from datetime import datetime
-import uuid
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional, TypeVar
+from enum import Enum
+import logging
+
+logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 
-class RecoveryState(Enum):
-    """State of recovery system."""
-    IDLE = "idle"
-    CHECKPOINTING = "checkpointing"
-    RECOVERING = "recovering"
-    FAILED = "failed"
+class FailureType(Enum):
+    """Classified failure types."""
+    TRANSIENT = "transient"
+    PERMANENT = "permanent"
+    TIMEOUT = "timeout"
+    RESOURCE = "resource"
+    UNKNOWN = "unknown"
 
 
 @dataclass
-class Checkpoint:
-    """Represents a recovery checkpoint."""
-    id: str
-    workflow_id: str
-    step_id: str
-    state: Dict[str, Any]
-    timestamp: datetime = field(default_factory=datetime.now)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary."""
-        return {
-            "id": self.id,
-            "workflow_id": self.workflow_id,
-            "step_id": self.step_id,
-            "state": self.state,
-            "timestamp": self.timestamp.isoformat(),
-            "metadata": self.metadata,
-        }
+class RetryConfig:
+    """Retry configuration."""
+    max_attempts: int = 3
+    base_delay: float = 1.0
+    max_delay: float = 60.0
+    exponential_base: float = 2.0
+    jitter: bool = True
+    jitter_factor: float = 0.3
 
 
 @dataclass
 class RecoveryAction:
-    """Defines a recovery action."""
+    """
+    Recovery action definition.
+
+    Attributes:
+        name: Action identifier.
+        action_type: Type of recovery action.
+        func: Function to execute.
+        timeout: Action timeout.
+        on_failure: Action to run on failure.
+    """
+    name: str
     action_type: str
-    handler: Callable
-    priority: int = 0
-    condition: Optional[Callable[[Exception], bool]] = None
+    func: Callable
+    timeout: float = 30.0
+    on_failure: Optional[Callable] = None
 
 
 @dataclass
-class FailoverConfig:
-    """Configuration for failover behavior."""
-    max_retries: int = 3
-    retry_delay_seconds: float = 1.0
-    exponential_backoff: bool = True
-    max_backoff_seconds: float = 60.0
-    fallback_handler: Optional[Callable] = None
-
-
-class CheckpointManager:
-    """Manages workflow checkpoints."""
-
-    def __init__(self, storage_path: Optional[str] = None):
-        self._checkpoints: Dict[str, List[Checkpoint]] = {}
-        self._latest: Dict[str, Checkpoint] = {}
-        self._storage_path = storage_path
-
-    def save_checkpoint(
-        self,
-        workflow_id: str,
-        step_id: str,
-        state: Dict[str, Any],
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Checkpoint:
-        """Save a checkpoint."""
-        checkpoint = Checkpoint(
-            id=str(uuid.uuid4()),
-            workflow_id=workflow_id,
-            step_id=step_id,
-            state=state.copy(),
-            metadata=metadata or {},
-        )
-
-        if workflow_id not in self._checkpoints:
-            self._checkpoints[workflow_id] = []
-
-        self._checkpoints[workflow_id].append(checkpoint)
-        self._latest[workflow_id] = checkpoint
-
-        if self._storage_path:
-            self._persist_checkpoint(checkpoint)
-
-        return checkpoint
-
-    def get_latest(self, workflow_id: str) -> Optional[Checkpoint]:
-        """Get latest checkpoint for workflow."""
-        return self._latest.get(workflow_id)
-
-    def get_checkpoint(
-        self,
-        workflow_id: str,
-        checkpoint_id: str,
-    ) -> Optional[Checkpoint]:
-        """Get specific checkpoint."""
-        checkpoints = self._checkpoints.get(workflow_id, [])
-        for cp in checkpoints:
-            if cp.id == checkpoint_id:
-                return cp
-        return None
-
-    def get_history(
-        self,
-        workflow_id: str,
-        limit: int = 10,
-    ) -> List[Checkpoint]:
-        """Get checkpoint history."""
-        checkpoints = self._checkpoints.get(workflow_id, [])
-        return checkpoints[-limit:]
-
-    def delete_checkpoints(self, workflow_id: str) -> int:
-        """Delete all checkpoints for workflow."""
-        if workflow_id in self._checkpoints:
-            count = len(self._checkpoints[workflow_id])
-            del self._checkpoints[workflow_id]
-            if workflow_id in self._latest:
-                del self._latest[workflow_id]
-            return count
-        return 0
-
-    def _persist_checkpoint(self, checkpoint: Checkpoint):
-        """Persist checkpoint to storage."""
-        pass
-
-
-class RetryManager:
-    """Manages retry logic for failed operations."""
-
-    def __init__(self, config: Optional[FailoverConfig] = None):
-        self.config = config or FailoverConfig()
-        self._retry_counts: Dict[str, int] = {}
-
-    def should_retry(
-        self,
-        operation_id: str,
-        error: Exception,
-    ) -> bool:
-        """Check if operation should be retried."""
-        current_count = self._retry_counts.get(operation_id, 0)
-        return current_count < self.config.max_retries
-
-    def record_attempt(self, operation_id: str) -> int:
-        """Record a retry attempt."""
-        self._retry_counts[operation_id] = self._retry_counts.get(operation_id, 0) + 1
-        return self._retry_counts[operation_id]
-
-    def get_retry_delay(self, operation_id: str) -> float:
-        """Calculate retry delay with backoff."""
-        attempt = self._retry_counts.get(operation_id, 1)
-
-        if self.config.exponential_backoff:
-            delay = min(
-                self.config.retry_delay_seconds * (2 ** (attempt - 1)),
-                self.config.max_backoff_seconds,
-            )
-        else:
-            delay = self.config.retry_delay_seconds
-
-        return delay
-
-    def reset(self, operation_id: str):
-        """Reset retry count for operation."""
-        if operation_id in self._retry_counts:
-            del self._retry_counts[operation_id]
-
-    def get_attempt_count(self, operation_id: str) -> int:
-        """Get current attempt count."""
-        return self._retry_counts.get(operation_id, 0)
-
-
-class FailoverHandler:
-    """Handles failover scenarios."""
-
-    def __init__(
-        self,
-        recovery_actions: Optional[List[RecoveryAction]] = None,
-        fallback_handler: Optional[Callable] = None,
-    ):
-        self._recovery_actions: Dict[str, RecoveryAction] = {}
-        self._fallback_handler = fallback_handler
-
-        if recovery_actions:
-            for action in recovery_actions:
-                self._recovery_actions[action.action_type] = action
-
-    def register_action(self, action: RecoveryAction):
-        """Register a recovery action."""
-        self._recovery_actions[action.action_type] = action
-
-    async def handle_failure(
-        self,
-        error: Exception,
-        context: Dict[str, Any],
-    ) -> Any:
-        """Handle a failure and attempt recovery."""
-        error_type = type(error).__name__
-
-        if error_type in self._recovery_actions:
-            action = self._recovery_actions[error_type]
-            if action.condition is None or action.condition(error):
-                try:
-                    return await action.handler(context)
-                except Exception as recovery_error:
-                    context["recovery_error"] = str(recovery_error)
-
-        if self._fallback_handler:
-            return self._fallback_handler(context)
-
-        raise error
-
-
-class StateManager:
-    """Manages workflow state for recovery."""
-
-    def __init__(self):
-        self._states: Dict[str, Dict[str, Any]] = {}
-        self._snapshots: Dict[str, List[Dict[str, Any]]] = {}
-
-    def set_state(
-        self,
-        workflow_id: str,
-        state: Dict[str, Any],
-    ):
-        """Set workflow state."""
-        self._states[workflow_id] = state.copy()
-
-    def get_state(self, workflow_id: str) -> Optional[Dict[str, Any]]:
-        """Get workflow state."""
-        return self._states.get(workflow_id)
-
-    def create_snapshot(
-        self,
-        workflow_id: str,
-        snapshot_name: Optional[str] = None,
-    ) -> str:
-        """Create a named snapshot of current state."""
-        if workflow_id not in self._states:
-            raise ValueError(f"No state found for workflow {workflow_id}")
-
-        snapshot_id = snapshot_name or f"snapshot_{int(time.time())}"
-
-        if workflow_id not in self._snapshots:
-            self._snapshots[workflow_id] = []
-
-        self._snapshots[workflow_id].append({
-            "id": snapshot_id,
-            "state": self._states[workflow_id].copy(),
-            "timestamp": datetime.now().isoformat(),
-        })
-
-        return snapshot_id
-
-    def restore_snapshot(
-        self,
-        workflow_id: str,
-        snapshot_id: str,
-    ) -> bool:
-        """Restore state from snapshot."""
-        snapshots = self._snapshots.get(workflow_id, [])
-        for snapshot in snapshots:
-            if snapshot["id"] == snapshot_id:
-                self._states[workflow_id] = snapshot["state"].copy()
-                return True
-        return False
-
-    def delete_state(self, workflow_id: str) -> bool:
-        """Delete workflow state."""
-        if workflow_id in self._states:
-            del self._states[workflow_id]
-            return True
-        return False
-
-
-class WorkflowRecovery:
-    """Orchestrates workflow recovery."""
-
-    def __init__(
-        self,
-        checkpoint_manager: Optional[CheckpointManager] = None,
-        retry_manager: Optional[RetryManager] = None,
-        failover_handler: Optional[FailoverHandler] = None,
-        state_manager: Optional[StateManager] = None,
-    ):
-        self.checkpoint_manager = checkpoint_manager or CheckpointManager()
-        self.retry_manager = retry_manager or RetryManager()
-        self.failover_handler = failover_handler or FailoverHandler()
-        self.state_manager = state_manager or StateManager()
-        self._recovery_handlers: Dict[str, Callable] = {}
-
-    def register_recovery_handler(
-        self,
-        step_id: str,
-        handler: Callable,
-    ):
-        """Register a recovery handler for a step."""
-        self._recovery_handlers[step_id] = handler
-
-    async def recover_workflow(
-        self,
-        workflow_id: str,
-        from_checkpoint: bool = True,
-    ) -> Dict[str, Any]:
-        """Recover a workflow from checkpoint."""
-        if from_checkpoint:
-            checkpoint = self.checkpoint_manager.get_latest(workflow_id)
-            if checkpoint:
-                self.state_manager.set_state(workflow_id, checkpoint.state)
-                return {
-                    "recovered": True,
-                    "checkpoint_id": checkpoint.id,
-                    "step_id": checkpoint.step_id,
-                    "state": checkpoint.state,
-                }
-
-        return {
-            "recovered": False,
-            "reason": "No checkpoint found",
-        }
-
-    async def execute_with_recovery(
-        self,
-        workflow_id: str,
-        step_id: str,
-        operation: Callable,
-        context: Dict[str, Any],
-    ) -> Any:
-        """Execute operation with automatic recovery."""
-        operation_id = f"{workflow_id}:{step_id}"
-
-        try:
-            self.checkpoint_manager.save_checkpoint(
-                workflow_id, step_id, context
-            )
-
-            result = await operation(context)
-
-            self.checkpoint_manager.save_checkpoint(
-                workflow_id, step_id, {**context, "result": result}
-            )
-
-            self.retry_manager.reset(operation_id)
-
-            return result
-
-        except Exception as error:
-            if self.retry_manager.should_retry(operation_id, error):
-                attempt = self.retry_manager.record_attempt(operation_id)
-                delay = self.retry_manager.get_retry_delay(operation_id)
-
-                import asyncio
-                await asyncio.sleep(delay)
-
-                recovery_handler = self._recovery_handlers.get(step_id)
-                if recovery_handler:
-                    context = await recovery_handler(context, error)
-
-                return await self.execute_with_recovery(
-                    workflow_id, step_id, operation, context
-                )
-
-            return await self.failover_handler.handle_failure(error, context)
+class ExecutionResult:
+    """Result of recovery execution."""
+    success: bool
+    result: Any
+    attempts: int
+    total_duration: float
+    errors: list[str]
+    recovery_actions_triggered: list[str]
 
 
 class AutomationRecoveryAction:
-    """High-level automation recovery action."""
+    """
+    Recovery orchestration for automation failures.
 
-    def __init__(
-        self,
-        workflow_recovery: Optional[WorkflowRecovery] = None,
-    ):
-        self.workflow_recovery = workflow_recovery or WorkflowRecovery()
+    Example:
+        recovery = AutomationRecoveryAction()
+        recovery.configure(max_attempts=5, base_delay=2.0)
+        result = await recovery.execute_with_recovery(faulty_operation, args)
+    """
 
-    def create_checkpoint(
+    def __init__(self, retry_config: Optional[RetryConfig] = None):
+        """
+        Initialize recovery action.
+
+        Args:
+            retry_config: Retry configuration.
+        """
+        self.retry_config = retry_config or RetryConfig()
+        self._recovery_actions: dict[str, RecoveryAction] = {}
+        self._failure_classifiers: list[Callable[[Exception], FailureType]] = []
+
+    def configure(
         self,
-        workflow_id: str,
-        step_id: str,
-        state: Dict[str, Any],
-    ) -> Checkpoint:
-        """Create a checkpoint."""
-        return self.workflow_recovery.checkpoint_manager.save_checkpoint(
-            workflow_id, step_id, state
+        max_attempts: Optional[int] = None,
+        base_delay: Optional[float] = None,
+        max_delay: Optional[float] = None,
+        exponential_base: Optional[float] = None,
+        jitter: Optional[bool] = None
+    ) -> None:
+        """Update retry configuration."""
+        if max_attempts is not None:
+            self.retry_config.max_attempts = max_attempts
+        if base_delay is not None:
+            self.retry_config.base_delay = base_delay
+        if max_delay is not None:
+            self.retry_config.max_delay = max_delay
+        if exponential_base is not None:
+            self.retry_config.exponential_base = exponential_base
+        if jitter is not None:
+            self.retry_config.jitter = jitter
+
+    def register_recovery_action(
+        self,
+        name: str,
+        action_type: str,
+        func: Callable,
+        timeout: float = 30.0,
+        on_failure: Optional[Callable] = None
+    ) -> RecoveryAction:
+        """
+        Register a recovery action.
+
+        Args:
+            name: Action identifier.
+            action_type: Type of recovery.
+            func: Recovery function.
+            timeout: Action timeout.
+            on_failure: Callback on failure.
+
+        Returns:
+            Created RecoveryAction.
+        """
+        action = RecoveryAction(
+            name=name,
+            action_type=action_type,
+            func=func,
+            timeout=timeout,
+            on_failure=on_failure
         )
 
-    def recover(
+        self._recovery_actions[name] = action
+        logger.debug(f"Registered recovery action: {name}")
+        return action
+
+    def register_failure_classifier(
         self,
-        workflow_id: str,
-    ) -> Dict[str, Any]:
-        """Recover workflow."""
-        import asyncio
-        return asyncio.run(self.workflow_recovery.recover_workflow(workflow_id))
+        classifier: Callable[[Exception], FailureType]
+    ) -> None:
+        """
+        Register a failure classifier.
 
-    def register_recovery_handler(
+        Args:
+            classifier: Function that classifies exception type.
+        """
+        self._failure_classifiers.append(classifier)
+
+    def classify_failure(self, exception: Exception) -> FailureType:
+        """
+        Classify failure type.
+
+        Args:
+            exception: Exception to classify.
+
+        Returns:
+            FailureType classification.
+        """
+        for classifier in self._failure_classifiers:
+            try:
+                result = classifier(exception)
+                if result:
+                    return result
+            except Exception:
+                pass
+
+        if isinstance(exception, asyncio.TimeoutError):
+            return FailureType.TIMEOUT
+
+        if "timeout" in str(exception).lower():
+            return FailureType.TIMEOUT
+
+        if isinstance(exception, (ConnectionError, OSError)):
+            return FailureType.TRANSIENT
+
+        if isinstance(exception, MemoryError, KeyboardInterrupt):
+            return FailureType.PERMANENT
+
+        return FailureType.UNKNOWN
+
+    def calculate_delay(self, attempt: int) -> float:
+        """
+        Calculate retry delay with exponential backoff.
+
+        Args:
+            attempt: Current attempt number (1-indexed).
+
+        Returns:
+            Delay in seconds.
+        """
+        delay = self.retry_config.base_delay * (
+            self.retry_config.exponential_base ** (attempt - 1)
+        )
+
+        delay = min(delay, self.retry_config.max_delay)
+
+        if self.retry_config.jitter:
+            jitter_range = delay * self.retry_config.jitter_factor
+            delay += random.uniform(-jitter_range, jitter_range)
+
+        return max(0.1, delay)
+
+    async def execute_with_recovery(
         self,
-        step_id: str,
-        handler: Callable,
-    ):
-        """Register recovery handler for step."""
-        self.workflow_recovery.register_recovery_handler(step_id, handler)
+        func: Callable[..., T],
+        *args: Any,
+        **kwargs: Any
+    ) -> ExecutionResult:
+        """
+        Execute function with retry and recovery.
 
+        Args:
+            func: Async function to execute.
+            *args: Positional arguments.
+            **kwargs: Keyword arguments.
 
-# Module exports
-__all__ = [
-    "AutomationRecoveryAction",
-    "WorkflowRecovery",
-    "CheckpointManager",
-    "RetryManager",
-    "FailoverHandler",
-    "StateManager",
-    "Checkpoint",
-    "RecoveryAction",
-    "FailoverConfig",
-    "RecoveryState",
-]
+        Returns:
+            ExecutionResult with outcome details.
+        """
+        start_time = time.time()
+        errors = []
+        recovery_triggered = []
+        last_exception: Optional[Exception] = None
+
+        for attempt in range(1, self.retry_config.max_attempts + 1):
+            try:
+                if asyncio.iscoroutinefunction(func):
+                    result = await asyncio.wait_for(
+                        func(*args, **kwargs),
+                        timeout=getattr(self, '_timeout', 300.0)
+                    )
+                else:
+                    result = await asyncio.to_thread(func, *args, **kwargs)
+
+                duration = time.time() - start_time
+
+                return ExecutionResult(
+                    success=True,
+                    result=result,
+                    attempts=attempt,
+                    total_duration=duration,
+                    errors=errors,
+                    recovery_actions_triggered=recovery_triggered
+                )
+
+            except asyncio.TimeoutError as e:
+                last_exception = e
+                failure_type = FailureType.TIMEOUT
+                errors.append(f"Attempt {attempt}: Timeout - {e}")
+
+            except Exception as e:
+                last_exception = e
+                failure_type = self.classify_failure(e)
+                errors.append(f"Attempt {attempt}: {failure_type.value} - {e}")
+
+            if failure_type == FailureType.PERMANENT:
+                logger.error(f"Permanent failure, stopping retries: {e}")
+                break
+
+            if attempt < self.retry_config.max_attempts:
+                delay = self.calculate_delay(attempt)
+                logger.info(f"Retrying in {delay:.2f}s (attempt {attempt + 1}/{self.retry_config.max_attempts})")
+                await asyncio.sleep(delay)
+
+                triggered = await self._run_recovery_actions(failure_type, e)
+                recovery_triggered.extend(triggered)
+
+        duration = time.time() - start_time
+
+        await self._run_failure_handlers(last_exception)
+
+        return ExecutionResult(
+            success=False,
+            result=None,
+            attempts=self.retry_config.max_attempts,
+            total_duration=duration,
+            errors=errors,
+            recovery_actions_triggered=recovery_triggered
+        )
+
+    async def _run_recovery_actions(
+        self,
+        failure_type: FailureType,
+        exception: Exception
+    ) -> list[str]:
+        """Run applicable recovery actions."""
+        triggered = []
+
+        for name, action in self._recovery_actions.items():
+            if action.action_type == failure_type.value or action.action_type == "all":
+                try:
+                    logger.info(f"Running recovery action: {name}")
+
+                    if asyncio.iscoroutinefunction(action.func):
+                        await asyncio.wait_for(action.func(exception), timeout=action.timeout)
+                    else:
+                        action.func(exception)
+
+                    triggered.append(name)
+
+                except Exception as e:
+                    logger.error(f"Recovery action {name} failed: {e}")
+                    if action.on_failure:
+                        try:
+                            action.on_failure(e)
+                        except Exception:
+                            pass
+
+        return triggered
+
+    async def _run_failure_handlers(self, exception: Optional[Exception]) -> None:
+        """Run failure handlers after all retries exhausted."""
+        if not exception:
+            return
+
+        logger.error(f"All retries exhausted. Final error: {exception}")
+
+    def execute_sync_with_recovery(
+        self,
+        func: Callable[..., T],
+        *args: Any,
+        **kwargs: Any
+    ) -> ExecutionResult:
+        """
+        Synchronous version of execute_with_recovery.
+
+        Args:
+            func: Sync function to execute.
+            *args: Positional arguments.
+            **kwargs: Keyword arguments.
+
+        Returns:
+            ExecutionResult.
+        """
+        import threading
+        return asyncio.run(self.execute_with_recovery(func, *args, **kwargs))
+
+    def get_stats(self) -> dict:
+        """Get recovery statistics."""
+        return {
+            "max_attempts": self.retry_config.max_attempts,
+            "base_delay": self.retry_config.base_delay,
+            "registered_actions": len(self._recovery_actions),
+            "failure_classifiers": len(self._failure_classifiers)
+        }
