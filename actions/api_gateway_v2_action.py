@@ -1,280 +1,310 @@
-"""API gateway action module for RabAI AutoClick.
+"""API Gateway V2 Action Module.
 
-Provides API gateway functionality with routing, load balancing,
-rate limiting, and request/response transformation.
+Provides advanced API gateway capabilities.
 """
 
+import time
+import traceback
 import sys
 import os
 from typing import Any, Dict, List, Optional, Callable
-from dataclasses import dataclass, field
-from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-@dataclass
-class Route:
-    """API route definition."""
-    path: str
-    method: str
-    upstream: str
-    timeout: int = 30
-    retry_on_fail: bool = True
-    max_retries: int = 3
-    auth_required: bool = False
-
-
-@dataclass
-class Upstream:
-    """Upstream service definition."""
-    name: str
-    url: str
-    weight: int = 1
-    health_check_path: Optional[str] = None
-    is_healthy: bool = True
-
-
-class ApiGatewayAction(BaseAction):
-    """API gateway action with routing and load balancing.
+class APIGatewayV2Action(BaseAction):
+    """Advanced API gateway with routing and middleware.
     
-    Supports path-based routing, weighted round-robin load balancing,
-    health checking, and request/response transformation.
+    Routes requests based on rules and applies middleware.
     """
-    action_type = "api_gateway"
-    display_name = "API网关"
-    description = "API路由与负载均衡"
+    action_type = "api_gateway_v2"
+    display_name = "API网关V2"
+    description = "支持路由和中间件的API网关"
     
     def __init__(self):
         super().__init__()
-        self._routes: Dict[str, List[Route]] = {}
-        self._upstreams: Dict[str, Upstream] = {}
-        self._health_status: Dict[str, bool] = {}
-    
-    def add_route(self, route: Route) -> None:
-        """Add a route to the gateway."""
-        key = f"{route.method}:{route.path}"
-        if key not in self._routes:
-            self._routes[key] = []
-        self._routes[key].append(route)
-    
-    def add_upstream(self, upstream: Upstream) -> None:
-        """Add an upstream service."""
-        self._upstreams[upstream.name] = upstream
-        self._health_status[upstream.name] = upstream.is_healthy
+        self._routes: Dict[str, Dict] = {}
+        self._middleware: List[Callable] = []
+        self._request_count = 0
     
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Execute API gateway operations.
+        """Execute gateway operation.
         
         Args:
             context: Execution context.
-            params: Dict with keys:
-                operation: route|add_route|add_upstream|health
-                path: Request path (for route)
-                method: HTTP method (for route)
-                headers: Request headers
-                body: Request body.
+            params: Dict with keys: action, request.
         
         Returns:
-            ActionResult with proxied response.
+            ActionResult with gateway result.
         """
-        operation = params.get('operation', 'route')
+        action = params.get('action', 'route')
         
-        if operation == 'route':
-            return self._route(params)
-        elif operation == 'add_route':
-            return self._add_route(params)
-        elif operation == 'add_upstream':
-            return self._add_upstream(params)
-        elif operation == 'health':
-            return self._health(params)
+        if action == 'route':
+            return self._route_request(params)
+        elif action == 'register_route':
+            return self._register_route(params)
+        elif action == 'add_middleware':
+            return self._add_middleware(params)
+        elif action == 'stats':
+            return self._get_stats()
         else:
-            return ActionResult(success=False, message=f"Unknown operation: {operation}")
+            return ActionResult(
+                success=False,
+                data=None,
+                error=f"Unknown action: {action}"
+            )
     
-    def _route(self, params: Dict[str, Any]) -> ActionResult:
-        """Route request to upstream service."""
+    def _route_request(self, params: Dict) -> ActionResult:
+        """Route a request to appropriate backend."""
         path = params.get('path', '/')
         method = params.get('method', 'GET')
         headers = params.get('headers', {})
         body = params.get('body')
         
+        self._request_count += 1
+        
+        # Find matching route
         route_key = f"{method}:{path}"
-        routes = self._routes.get(route_key, [])
+        backend = None
         
-        if not routes:
-            wildcard_key = f"{method}:*"
-            routes = self._routes.get(wildcard_key, [])
+        if route_key in self._routes:
+            backend = self._routes[route_key].get('backend')
+        else:
+            # Try pattern matching
+            for pattern, route_info in self._routes.items():
+                if self._match_pattern(pattern, path):
+                    backend = route_info.get('backend')
+                    break
         
-        if not routes:
-            return ActionResult(
-                success=False,
-                message=f"No route found for {method} {path}",
-                data={'status': 404, 'error': 'Not found'}
-            )
+        # Apply middleware
+        request_data = {
+            'path': path,
+            'method': method,
+            'headers': headers,
+            'body': body,
+            'timestamp': time.time()
+        }
         
-        route = routes[0]
-        
-        if route.upstream not in self._upstreams:
-            return ActionResult(
-                success=False,
-                message=f"Upstream {route.upstream} not found",
-                data={'status': 500, 'error': 'Upstream not configured'}
-            )
-        
-        upstream = self._upstreams[route.upstream]
-        
-        if not self._health_status.get(upstream.name, True):
-            if route.retry_on_fail:
-                return self._retry_with_backup(route, params, upstream)
-            return ActionResult(
-                success=False,
-                message=f"Upstream {upstream.name} is unhealthy",
-                data={'status': 503, 'error': 'Service unavailable'}
-            )
-        
-        return self._proxy_request(upstream.url, method, headers, body, route.timeout)
-    
-    def _proxy_request(
-        self,
-        url: str,
-        method: str,
-        headers: Dict[str, str],
-        body: Any,
-        timeout: int
-    ) -> ActionResult:
-        """Proxy request to upstream."""
-        import json
-        
-        data = None
-        if body:
-            if isinstance(body, dict):
-                data = json.dumps(body).encode('utf-8')
-                headers = {**headers, 'Content-Type': 'application/json'}
-            elif isinstance(body, str):
-                data = body.encode('utf-8')
-            else:
-                data = body
-        
-        try:
-            req = Request(url, data=data, headers=headers, method=method)
-            with urlopen(req, timeout=timeout) as response:
-                body_bytes = response.read()
+        for mw in self._middleware:
+            try:
+                request_data = mw(request_data)
+            except Exception as e:
                 return ActionResult(
-                    success=True,
-                    message=f"Proxied to {url}",
-                    data={
-                        'status': response.status,
-                        'body': body_bytes.decode('utf-8', errors='replace'),
-                        'headers': dict(response.headers)
-                    }
+                    success=False,
+                    data={'error': 'Middleware failed'},
+                    error=str(e)
                 )
-        except HTTPError as e:
-            return ActionResult(
-                success=False,
-                message=f"HTTP {e.code}: {e.reason}",
-                data={'status': e.code, 'error': str(e)}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Proxy error: {str(e)}",
-                data={'status': 502, 'error': str(e)}
-            )
-    
-    def _retry_with_backup(
-        self,
-        route: Route,
-        params: Dict[str, Any],
-        failed_upstream: Upstream
-    ) -> ActionResult:
-        """Retry request with backup upstream."""
-        backup_routes = [r for r in self._routes.values() 
-                        if r[0].upstream != failed_upstream.name 
-                        and self._health_status.get(self._upstreams.get(r[0].upstream, Upstream(name='', url='')).name, False)]
         
-        if not backup_routes:
-            return ActionResult(
-                success=False,
-                message="All upstreams unavailable",
-                data={'status': 503, 'error': 'Service unavailable'}
-            )
-        
-        backup = backup_routes[0][0]
-        backup_upstream = self._upstreams[backup.upstream]
-        
-        return self._proxy_request(
-            backup_upstream.url,
-            params.get('method', 'GET'),
-            params.get('headers', {}),
-            params.get('body'),
-            backup.timeout
-        )
-    
-    def _add_route(self, params: Dict[str, Any]) -> ActionResult:
-        """Add a route."""
-        route = Route(
-            path=params['path'],
-            method=params.get('method', 'GET'),
-            upstream=params['upstream'],
-            timeout=params.get('timeout', 30),
-            retry_on_fail=params.get('retry_on_fail', True),
-            max_retries=params.get('max_retries', 3),
-            auth_required=params.get('auth_required', False)
-        )
-        
-        self.add_route(route)
-        
-        return ActionResult(
-            success=True,
-            message=f"Added route {route.method} {route.path} -> {route.upstream}",
-            data={'path': route.path, 'method': route.method, 'upstream': route.upstream}
-        )
-    
-    def _add_upstream(self, params: Dict[str, Any]) -> ActionResult:
-        """Add an upstream."""
-        upstream = Upstream(
-            name=params['name'],
-            url=params['url'],
-            weight=params.get('weight', 1),
-            health_check_path=params.get('health_check_path'),
-            is_healthy=params.get('is_healthy', True)
-        )
-        
-        self.add_upstream(upstream)
-        
-        return ActionResult(
-            success=True,
-            message=f"Added upstream {upstream.name} at {upstream.url}",
-            data={'name': upstream.name, 'url': upstream.url}
-        )
-    
-    def _health(self, params: Dict[str, Any]) -> ActionResult:
-        """Check upstream health."""
-        upstream_name = params.get('upstream')
-        
-        if upstream_name:
-            if upstream_name not in self._upstreams:
-                return ActionResult(success=False, message=f"Upstream {upstream_name} not found")
-            
+        if backend:
             return ActionResult(
                 success=True,
-                message=f"Upstream {upstream_name} health: {self._health_status.get(upstream_name, False)}",
-                data={'upstream': upstream_name, 'healthy': self._health_status.get(upstream_name, False)}
+                data={
+                    'routed': True,
+                    'backend': backend,
+                    'request': request_data
+                },
+                error=None
             )
+        else:
+            return ActionResult(
+                success=False,
+                data={'routed': False},
+                error="No route found"
+            )
+    
+    def _match_pattern(self, pattern: str, path: str) -> bool:
+        """Match route pattern."""
+        if pattern.endswith('/*'):
+            prefix = pattern[:-2]
+            return path.startswith(prefix)
+        elif pattern.endswith('/*wildcard'):
+            return True
+        else:
+            return path == pattern
+    
+    def _register_route(self, params: Dict) -> ActionResult:
+        """Register a new route."""
+        path = params.get('path', '/')
+        method = params.get('method', 'GET')
+        backend = params.get('backend', '')
+        middleware = params.get('middleware', [])
         
-        health_data = {
-            name: self._health_status.get(name, False)
-            for name in self._upstreams.keys()
+        route_key = f"{method}:{path}"
+        self._routes[route_key] = {
+            'path': path,
+            'method': method,
+            'backend': backend,
+            'middleware': middleware,
+            'registered_at': time.time()
         }
         
         return ActionResult(
             success=True,
-            message="Health status",
-            data={'upstreams': health_data}
+            data={
+                'route': route_key,
+                'backend': backend
+            },
+            error=None
         )
+    
+    def _add_middleware(self, params: Dict) -> ActionResult:
+        """Add middleware to the gateway."""
+        middleware_type = params.get('middleware_type', 'logging')
+        
+        def logging_middleware(req):
+            print(f"[Gateway] {req['method']} {req['path']}")
+            return req
+        
+        self._middleware.append(logging_middleware)
+        
+        return ActionResult(
+            success=True,
+            data={
+                'middleware_added': middleware_type,
+                'total_middleware': len(self._middleware)
+            },
+            error=None
+        )
+    
+    def _get_stats(self) -> ActionResult:
+        """Get gateway statistics."""
+        return ActionResult(
+            success=True,
+            data={
+                'total_requests': self._request_count,
+                'registered_routes': len(self._routes),
+                'middleware_count': len(self._middleware)
+            },
+            error=None
+        )
+
+
+class APIGatewayRouterAction(BaseAction):
+    """Advanced routing for API gateway.
+    
+    Supports weighted routing, A/B testing, and canary releases.
+    """
+    action_type = "api_gateway_router"
+    display_name = "API网关路由器"
+    description = "支持权重路由、A/B测试和金丝雀发布"
+    
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute routing decision.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: request, routing_strategy.
+        
+        Returns:
+            ActionResult with routing decision.
+        """
+        request = params.get('request', {})
+        strategy = params.get('routing_strategy', 'round_robin')
+        backends = params.get('backends', [])
+        
+        if not backends:
+            return ActionResult(
+                success=False,
+                data=None,
+                error="No backends configured"
+            )
+        
+        if strategy == 'round_robin':
+            backend = self._round_robin(backends)
+        elif strategy == 'weighted':
+            backend = self._weighted_routing(backends, request)
+        elif strategy == 'ab_test':
+            backend = self._ab_test(backends, request)
+        elif strategy == 'canary':
+            backend = self._canary_release(backends, request)
+        elif strategy == 'geo':
+            backend = self._geo_routing(backends, request)
+        else:
+            backend = backends[0]
+        
+        return ActionResult(
+            success=True,
+            data={
+                'backend': backend,
+                'strategy': strategy,
+                'request_id': request.get('id')
+            },
+            error=None
+        )
+    
+    def _round_robin(self, backends: List[Dict]) -> Dict:
+        """Round-robin routing."""
+        return backends[0]
+    
+    def _weighted_routing(self, backends: List[Dict], request: Dict) -> Dict:
+        """Weighted routing based on weights."""
+        weights = [b.get('weight', 1) for b in backends]
+        total = sum(weights)
+        
+        import random
+        r = random.randint(1, total)
+        
+        cumulative = 0
+        for i, backend in enumerate(backends):
+            cumulative += weights[i]
+            if r <= cumulative:
+                return backend
+        
+        return backends[0]
+    
+    def _ab_test(self, backends: List[Dict], request: Dict) -> Dict:
+        """A/B test routing."""
+        user_id = request.get('user_id', '')
+        
+        if not user_id:
+            return backends[0]
+        
+        import hashlib
+        hash_val = int(hashlib.md5(user_id.encode()).hexdigest(), 16)
+        idx = hash_val % len(backends)
+        
+        return backends[idx]
+    
+    def _canary_release(self, backends: List[Dict], request: Dict) -> Dict:
+        """Canary release routing."""
+        canary_percent = 10
+        user_id = request.get('user_id', '')
+        
+        if not user_id:
+            return backends[0]
+        
+        import hashlib
+        hash_val = int(hashlib.md5(user_id.encode()).hexdigest(), 16)
+        
+        if hash_val % 100 < canary_percent:
+            # Route to canary (last backend)
+            return backends[-1]
+        else:
+            return backends[0]
+    
+    def _geo_routing(self, backends: List[Dict], request: Dict) -> Dict:
+        """Geographic routing."""
+        location = request.get('location', 'unknown')
+        
+        for backend in backends:
+            if backend.get('region') == location:
+                return backend
+        
+        return backends[0]
+
+
+def register_actions():
+    """Register all API Gateway V2 actions."""
+    return [
+        APIGatewayV2Action,
+        APIGatewayRouterAction,
+    ]

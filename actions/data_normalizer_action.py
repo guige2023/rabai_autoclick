@@ -1,471 +1,413 @@
-"""Data Normalizer Action Module.
+"""
+Data Normalizer Action Module.
 
-Provides data normalization and standardization operations.
+Normalizes and standardizes data from various sources with
+type coercion, format conversion, and structural transformations.
 """
 
 import re
-import math
-import traceback
-import sys
-import os
-from typing import Any, Dict, List, Optional, Union, Callable
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Callable, Optional, TypeVar
+from urllib.parse import urlparse
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+T = TypeVar("T")
 
 
-class DataNormalizerAction(BaseAction):
-    """Normalize data to standard formats.
-    
-    Handles string normalization, date/time normalization, and numeric scaling.
+@dataclass
+class NormalizationRule:
+    """A single normalization rule."""
+
+    name: str
+    apply: Callable[[Any], Any]
+    priority: int = 0
+
+
+@dataclass
+class NormalizationResult:
+    """Result of normalizing a value."""
+
+    success: bool
+    value: Any
+    original_value: Any
+    rules_applied: list[str] = field(default_factory=list)
+    error: Optional[str] = None
+
+
+class DataNormalizer:
     """
-    action_type = "data_normalizer"
-    display_name = "数据标准化"
-    description = "将数据标准化为统一格式"
-    
-    def execute(
+    Multi-purpose data normalization engine.
+
+    Supports string normalization, type coercion, URL cleaning,
+    date parsing, and custom transformation rules.
+    """
+
+    # Common date formats to try
+    DATE_FORMATS = [
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%d-%m-%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M:%S",
+        "%b %d, %Y",
+        "%B %d, %Y",
+        "%Y%m%d",
+        "%Y%m%d%H%M%S",
+    ]
+
+    def __init__(self) -> None:
+        """Initialize the normalizer with built-in rules."""
+        self._rules: list[NormalizationRule] = []
+        self._string_normalizers: list[Callable[[str], str]] = []
+        self._setup_default_rules()
+
+    def _setup_default_rules(self) -> None:
+        """Register default normalization rules."""
+        self.add_string_normalizer(self._lowercase)
+        self.add_string_normalizer(self._strip_whitespace)
+        self.add_string_normalizer(self._collapse_whitespace)
+
+    # String normalizers
+    def _lowercase(self, s: str) -> str:
+        """Convert string to lowercase."""
+        return s.lower()
+
+    def _strip_whitespace(self, s: str) -> str:
+        """Strip leading and trailing whitespace."""
+        return s.strip()
+
+    def _collapse_whitespace(self, s: str) -> str:
+        """Replace multiple whitespace with single space."""
+        return re.sub(r"\s+", " ", s)
+
+    def _remove_special_chars(self, s: str, keep: str = "") -> str:
+        """Remove special characters, optionally keeping specified ones."""
+        pattern = f"[^a-zA-Z0-9{re.escape(keep)}]"
+        return re.sub(pattern, "", s)
+
+    def _normalize_url(self, url: str) -> str:
+        """Normalize a URL."""
+        url = url.strip().lower()
+        parsed = urlparse(url)
+        if not parsed.scheme:
+            url = f"https://{url}"
+            parsed = urlparse(url)
+        netloc = parsed.netloc.lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        path = parsed.path.rstrip("/")
+        if not path:
+            path = "/"
+        return f"{parsed.scheme}://{netloc}{path}"
+
+    def _normalize_email(self, email: str) -> str:
+        """Normalize an email address."""
+        email = email.strip().lower()
+        if "@" in email:
+            local, domain = email.rsplit("@", 1)
+            local = local.lower()
+            domain = domain.lower()
+            return f"{local}@{domain}"
+        return email
+
+    def _normalize_phone(self, phone: str) -> str:
+        """Normalize a phone number to digits only."""
+        return re.sub(r"[^\d+]", "", phone)
+
+    def _normalize_date(self, date_str: str) -> Optional[str]:
+        """Parse and normalize a date string to ISO format."""
+        date_str = date_str.strip()
+        for fmt in self.DATE_FORMATS:
+            try:
+                dt = datetime.strptime(date_str, fmt)
+                return dt.strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        return None
+
+    def _coerce_number(self, value: Any) -> float:
+        """Coerce a value to a number."""
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            cleaned = re.sub(r"[^\d.\-]", "", value)
+            try:
+                return float(cleaned)
+            except ValueError:
+                return 0.0
+        return 0.0
+
+    def _coerce_boolean(self, value: Any) -> bool:
+        """Coerce a value to boolean."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ("true", "1", "yes", "on", "enabled")
+        return bool(value)
+
+    def _coerce_string(self, value: Any) -> str:
+        """Coerce a value to string."""
+        if isinstance(value, (int, float)):
+            return str(value)
+        if value is None:
+            return ""
+        return str(value)
+
+    def _normalize_json_keys(self, obj: Any) -> Any:
+        """Normalize all dictionary keys to snake_case."""
+        if isinstance(obj, dict):
+            return {
+                re.sub(r"(?<!^)(?=[A-Z])", "_", str(k)).lower(): self._normalize_json_keys(v)
+                for k, v in obj.items()
+            }
+        if isinstance(obj, list):
+            return [self._normalize_json_keys(item) for item in obj]
+        return obj
+
+    # Public API
+    def add_string_normalizer(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute normalization.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: data, normalization_type, options.
-        
-        Returns:
-            ActionResult with normalized data.
+        normalizer: Callable[[str], str],
+        priority: int = 0,
+    ) -> None:
+        """Add a string normalization function."""
+        rule = NormalizationRule(
+            name=normalizer.__name__,
+            apply=normalizer,
+            priority=priority,
+        )
+        self._rules.append(rule)
+        self._rules.sort(key=lambda r: r.priority)
+
+    def normalize_string(
+        self,
+        value: str,
+        rules: Optional[list[str]] = None,
+    ) -> NormalizationResult:
         """
-        data = params.get('data', [])
-        norm_type = params.get('normalization_type', 'minmax')
-        options = params.get('options', {})
-        
-        if not data:
-            return ActionResult(
-                success=False,
-                data=None,
-                error="No data to normalize"
-            )
-        
+        Normalize a string value.
+
+        Args:
+            value: String to normalize.
+            rules: Optional list of specific rule names to apply.
+
+        Returns:
+            NormalizationResult with transformed value.
+        """
+        original = value
+        applied = []
+
+        for rule in self._rules:
+            if rules and rule.name not in rules:
+                continue
+            try:
+                value = rule.apply(value)
+                applied.append(rule.name)
+            except Exception as e:
+                return NormalizationResult(
+                    success=False,
+                    value=original,
+                    original_value=original,
+                    rules_applied=applied,
+                    error=str(e),
+                )
+
+        return NormalizationResult(
+            success=True,
+            value=value,
+            original_value=original,
+            rules_applied=applied,
+        )
+
+    def normalize_url(self, url: str) -> NormalizationResult:
+        """Normalize a URL."""
         try:
-            if isinstance(data, list) and len(data) > 0:
-                if norm_type == 'minmax':
-                    normalized = self._minmax_normalize(data, options)
-                elif norm_type == 'zscore':
-                    normalized = self._zscore_normalize(data, options)
-                elif norm_type == 'robust':
-                    normalized = self._robust_normalize(data, options)
-                elif norm_type == 'decimal':
-                    normalized = self._decimal_normalize(data, options)
-                elif norm_type == 'log':
-                    normalized = self._log_normalize(data, options)
-                else:
-                    return ActionResult(
-                        success=False,
-                        data=None,
-                        error=f"Unknown normalization type: {norm_type}"
-                    )
-            else:
-                normalized = self._normalize_single(data, norm_type, options)
-            
-            return ActionResult(
+            normalized = self._normalize_url(url)
+            return NormalizationResult(
                 success=True,
-                data={
-                    'normalized': normalized,
-                    'type': norm_type
-                },
-                error=None
+                value=normalized,
+                original_value=url,
+                rules_applied=["normalize_url"],
             )
-            
         except Exception as e:
-            return ActionResult(
+            return NormalizationResult(
                 success=False,
-                data=None,
-                error=f"Normalization failed: {str(e)}"
+                value=url,
+                original_value=url,
+                error=str(e),
             )
-    
-    def _minmax_normalize(self, data: List, options: Dict) -> List:
-        """Min-max normalization to [0, 1] range."""
-        min_val = options.get('min', min(data))
-        max_val = options.get('max', max(data))
-        range_val = max_val - min_val
-        
-        if range_val == 0:
-            return [0.5] * len(data)
-        
-        return [(x - min_val) / range_val for x in data]
-    
-    def _zscore_normalize(self, data: List, options: Dict) -> List:
-        """Z-score normalization (standardization)."""
-        mean = sum(data) / len(data)
-        variance = sum((x - mean) ** 2 for x in data) / len(data)
-        stddev = math.sqrt(variance)
-        
-        if stddev == 0:
-            return [0.0] * len(data)
-        
-        return [(x - mean) / stddev for x in data]
-    
-    def _robust_normalize(self, data: List, options: Dict) -> List:
-        """Robust normalization using median and IQR."""
-        sorted_data = sorted(data)
-        n = len(sorted_data)
-        
-        median = sorted_data[n // 2]
-        q1 = sorted_data[n // 4]
-        q3 = sorted_data[3 * n // 4]
-        iqr = q3 - q1
-        
-        if iqr == 0:
-            return [0.0] * len(data)
-        
-        return [(x - median) / iqr for x in data]
-    
-    def _decimal_normalize(self, data: List, options: Dict) -> List:
-        """Decimal scaling normalization."""
-        max_abs = max(abs(x) for x in data)
-        if max_abs == 0:
-            return data
-        
-        # Find appropriate scale
-        scale = 1
-        while max_abs >= 10:
-            max_abs /= 10
-            scale *= 10
-        
-        return [x / scale for x in data]
-    
-    def _log_normalize(self, data: List, options: Dict) -> List:
-        """Log transformation normalization."""
-        min_val = min(data)
-        shift = options.get('shift', 1 - min_val if min_val <= 0 else 0)
-        
-        return [math.log(x + shift) for x in data]
-    
-    def _normalize_single(self, data: Any, norm_type: str, options: Dict) -> Any:
-        """Normalize a single non-list value."""
+
+    def normalize_email(self, email: str) -> NormalizationResult:
+        """Normalize an email address."""
+        try:
+            normalized = self._normalize_email(email)
+            return NormalizationResult(
+                success=True,
+                value=normalized,
+                original_value=email,
+                rules_applied=["normalize_email"],
+            )
+        except Exception as e:
+            return NormalizationResult(
+                success=False,
+                value=email,
+                original_value=email,
+                error=str(e),
+            )
+
+    def normalize_phone(self, phone: str) -> NormalizationResult:
+        """Normalize a phone number."""
+        try:
+            normalized = self._normalize_phone(phone)
+            return NormalizationResult(
+                success=True,
+                value=normalized,
+                original_value=phone,
+                rules_applied=["normalize_phone"],
+            )
+        except Exception as e:
+            return NormalizationResult(
+                success=False,
+                value=phone,
+                original_value=phone,
+                error=str(e),
+            )
+
+    def normalize_date(self, date_str: str) -> NormalizationResult:
+        """Parse and normalize a date string."""
+        try:
+            normalized = self._normalize_date(date_str)
+            if normalized is None:
+                return NormalizationResult(
+                    success=False,
+                    value=date_str,
+                    original_value=date_str,
+                    error="Unable to parse date",
+                )
+            return NormalizationResult(
+                success=True,
+                value=normalized,
+                original_value=date_str,
+                rules_applied=["normalize_date"],
+            )
+        except Exception as e:
+            return NormalizationResult(
+                success=False,
+                value=date_str,
+                original_value=date_str,
+                error=str(e),
+            )
+
+    def coerce_type(
+        self,
+        value: Any,
+        target_type: str,
+    ) -> NormalizationResult:
+        """
+        Coerce a value to a target type.
+
+        Args:
+            value: Value to coerce.
+            target_type: Target type name ("str", "int", "float", "bool").
+
+        Returns:
+            NormalizationResult with coerced value.
+        """
+        original = value
+        type_map = {
+            "str": self._coerce_string,
+            "string": self._coerce_string,
+            "int": lambda v: int(self._coerce_number(v)),
+            "integer": lambda v: int(self._coerce_number(v)),
+            "float": self._coerce_number,
+            "number": self._coerce_number,
+            "bool": self._coerce_boolean,
+            "boolean": self._coerce_boolean,
+        }
+
+        if target_type not in type_map:
+            return NormalizationResult(
+                success=False,
+                value=original,
+                original_value=original,
+                error=f"Unknown target type: {target_type}",
+            )
+
+        try:
+            coerced = type_map[target_type](value)
+            return NormalizationResult(
+                success=True,
+                value=coerced,
+                original_value=original,
+                rules_applied=[f"coerce_{target_type}"],
+            )
+        except Exception as e:
+            return NormalizationResult(
+                success=False,
+                value=original,
+                original_value=original,
+                rules_applied=[f"coerce_{target_type}"],
+                error=str(e),
+            )
+
+    def normalize_structure(
+        self,
+        data: dict[str, Any],
+        key_case: str = "snake",
+    ) -> dict[str, Any]:
+        """
+        Normalize dictionary keys to a consistent case.
+
+        Args:
+            data: Dictionary to normalize.
+            key_case: Target case ("snake", "camel", "lower").
+
+        Returns:
+            Dictionary with normalized keys.
+        """
+        if key_case == "snake":
+            return self._normalize_json_keys(data)
+        if key_case == "camel":
+            result: dict[str, Any] = {}
+            for k, v in data.items():
+                snake = re.sub(r"(?<!^)(?=[A-Z])", "_", str(k)).lower()
+                parts = snake.split("_")
+                if len(parts) > 1:
+                    camel = parts[0] + "".join(p.capitalize() for p in parts[1:])
+                else:
+                    camel = snake
+                result[camel] = v
+            return result
+        if key_case == "lower":
+            return {k.lower(): v for k, v in data.items()}
         return data
 
-
-class StringNormalizerAction(BaseAction):
-    """Normalize string data.
-    
-    Handles case normalization, whitespace, special characters, and encoding.
-    """
-    action_type = "string_normalizer"
-    display_name = "字符串标准化"
-    description = "标准化字符串数据"
-    
-    def execute(
+    def normalize_batch(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute string normalization.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: text, operations.
-        
-        Returns:
-            ActionResult with normalized string.
+        items: list[Any],
+        normalizer: Callable[[Any], NormalizationResult],
+    ) -> list[NormalizationResult]:
         """
-        text = params.get('text', '')
-        operations = params.get('operations', ['trim', 'lowercase'])
-        
-        if not isinstance(text, str):
-            return ActionResult(
-                success=False,
-                data=None,
-                error="Input is not a string"
-            )
-        
-        result = text
-        
-        for op in operations:
-            if op == 'trim':
-                result = result.strip()
-            elif op == 'lowercase':
-                result = result.lower()
-            elif op == 'uppercase':
-                result = result.upper()
-            elif op == 'titlecase':
-                result = result.title()
-            elif op == 'remove_whitespace':
-                result = re.sub(r'\s+', '', result)
-            elif op == 'normalize_whitespace':
-                result = re.sub(r'\s+', ' ', result)
-            elif op == 'remove_special':
-                result = re.sub(r'[^a-zA-Z0-9\s]', '', result)
-            elif op == 'remove_accents':
-                result = self._remove_accents(result)
-            elif op == 'remove_punctuation':
-                result = re.sub(r'[^\w\s]', '', result)
-        
-        return ActionResult(
-            success=True,
-            data={
-                'original': text,
-                'normalized': result,
-                'operations_applied': operations
-            },
-            error=None
-        )
-    
-    def _remove_accents(self, text: str) -> str:
-        """Remove accents from text."""
-        # Simple implementation
-        replacements = {
-            'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ú': 'u',
-            'Á': 'A', 'É': 'E', 'Í': 'I', 'Ó': 'O', 'Ú': 'U'
-        }
-        for char, replacement in replacements.items():
-            text = text.replace(char, replacement)
-        return text
+        Apply a normalizer function to a batch of items.
+
+        Args:
+            items: List of items to normalize.
+            normalizer: Normalizer function to apply.
+
+        Returns:
+            List of NormalizationResult in same order.
+        """
+        return [normalizer(item) for item in items]
 
 
-class DateTimeNormalizerAction(BaseAction):
-    """Normalize date and time data.
-    
-    Handles various date formats and converts to standard representations.
+def create_normalizer() -> DataNormalizer:
     """
-    action_type = "datetime_normalizer"
-    display_name = "日期时间标准化"
-    description = "标准化日期时间数据"
-    
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute datetime normalization.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: datetime_value, input_format, output_format.
-        
-        Returns:
-            ActionResult with normalized datetime.
-        """
-        datetime_value = params.get('datetime_value', '')
-        input_format = params.get('input_format', 'auto')
-        output_format = params.get('output_format', 'iso8601')
-        timezone = params.get('timezone', 'UTC')
-        
-        if not datetime_value:
-            return ActionResult(
-                success=False,
-                data=None,
-                error="No datetime value provided"
-            )
-        
-        try:
-            # Parse datetime
-            parsed = self._parse_datetime(datetime_value, input_format)
-            
-            # Convert to output format
-            normalized = self._format_datetime(parsed, output_format)
-            
-            return ActionResult(
-                success=True,
-                data={
-                    'original': datetime_value,
-                    'normalized': normalized,
-                    'timestamp': parsed.timestamp(),
-                    'output_format': output_format
-                },
-                error=None
-            )
-            
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                data=None,
-                error=f"Datetime normalization failed: {str(e)}"
-            )
-    
-    def _parse_datetime(self, value: str, fmt: str):
-        """Parse datetime string."""
-        import datetime as dt
-        
-        if fmt == 'auto':
-            # Try common formats
-            formats = [
-                '%Y-%m-%d %H:%M:%S',
-                '%Y-%m-%dT%H:%M:%S',
-                '%Y-%m-%d',
-                '%d/%m/%Y',
-                '%m/%d/%Y',
-                '%Y/%m/%d'
-            ]
-            for f in formats:
-                try:
-                    return dt.datetime.strptime(value, f)
-                except ValueError:
-                    continue
-            raise ValueError(f"Could not parse datetime: {value}")
-        else:
-            return dt.datetime.strptime(value, fmt)
-    
-    def _format_datetime(self, dt_obj, fmt: str) -> str:
-        """Format datetime object."""
-        if fmt == 'iso8601':
-            return dt_obj.isoformat()
-        elif fmt == 'unix':
-            return str(int(dt_obj.timestamp()))
-        elif fmt == 'date_only':
-            return dt_obj.strftime('%Y-%m-%d')
-        elif fmt == 'time_only':
-            return dt_obj.strftime('%H:%M:%S')
-        elif fmt == 'readable':
-            return dt_obj.strftime('%Y-%m-%d %H:%M:%S')
-        else:
-            return dt_obj.strftime(fmt)
+    Factory function to create a data normalizer.
 
-
-class DataEncoderAction(BaseAction):
-    """Encode data to various formats.
-    
-    Supports encoding categorical data, text to numbers, and custom encodings.
+    Returns:
+        Configured DataNormalizer instance.
     """
-    action_type = "data_encoder"
-    display_name = "数据编码"
-    description = "将数据编码为各种格式"
-    
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute data encoding.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: data, encoding_type, options.
-        
-        Returns:
-            ActionResult with encoded data.
-        """
-        data = params.get('data', [])
-        encoding_type = params.get('encoding_type', 'label')
-        options = params.get('options', {})
-        
-        if not data:
-            return ActionResult(
-                success=False,
-                data=None,
-                error="No data to encode"
-            )
-        
-        try:
-            if encoding_type == 'label':
-                encoded, mapping = self._label_encode(data, options)
-            elif encoding_type == 'onehot':
-                encoded, mapping = self._onehot_encode(data, options)
-            elif encoding_type == 'ordinal':
-                encoded, mapping = self._ordinal_encode(data, options)
-            elif encoding_type == 'binary':
-                encoded, mapping = self._binary_encode(data, options)
-            elif encoding_type == 'frequency':
-                encoded, mapping = self._frequency_encode(data, options)
-            elif encoding_type == 'target':
-                encoded, mapping = self._target_encode(data, options)
-            else:
-                return ActionResult(
-                    success=False,
-                    data=None,
-                    error=f"Unknown encoding type: {encoding_type}"
-                )
-            
-            return ActionResult(
-                success=True,
-                data={
-                    'encoded': encoded,
-                    'mapping': mapping,
-                    'encoding_type': encoding_type
-                },
-                error=None
-            )
-            
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                data=None,
-                error=f"Encoding failed: {str(e)}"
-            )
-    
-    def _label_encode(self, data: List, options: Dict) -> Tuple[List, Dict]:
-        """Label encoding."""
-        unique_values = list(set(data))
-        mapping = {v: i for i, v in enumerate(unique_values)}
-        encoded = [mapping[v] for v in data]
-        return encoded, mapping
-    
-    def _onehot_encode(self, data: List, options: Dict) -> Tuple[List[List], Dict]:
-        """One-hot encoding."""
-        unique_values = list(set(data))
-        mapping = {v: i for i, v in enumerate(unique_values)}
-        
-        encoded = []
-        for v in data:
-            row = [0] * len(unique_values)
-            row[mapping[v]] = 1
-            encoded.append(row)
-        
-        return encoded, mapping
-    
-    def _ordinal_encode(self, data: List, options: Dict) -> Tuple[List, Dict]:
-        """Ordinal encoding with specified order."""
-        order = options.get('order', sorted(set(data)))
-        mapping = {v: i for i, v in enumerate(order)}
-        encoded = [mapping.get(v, -1) for v in data]
-        return encoded, mapping
-    
-    def _binary_encode(self, data: List, options: Dict) -> Tuple[List[str], Dict]:
-        """Binary encoding."""
-        unique_values = list(set(data))
-        mapping = {v: i for i, v in enumerate(unique_values)}
-        max_val = len(unique_values) - 1
-        bits = max(1, (max_val).bit_length())
-        
-        encoded = [format(mapping[v], f'0{bits}b') for v in data]
-        return encoded, mapping
-    
-    def _frequency_encode(self, data: List, options: Dict) -> Tuple[List, Dict]:
-        """Frequency encoding."""
-        from collections import Counter
-        freq = Counter(data)
-        total = len(data)
-        mapping = {v: freq[v] / total for v in freq}
-        encoded = [mapping[v] for v in data]
-        return encoded, mapping
-    
-    def _target_encode(self, data: List, options: Dict) -> Tuple[List, Dict]:
-        """Target encoding (requires target values)."""
-        target = options.get('target', [])
-        if len(data) != len(target):
-            raise ValueError("Data and target must have same length")
-        
-        # Group by category and compute mean target
-        groups = {}
-        for d, t in zip(data, target):
-            if d not in groups:
-                groups[d] = []
-            groups[d].append(t)
-        
-        mapping = {k: sum(v) / len(v) for k, v in groups.items()}
-        global_mean = sum(target) / len(target)
-        
-        encoded = [mapping.get(v, global_mean) for v in data]
-        return encoded, mapping
-
-
-def register_actions():
-    """Register all Data Normalizer actions."""
-    return [
-        DataNormalizerAction,
-        StringNormalizerAction,
-        DateTimeNormalizerAction,
-        DataEncoderAction,
-    ]
+    return DataNormalizer()
