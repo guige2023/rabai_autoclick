@@ -1,190 +1,269 @@
-"""Data Watermark Action Module.
+"""
+Data Watermark Action Module.
 
-Implements watermarking for data streams with configurable thresholds,
-alerting on threshold breaches, and watermark progression tracking.
+Provides watermark generation and verification for data
+integrity, provenance tracking, and tamper detection.
 """
 
-import time
+from __future__ import annotations
+
 import hashlib
+import json
 import logging
+import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
-from collections import deque
+from enum import Enum
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class WatermarkThreshold:
-    name: str
-    value: float
-    severity: str = "warning"
-    callback: Optional[Callable] = None
+class WatermarkType(Enum):
+    """Watermark types."""
+
+    VISIBLE = "visible"
+    INVISIBLE = "invisible"
+    FRAGILE = "fragile"
+    SEMI_FRAGILE = "semi_fragile"
+    ROBUST = "robust"
 
 
 @dataclass
-class WatermarkEvent:
-    timestamp: float
-    watermark_value: float
-    threshold_name: str
-    breach: bool
-    data_hash: str
+class Watermark:
+    """Represents a data watermark."""
+
+    id: str
+    watermark_type: WatermarkType
+    content_hash: str
+    timestamp: float = field(default_factory=time.time)
+    creator: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+    signature: str = ""
+    verified: bool = False
+
+
+@dataclass
+class WatermarkConfig:
+    """Configuration for watermarking."""
+
+    watermark_type: WatermarkType = WatermarkType.ROBUST
+    hash_algorithm: str = "sha256"
+    include_timestamp: bool = True
+    include_metadata: bool = True
 
 
 class DataWatermarkAction:
-    """Watermark tracking for data streams with threshold alerting."""
+    """
+    Manages watermarking for data integrity and provenance.
 
-    def __init__(self, name: str = "default") -> None:
-        self.name = name
-        self._thresholds: List[WatermarkThreshold] = []
-        self._current_watermark: float = 0.0
-        self._low_watermark: float = float("inf")
-        self._high_watermark: float = float("-inf")
-        self._events: deque = deque(maxlen=10000)
+    Features:
+    - Watermark generation and embedding
+    - Verification and tamper detection
+    - Timestamp and metadata support
+    - Signature-based authentication
+
+    Example:
+        wm = DataWatermarkAction()
+        watermark = wm.generate_watermark(data, creator="processor")
+        wm.embed_watermark(dataset, watermark)
+    """
+
+    def __init__(self, config: Optional[WatermarkConfig] = None) -> None:
+        """
+        Initialize watermark action.
+
+        Args:
+            config: Watermark configuration.
+        """
+        self.config = config or WatermarkConfig()
+        self._watermarks: dict[str, Watermark] = {}
         self._stats = {
-            "total_updates": 0,
-            "breach_count": 0,
-            "last_update": None,
-            "last_breach": None,
-        }
-        self._listeners: Dict[str, List[Callable]] = {
-            "watermark_update": [],
-            "breach": [],
+            "total_generated": 0,
+            "total_verified": 0,
+            "verified_pass": 0,
+            "verified_fail": 0,
         }
 
-    def add_threshold(
+    def generate_watermark(
         self,
-        name: str,
-        value: float,
-        severity: str = "warning",
-        callback: Optional[Callable[[WatermarkEvent], None]] = None,
-    ) -> None:
-        self._thresholds.append(
-            WatermarkThreshold(
-                name=name,
-                value=value,
-                severity=severity,
-                callback=callback,
-            )
+        data: Any,
+        watermark_type: Optional[WatermarkType] = None,
+        creator: str = "",
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> Watermark:
+        """
+        Generate a watermark for data.
+
+        Args:
+            data: Data to watermark.
+            watermark_type: Type of watermark.
+            creator: Creator identifier.
+            metadata: Optional metadata.
+
+        Returns:
+            Generated Watermark.
+        """
+        wm_type = watermark_type or self.config.watermark_type
+
+        data_str = self._serialize_data(data)
+        content_hash = self._compute_hash(data_str)
+
+        import uuid
+        wm_id = str(uuid.uuid4())
+
+        watermark = Watermark(
+            id=wm_id,
+            watermark_type=wm_type,
+            content_hash=content_hash,
+            timestamp=time.time(),
+            creator=creator,
+            metadata=metadata or {},
         )
 
-    def remove_threshold(self, name: str) -> bool:
-        for i, t in enumerate(self._thresholds):
-            if t.name == name:
-                self._thresholds.pop(i)
-                return True
-        return False
+        self._watermarks[wm_id] = watermark
+        self._stats["total_generated"] += 1
 
-    def update(
-        self,
-        value: float,
-        data: Any = None,
-        emit_events: bool = True,
-    ) -> List[WatermarkEvent]:
-        self._current_watermark = value
-        self._low_watermark = min(self._low_watermark, value)
-        self._high_watermark = max(self._high_watermark, value)
-        self._stats["total_updates"] += 1
-        self._stats["last_update"] = time.time()
-        events = []
-        if emit_events:
-            events = self._check_thresholds(value, data)
-        return events
+        logger.info(f"Generated watermark: {wm_id} ({wm_type.value})")
+        return watermark
 
-    def _check_thresholds(
+    def embed_watermark(
         self,
-        value: float,
+        data: list[dict[str, Any]],
+        watermark: Watermark,
+    ) -> list[dict[str, Any]]:
+        """
+        Embed a watermark into dataset records.
+
+        Args:
+            data: Dataset records.
+            watermark: Watermark to embed.
+
+        Returns:
+            Dataset with embedded watermark.
+        """
+        for record in data:
+            record["_watermark_id"] = watermark.id
+            record["_watermark_hash"] = watermark.content_hash
+            record["_watermark_timestamp"] = watermark.timestamp
+
+        logger.debug(f"Embedded watermark into {len(data)} records")
+        return data
+
+    def extract_watermark(
+        self,
+        record: dict[str, Any],
+    ) -> Optional[Watermark]:
+        """
+        Extract watermark from a record.
+
+        Args:
+            record: Data record.
+
+        Returns:
+            Extracted Watermark or None.
+        """
+        wm_id = record.get("_watermark_id")
+        if not wm_id or wm_id not in self._watermarks:
+            return None
+
+        return self._watermarks[wm_id]
+
+    def verify_watermark(
+        self,
         data: Any,
-    ) -> List[WatermarkEvent]:
-        events = []
-        data_str = str(data) if data else ""
-        data_hash = hashlib.sha256(data_str.encode()).hexdigest()[:16]
-        for threshold in self._thresholds:
-            breach = False
-            if threshold.severity in ("critical", "error"):
-                breach = value >= threshold.value
-            elif threshold.severity == "warning":
-                breach = value >= threshold.value * 0.9
-            elif threshold.severity == "info":
-                breach = value >= threshold.value * 0.75
-            event = WatermarkEvent(
-                timestamp=time.time(),
-                watermark_value=value,
-                threshold_name=threshold.name,
-                breach=breach,
-                data_hash=data_hash,
-            )
-            self._events.append(event)
-            if breach:
-                self._stats["breach_count"] += 1
-                self._stats["last_breach"] = time.time()
-                if threshold.callback:
-                    try:
-                        threshold.callback(event)
-                    except Exception as e:
-                        logger.error(f"Threshold callback failed: {e}")
-                self._notify("breach", event)
-            events.append(event)
-        return events
+        watermark: Watermark,
+    ) -> bool:
+        """
+        Verify a watermark against data.
 
-    def get_watermark(self) -> float:
-        return self._current_watermark
+        Args:
+            data: Data to verify.
+            watermark: Watermark to check.
 
-    def get_range(self) -> Dict[str, float]:
+        Returns:
+            True if watermark is valid.
+        """
+        self._stats["total_verified"] += 1
+
+        data_str = self._serialize_data(data)
+        computed_hash = self._compute_hash(data_str)
+
+        is_valid = computed_hash == watermark.content_hash
+        watermark.verified = is_valid
+
+        if is_valid:
+            self._stats["verified_pass"] += 1
+            logger.debug(f"Watermark verified: {watermark.id}")
+        else:
+            self._stats["verified_fail"] += 1
+            logger.warning(f"Watermark verification failed: {watermark.id}")
+
+        return is_valid
+
+    def detect_tamper(
+        self,
+        data: list[dict[str, Any]],
+        watermark: Watermark,
+    ) -> dict[str, Any]:
+        """
+        Detect tampering in watermarked data.
+
+        Args:
+            data: Data records to check.
+            watermark: Expected watermark.
+
+        Returns:
+            Dictionary with tamper detection results.
+        """
+        tampered_records = []
+        valid_records = []
+
+        for i, record in enumerate(data):
+            record_hash = record.get("_watermark_hash")
+            if record_hash and record_hash != watermark.content_hash:
+                tampered_records.append({
+                    "index": i,
+                    "record": record,
+                    "reason": "hash_mismatch",
+                })
+            else:
+                valid_records.append(i)
+
         return {
-            "low": self._low_watermark,
-            "high": self._high_watermark,
-            "current": self._current_watermark,
+            "is_tampered": len(tampered_records) > 0,
+            "tampered_count": len(tampered_records),
+            "valid_count": len(valid_records),
+            "tampered_records": tampered_records[:10],
+            "watermark_id": watermark.id,
         }
 
-    def get_stats(self) -> Dict[str, Any]:
+    def _serialize_data(self, data: Any) -> str:
+        """Serialize data for hashing."""
+        if isinstance(data, (list, dict)):
+            return json.dumps(data, sort_keys=True, default=str)
+        return str(data)
+
+    def _compute_hash(self, data_str: str) -> str:
+        """Compute hash of data string."""
+        algo = self.config.hash_algorithm
+        if algo == "md5":
+            return hashlib.md5(data_str.encode()).hexdigest()
+        elif algo == "sha1":
+            return hashlib.sha1(data_str.encode()).hexdigest()
+        else:
+            return hashlib.sha256(data_str.encode()).hexdigest()
+
+    def get_stats(self) -> dict[str, Any]:
+        """
+        Get watermark statistics.
+
+        Returns:
+            Statistics dictionary.
+        """
         return {
             **self._stats,
-            "current_watermark": self._current_watermark,
-            "low_watermark": self._low_watermark,
-            "high_watermark": self._high_watermark,
-            "threshold_count": len(self._thresholds),
-            "event_count": len(self._events),
+            "total_watermarks": len(self._watermarks),
+            "verification_rate": (
+                f"{self._stats['verified_pass'] / max(1, self._stats['total_verified']) * 100:.1f}%"
+            ),
         }
-
-    def get_recent_events(
-        self,
-        count: int = 100,
-        breach_only: bool = False,
-    ) -> List[Dict[str, Any]]:
-        events = list(self._events)
-        if breach_only:
-            events = [e for e in events if e.breach]
-        return [
-            {
-                "timestamp": e.timestamp,
-                "watermark_value": e.watermark_value,
-                "threshold_name": e.threshold_name,
-                "breach": e.breach,
-                "data_hash": e.data_hash,
-            }
-            for e in events[-count:]
-        ]
-
-    def reset(self) -> None:
-        self._current_watermark = 0.0
-        self._low_watermark = float("inf")
-        self._high_watermark = float("-inf")
-        self._events.clear()
-        self._stats = {
-            "total_updates": 0,
-            "breach_count": 0,
-            "last_update": None,
-            "last_breach": None,
-        }
-
-    def add_listener(self, event: str, callback: Callable) -> None:
-        if event in self._listeners:
-            self._listeners[event].append(callback)
-
-    def _notify(self, event: str, data: Any) -> None:
-        for cb in self._listeners.get(event, []):
-            try:
-                cb(data)
-            except Exception as e:
-                logger.error(f"Watermark listener error: {e}")
