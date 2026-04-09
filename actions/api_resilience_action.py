@@ -1,322 +1,420 @@
-"""API resilience action module for RabAI AutoClick.
+"""API Resilience Action with bulkhead, retries, and fault tolerance.
 
-Provides resilience pattern operations:
-- CircuitBreakerAction: Circuit breaker pattern
-- BulkheadAction: Bulkhead isolation pattern
-- TimeoutAction: Timeout handling
-- FallbackAction: Fallback strategies
+This module provides resilience patterns for API clients:
+- Bulkhead isolation (thread/connection pool separation)
+- Automatic timeout management
+- Retry with exponential backoff
+- Fallback mechanisms
+- Health tracking and circuit breaker integration
 """
 
-import sys
-import os
-import time
-import logging
-import threading
-from typing import Any, Dict, List, Optional, Callable
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from enum import Enum
+from __future__ import annotations
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+import asyncio
+import logging
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Awaitable, TypeVar
+import httpx
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar("T")
 
-class CircuitState(Enum):
-    """Circuit breaker states."""
-    CLOSED = "closed"
-    OPEN = "open"
-    HALF_OPEN = "half_open"
+
+class FailureMode(Enum):
+    """How to handle operation failures."""
+
+    FAIL_FAST = "fail_fast"  # Return immediately
+    RETRY = "retry"  # Retry with backoff
+    FALLBACK = "fallback"  # Use fallback value
+    CIRCUIT_BREAKER = "circuit_breaker"  # Use circuit breaker
 
 
 @dataclass
-class CircuitBreaker:
-    """Circuit breaker for fault tolerance."""
-    name: str
+class BulkheadConfig:
+    """Configuration for bulkhead isolation."""
+
+    max_concurrent_calls: int = 10
+    max_queue_size: int = 100
+    timeout: float = 30.0
+
+
+@dataclass
+class RetryConfig:
+    """Configuration for retry behavior."""
+
+    max_attempts: int = 3
+    base_delay: float = 1.0
+    max_delay: float = 60.0
+    exponential_base: float = 2.0
+    retryable_status_codes: list[int] = field(
+        default_factory=lambda: [408, 429, 500, 502, 503, 504]
+    )
+    retryable_exceptions: list[type[Exception]] = field(
+        default_factory=lambda: [httpx.TimeoutException, httpx.NetworkError]
+    )
+
+
+@dataclass
+class CircuitBreakerState:
+    """Circuit breaker state tracking."""
+
     failure_threshold: int = 5
     success_threshold: int = 2
-    timeout: float = 60.0
-    state: CircuitState = CircuitState.CLOSED
+    timeout: float = 30.0
+    state: str = "closed"  # closed, open, half_open
     failure_count: int = 0
     success_count: int = 0
-    last_failure_time: Optional[datetime] = None
-    opened_at: Optional[datetime] = None
+    last_failure_time: float = 0.0
 
-    def call(self, fn: Callable[[], Any], fallback: Optional[Callable[[], Any]] = None) -> Any:
-        if self.state == CircuitState.OPEN:
-            if self._should_attempt_reset():
-                self.state = CircuitState.HALF_OPEN
-            else:
-                if fallback:
-                    return fallback()
-                raise Exception(f"Circuit {self.name} is OPEN")
 
-        try:
-            result = fn()
-            self._on_success()
-            return result
-        except Exception as e:
-            self._on_failure()
-            if fallback:
-                return fallback()
-            raise e
+@dataclass
+class FallbackConfig:
+    """Configuration for fallback behavior."""
 
-    def _should_attempt_reset(self) -> bool:
-        if self.last_failure_time:
-            elapsed = (datetime.now() - self.last_failure_time).total_seconds()
-            return elapsed >= self.timeout
-        return True
+    fallback_value: Any = None
+    fallback_func: Callable[[], Awaitable[T]] | None = None
+    cache_fallback: bool = True
+    cache_ttl: float = 300.0
+    _cached_value: Any = field(default=None, repr=False)
+    _cache_time: float = field(default=0.0, repr=False)
 
-    def _on_success(self) -> None:
-        self.failure_count = 0
-        if self.state == CircuitState.HALF_OPEN:
-            self.success_count += 1
-            if self.success_count >= self.success_threshold:
-                self.state = CircuitState.CLOSED
-                self.success_count = 0
 
-    def _on_failure(self) -> None:
-        self.failure_count += 1
-        self.last_failure_time = datetime.now()
-        if self.failure_count >= self.failure_threshold:
-            self.state = CircuitState.OPEN
-            self.opened_at = datetime.now()
+@dataclass
+class ResilienceMetrics:
+    """Metrics for resilience patterns."""
+
+    total_calls: int = 0
+    successful_calls: int = 0
+    failed_calls: int = 0
+    retried_calls: int = 0
+    fallback_calls: int = 0
+    circuit_open: int = 0
+    bulkhead_rejected: int = 0
+    timeout_calls: int = 0
+    total_retry_attempts: int = 0
 
 
 class Bulkhead:
-    """Bulkhead isolation for resource protection."""
-    
-    def __init__(self, name: str, max_concurrent: int = 10) -> None:
-        self.name = name
-        self.max_concurrent = max_concurrent
-        self._semaphore = threading.Semaphore(max_concurrent)
-        self._active_count = 0
-        self._lock = threading.Lock()
+    """Semaphore-based bulkhead for concurrency control."""
 
-    def execute(self, fn: Callable[[], Any]) -> Any:
-        acquired = self._semaphore.acquire(timeout=5.0)
-        if not acquired:
-            raise Exception(f"Bulkhead {self.name}: max concurrent limit reached")
-        try:
-            with self._lock:
-                self._active_count += 1
-            return fn()
-        finally:
-            with self._lock:
-                self._active_count -= 1
-            self._semaphore.release()
+    def __init__(self, config: BulkheadConfig):
+        """Initialize bulkhead.
 
-    @property
-    def active_count(self) -> int:
-        return self._active_count
+        Args:
+            config: Bulkhead configuration
+        """
+        self.config = config
+        self._semaphore = asyncio.Semaphore(config.max_concurrent_calls)
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=config.max_queue_size)
+        self._active_calls = 0
 
+    async def enter(self) -> bool:
+        """Attempt to enter the bulkhead.
 
-class TimeoutHandler:
-    """Handles timeout for operations."""
-
-    @staticmethod
-    def with_timeout(fn: Callable[[], Any], timeout_seconds: float, default: Any = None) -> Any:
-        result = [Exception("Timeout")]
-        semaphore = threading.Semaphore(0)
-
-        def worker():
+        Returns:
+            True if entry granted, False if rejected
+        """
+        if self._semaphore.locked():
+            # Try to queue
             try:
-                result[0] = fn()
-            except Exception as e:
-                result[0] = e
-            finally:
-                semaphore.release()
+                self._queue.put_nowait(True)
+                return True
+            except asyncio.QueueFull:
+                return False
 
-        thread = threading.Thread(target=worker, daemon=True)
-        thread.start()
+        await self._semaphore.acquire()
+        self._active_calls += 1
+        return True
 
-        acquired = semaphore.acquire(timeout=timeout_seconds)
-        if not acquired:
-            return default if default is not None else TimeoutError(f"Operation timed out after {timeout_seconds}s")
+    async def exit(self) -> None:
+        """Exit the bulkhead."""
+        if not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        else:
+            self._semaphore.release()
+            self._active_calls -= 1
 
-        if isinstance(result[0], Exception):
-            raise result[0]
-        return result[0]
-
-
-@dataclass
-class FallbackStrategy:
-    """Fallback execution strategy."""
-    name: str
-    fallback_fn: Callable[[], Any]
-    trigger_on: str = "exception"
-    max_attempts: int = 1
-
-
-_breakers: Dict[str, CircuitBreaker] = {}
-_bulkheads: Dict[str, Bulkhead] = {}
+    def get_stats(self) -> dict[str, int]:
+        """Get bulkhead statistics."""
+        return {
+            "active_calls": self._active_calls,
+            "queued_calls": self._queue.qsize(),
+            "available": self.config.max_concurrent_calls - self._active_calls,
+        }
 
 
-class CircuitBreakerAction(BaseAction):
-    """Circuit breaker pattern implementation."""
-    action_type = "api_circuit_breaker"
-    display_name = "断路器模式"
-    description = "实现断路器容错模式"
+class CircuitBreaker:
+    """Circuit breaker for fault tolerance."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        operation = params.get("operation", "call")
-        breaker_name = params.get("name", "default")
-        failure_threshold = params.get("failure_threshold", 5)
-        success_threshold = params.get("success_threshold", 2)
-        timeout = params.get("timeout", 60.0)
+    def __init__(self, config: CircuitBreakerState):
+        """Initialize circuit breaker.
 
-        if operation == "create":
-            if breaker_name in _breakers:
-                return ActionResult(success=False, message=f"断路器 {breaker_name} 已存在")
+        Args:
+            config: Circuit breaker configuration
+        """
+        self.config = config
+        self.state = config.state
 
-            breaker = CircuitBreaker(
-                name=breaker_name,
-                failure_threshold=failure_threshold,
-                success_threshold=success_threshold,
-                timeout=timeout
-            )
-            _breakers[breaker_name] = breaker
-            return ActionResult(
-                success=True,
-                message=f"断路器 {breaker_name} 已创建",
-                data={"name": breaker_name, "state": breaker.state.value}
-            )
+    def is_allowed(self) -> bool:
+        """Check if operation is allowed."""
+        if self.state == "closed":
+            return True
 
-        if operation == "status":
-            breaker = _breakers.get(breaker_name)
-            if not breaker:
-                return ActionResult(success=False, message=f"断路器 {breaker_name} 不存在")
+        if self.state == "open":
+            if time.time() - self.config.last_failure_time >= self.config.timeout:
+                self.state = "half_open"
+                self.config.success_count = 0
+                logger.info("Circuit breaker entering half-open state")
+                return True
+            return False
 
-            return ActionResult(
-                success=True,
-                message=f"断路器 {breaker_name}: {breaker.state.value}",
-                data={
-                    "name": breaker.name,
-                    "state": breaker.state.value,
-                    "failure_count": breaker.failure_count,
-                    "success_count": breaker.success_count,
-                    "opened_at": breaker.opened_at.isoformat() if breaker.opened_at else None
-                }
-            )
+        # half_open - allow limited calls
+        return True
 
-        if operation == "reset":
-            breaker = _breakers.get(breaker_name)
-            if not breaker:
-                return ActionResult(success=False, message=f"断路器 {breaker_name} 不存在")
-            breaker.state = CircuitState.CLOSED
-            breaker.failure_count = 0
-            breaker.success_count = 0
-            return ActionResult(success=True, message=f"断路器 {breaker_name} 已重置")
+    def record_success(self) -> None:
+        """Record a successful call."""
+        if self.state == "half_open":
+            self.config.success_count += 1
+            if self.config.success_count >= self.config.success_threshold:
+                self.state = "closed"
+                self.config.failure_count = 0
+                logger.info("Circuit breaker closed")
+        elif self.state == "closed":
+            self.config.failure_count = max(0, self.config.failure_count - 1)
 
-        return ActionResult(success=False, message=f"未知操作: {operation}")
+    def record_failure(self) -> None:
+        """Record a failed call."""
+        self.config.failure_count += 1
+        self.config.last_failure_time = time.time()
+
+        if self.state == "half_open":
+            self.state = "open"
+            logger.warning("Circuit breaker reopened")
+
+        elif self.config.failure_count >= self.config.failure_threshold:
+            self.state = "open"
+            logger.warning(f"Circuit breaker opened after {self.config.failure_count} failures")
 
 
-class BulkheadAction(BaseAction):
-    """Bulkhead isolation pattern implementation."""
-    action_type = "api_bulkhead"
-    display_name = "隔板模式"
-    description = "实现资源隔离的隔板模式"
+class APIResilienceAction:
+    """API resilience wrapper with bulkhead, retry, and circuit breaker."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        operation = params.get("operation", "create")
-        name = params.get("name", "default")
-        max_concurrent = params.get("max_concurrent", 10)
+    def __init__(
+        self,
+        bulkhead: BulkheadConfig | None = None,
+        retry: RetryConfig | None = None,
+        circuit_breaker: CircuitBreakerState | None = None,
+        fallback: FallbackConfig | None = None,
+    ):
+        """Initialize API resilience action.
 
-        if operation == "create":
-            if name in _bulkheads:
-                return ActionResult(success=False, message=f"隔板 {name} 已存在")
+        Args:
+            bulkhead: Bulkhead configuration
+            retry: Retry configuration
+            circuit_breaker: Circuit breaker configuration
+            fallback: Fallback configuration
+        """
+        self.bulkhead = Bulkhead(bulkhead or BulkheadConfig())
+        self.retry_config = retry or RetryConfig()
+        self.circuit_breaker = CircuitBreaker(circuit_breaker or CircuitBreakerState())
+        self.fallback_config = fallback or FallbackConfig()
+        self.metrics = ResilienceMetrics()
 
-            bulkhead = Bulkhead(name=name, max_concurrent=max_concurrent)
-            _bulkheads[name] = bulkhead
-            return ActionResult(
-                success=True,
-                message=f"隔板 {name} 已创建，最大并发: {max_concurrent}",
-                data={"name": name, "max_concurrent": max_concurrent}
-            )
+    async def call(
+        self,
+        func: Callable[..., Awaitable[T]],
+        *args,
+        failure_mode: FailureMode = FailureMode.CIRCUIT_BREAKER,
+        **kwargs,
+    ) -> T | None:
+        """Call a function with resilience patterns.
 
-        if operation == "status":
-            bulkhead = _bulkheads.get(name)
-            if not bulkhead:
-                return ActionResult(success=False, message=f"隔板 {name} 不存在")
+        Args:
+            func: Async function to call
+            *args: Positional arguments for the function
+            failure_mode: How to handle failures
+            **kwargs: Keyword arguments for the function
 
-            return ActionResult(
-                success=True,
-                message=f"隔板 {name}: {bulkhead.active_count}/{bulkhead.max_concurrent}",
-                data={
-                    "name": name,
-                    "active": bulkhead.active_count,
-                    "max": bulkhead.max_concurrent,
-                    "available": bulkhead.max_concurrent - bulkhead.active_count
-                }
-            )
+        Returns:
+            Result of the function call or fallback value
+        """
+        self.metrics.total_calls += 1
 
-        if operation == "list":
-            return ActionResult(
-                success=True,
-                message=f"共 {len(_bulkheads)} 个隔板",
-                data={
-                    "bulkheads": [
-                        {"name": b.name, "active": b.active_count, "max": b.max_concurrent}
-                        for b in _bulkheads.values()
-                    ]
-                }
-            )
+        # Check circuit breaker
+        if failure_mode == FailureMode.CIRCUIT_BREAKER and not self.circuit_breaker.is_allowed():
+            self.metrics.circuit_open += 1
+            return await self._handle_failure(failure_mode)
 
-        return ActionResult(success=False, message=f"未知操作: {operation}")
-
-
-class TimeoutAction(BaseAction):
-    """Timeout handling for operations."""
-    action_type = "api_timeout"
-    display_name = "超时处理"
-    description = "为操作添加超时控制"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        timeout_seconds = params.get("timeout_seconds", 30.0)
-        default_value = params.get("default_value")
-
-        if timeout_seconds <= 0:
-            return ActionResult(success=False, message="timeout_seconds必须大于0")
-
-        def slow_operation():
-            time.sleep(min(timeout_seconds * 0.5, 1.0))
-            return {"result": "completed", "elapsed": 0.5}
+        # Check bulkhead
+        if not await self.bulkhead.enter():
+            self.metrics.bulkhead_rejected += 1
+            logger.warning("Bulkhead rejected call")
+            return await self._handle_failure(failure_mode)
 
         try:
-            result = TimeoutHandler.with_timeout(
-                slow_operation,
-                timeout_seconds,
-                default=default_value
-            )
-            if isinstance(result, Exception):
-                return ActionResult(success=False, message=str(result))
-            return ActionResult(success=True, message="操作完成", data=result)
+            # Execute with retry
+            result = await self._execute_with_retry(func, *args, **kwargs)
+            self.circuit_breaker.record_success()
+            self.metrics.successful_calls += 1
+            return result
+
         except Exception as e:
-            return ActionResult(success=False, message=f"超时处理失败: {e}")
+            self.circuit_breaker.record_failure()
+            self.metrics.failed_calls += 1
+            return await self._handle_failure(failure_mode, e)
+
+        finally:
+            await self.bulkhead.exit()
+
+    async def _execute_with_retry(
+        self,
+        func: Callable[..., Awaitable[T]],
+        *args,
+        **kwargs,
+    ) -> T:
+        """Execute function with retry logic."""
+        last_exception: Exception | None = None
+
+        for attempt in range(self.retry_config.max_attempts):
+            try:
+                result = await asyncio.wait_for(
+                    func(*args, **kwargs),
+                    timeout=self.bulkhead.config.timeout,
+                )
+                if attempt > 0:
+                    self.metrics.retried_calls += 1
+                    self.metrics.total_retry_attempts += attempt
+                return result
+
+            except asyncio.TimeoutError:
+                self.metrics.timeout_calls += 1
+                last_exception = TimeoutError("Operation timed out")
+                logger.warning(f"Timeout on attempt {attempt + 1}")
+
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in self.retry_config.retryable_status_codes:
+                    last_exception = e
+                    logger.warning(f"Retryable status {e.response.status_code} on attempt {attempt + 1}")
+                else:
+                    raise
+
+            except Exception as e:
+                # Check if exception is retryable
+                is_retryable = any(isinstance(e, exc_type) for exc_type in self.retry_config.retryable_exceptions)
+                if is_retryable:
+                    last_exception = e
+                    logger.warning(f"Retryable exception {type(e).__name__} on attempt {attempt + 1}")
+                else:
+                    raise
+
+            # Wait before retry
+            if attempt < self.retry_config.max_attempts - 1:
+                delay = min(
+                    self.retry_config.base_delay * (self.retry_config.exponential_base ** attempt),
+                    self.retry_config.max_delay,
+                )
+                await asyncio.sleep(delay)
+
+        # All retries exhausted
+        if last_exception:
+            raise last_exception
+        raise Exception("Max retries exceeded")
+
+    async def _handle_failure(
+        self,
+        failure_mode: FailureMode,
+        exception: Exception | None = None,
+    ) -> T | None:
+        """Handle a failed call based on failure mode."""
+        if failure_mode == FailureMode.FAIL_FAST:
+            if exception:
+                raise exception
+            raise Exception("Operation failed")
+
+        elif failure_mode == FailureMode.FALLBACK:
+            self.metrics.fallback_calls += 1
+            return await self._get_fallback()
+
+        elif failure_mode == FailureMode.CIRCUIT_BREAKER:
+            self.metrics.fallback_calls += 1
+            return await self._get_fallback()
+
+        return None
+
+    async def _get_fallback(self) -> T | None:
+        """Get fallback value."""
+        if self.fallback_config.fallback_func:
+            # Check cache
+            if self.fallback_config.cache_fallback:
+                cache_age = time.time() - self.fallback_config._cache_time
+                if cache_age < self.fallback_config.cache_ttl:
+                    return self.fallback_config._cached_value
+
+            # Execute fallback function
+            result = await self.fallback_config.fallback_func()
+
+            # Cache result
+            if self.fallback_config.cache_fallback:
+                self.fallback_config._cached_value = result
+                self.fallback_config._cache_time = time.time()
+
+            return result
+
+        return self.fallback_config.fallback_value
+
+    def get_metrics(self) -> dict[str, Any]:
+        """Get resilience metrics."""
+        return {
+            **self.metrics.__dict__,
+            "bulkhead_stats": self.bulkhead.get_stats(),
+            "circuit_breaker_state": self.circuit_breaker.state,
+            "success_rate": (
+                self.metrics.successful_calls / self.metrics.total_calls
+                if self.metrics.total_calls > 0 else 0
+            ),
+        }
 
 
-class FallbackAction(BaseAction):
-    """Fallback strategy execution."""
-    action_type = "api_fallback"
-    display_name = "降级策略"
-    description = "执行降级备用策略"
+async def with_resilience(
+    func: Callable[..., Awaitable[T]],
+    *args,
+    max_retries: int = 3,
+    timeout: float = 30.0,
+    fallback: T | None = None,
+    fallback_func: Callable[[], Awaitable[T]] | None = None,
+    **kwargs,
+) -> T | None:
+    """Convenience function for adding resilience to an API call.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        primary_result = params.get("primary_result")
-        fallback_result = params.get("fallback_result")
-        use_fallback = params.get("use_fallback", False)
+    Args:
+        func: Async function to wrap
+        *args: Positional arguments
+        max_retries: Maximum retry attempts
+        timeout: Request timeout
+        fallback: Static fallback value
+        fallback_func: Async function to call for fallback
+        **kwargs: Keyword arguments
 
-        if use_fallback:
-            return ActionResult(
-                success=True,
-                message="使用降级结果",
-                data={"result": fallback_result, "source": "fallback"}
-            )
+    Returns:
+        Result or fallback value
+    """
+    bulkhead = BulkheadConfig(timeout=timeout)
+    retry = RetryConfig(max_attempts=max_retries)
+    fallback_config = FallbackConfig(
+        fallback_value=fallback,
+        fallback_func=fallback_func,
+    )
 
-        return ActionResult(
-            success=True,
-            message="使用主结果",
-            data={"result": primary_result, "source": "primary"}
-        )
+    action = APIResilienceAction(
+        bulkhead=bulkhead,
+        retry=retry,
+        fallback=fallback_config,
+    )
+
+    return await action.call(func, *args, failure_mode=FailureMode.FALLBACK, **kwargs)
