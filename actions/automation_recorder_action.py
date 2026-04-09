@@ -1,379 +1,268 @@
-"""Automation Recorder Action Module for RabAI AutoClick.
+"""Automation Recorder Action Module.
 
-Records user interactions (clicks, keystrokes, mouse movements)
-as automation sequences that can be replayed later.
+Records and manages automation session recordings with metadata,
+search, categorization, and export capabilities.
 """
 
 import time
 import json
-import uuid
-import sys
-import os
-from typing import Any, Dict, List, Optional
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class AutomationRecorderAction(BaseAction):
-    """Record and playback user interaction sequences.
+@dataclass
+class Recording:
+    recording_id: str
+    name: str
+    created_at: float
+    duration_sec: float
+    action_count: int
+    category: str
+    tags: List[str]
+    file_path: str
+    metadata: Dict[str, Any]
 
-    Captures mouse clicks, keyboard input, and screen coordinates
-    as structured recording sessions that can be saved, loaded,
-    and replayed as automation workflows.
-    """
-    action_type = "automation_recorder"
-    display_name = "操作录制器"
-    description = "录制用户操作并生成可回放的自动化序列"
 
-    _active_recording: Optional[Dict[str, Any]] = None
-    _recordings: Dict[str, Dict[str, Any]] = {}
+@dataclass
+class RecordedAction:
+    index: int
+    timestamp: float
+    relative_time: float
+    action_type: str
+    params: Dict[str, Any]
+    screen_region: Optional[str] = None
+    result: Optional[Any] = None
 
-    def execute(
+
+class AutomationRecorderAction:
+    """Records and manages automation session recordings."""
+
+    def __init__(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute recorder operation.
-
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - operation: str - 'start', 'stop', 'pause', 'resume',
-                               'add_event', 'play', 'save', 'load', 'list'
-                - session_id: str (optional) - recording session ID
-                - name: str (optional) - recording name
-                - event_type: str (optional) - 'click', 'type', 'scroll',
-                             'wait', 'screenshot'
-                - event_data: dict (optional) - event-specific data
-                - speed: float (optional) - playback speed multiplier
-                - loop: bool (optional) - whether to loop playback
-
-        Returns:
-            ActionResult with recording operation result.
-        """
-        start_time = time.time()
-
-        try:
-            operation = params.get('operation', 'start')
-
-            if operation == 'start':
-                return self._start_recording(params, start_time)
-            elif operation == 'stop':
-                return self._stop_recording(start_time)
-            elif operation == 'pause':
-                return self._pause_recording(start_time)
-            elif operation == 'resume':
-                return self._resume_recording(start_time)
-            elif operation == 'add_event':
-                return self._add_event(params, start_time)
-            elif operation == 'play':
-                return self._play_recording(params, start_time)
-            elif operation == 'save':
-                return self._save_recording(params, start_time)
-            elif operation == 'load':
-                return self._load_recording(params, start_time)
-            elif operation == 'list':
-                return self._list_recordings(start_time)
-            else:
-                return ActionResult(
-                    success=False,
-                    message=f"Unknown operation: {operation}",
-                    duration=time.time() - start_time
-                )
-
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Recorder action failed: {str(e)}",
-                data={'error': str(e)},
-                duration=time.time() - start_time
-            )
-
-    def _start_recording(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Start a new recording session."""
-        if self._active_recording is not None:
-            return ActionResult(
-                success=False,
-                message="Recording already in progress",
-                data={'session_id': self._active_recording['session_id']},
-                duration=time.time() - start_time
-            )
-
-        session_id = params.get('session_id', str(uuid.uuid4()))
-        name = params.get('name', f'Recording {session_id[:8]}')
-
-        self._active_recording = {
-            'session_id': session_id,
-            'name': name,
-            'events': [],
-            'started_at': time.time(),
-            'paused_at': None,
-            'total_pause_duration': 0.0,
-            'status': 'recording'
+        storage_dir: str = "/tmp/automation_recordings",
+    ) -> None:
+        self.storage_dir = Path(storage_dir)
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self._recordings: Dict[str, Recording] = {}
+        self._current_recording: Optional[str] = None
+        self._current_actions: List[RecordedAction] = []
+        self._recording_start: float = 0.0
+        self._listeners: Dict[str, List[Callable]] = {
+            "recording_start": [],
+            "recording_stop": [],
+            "action_recorded": [],
         }
+        self._load_index()
 
-        return ActionResult(
-            success=True,
-            message=f"Recording started: {session_id}",
-            data={
-                'session_id': session_id,
-                'name': name,
-                'status': 'recording'
-            },
-            duration=time.time() - start_time
+    def start_recording(
+        self,
+        name: str,
+        category: str = "general",
+        tags: Optional[List[str]] = None,
+    ) -> str:
+        recording_id = f"rec_{int(time.time() * 1000)}"
+        self._current_recording = recording_id
+        self._current_actions = []
+        self._recording_start = time.time()
+        self._notify("recording_start", {"recording_id": recording_id, "name": name})
+        logger.info(f"Started recording {recording_id}: {name}")
+        return recording_id
+
+    def record_action(
+        self,
+        action_type: str,
+        params: Dict[str, Any],
+        result: Optional[Any] = None,
+        screen_region: Optional[str] = None,
+    ) -> None:
+        if not self._current_recording:
+            return
+        relative = time.time() - self._recording_start
+        action = RecordedAction(
+            index=len(self._current_actions),
+            timestamp=time.time(),
+            relative_time=relative,
+            action_type=action_type,
+            params=params,
+            screen_region=screen_region,
+            result=result,
         )
+        self._current_actions.append(action)
+        self._notify("action_recorded", action)
 
-    def _stop_recording(self, start_time: float) -> ActionResult:
-        """Stop the current recording session."""
-        if self._active_recording is None:
-            return ActionResult(
-                success=False,
-                message="No active recording to stop",
-                duration=time.time() - start_time
-            )
-
-        recording = self._active_recording
-        recording['stopped_at'] = time.time()
-        recording['status'] = 'stopped'
-        recording['duration'] = (
-            recording['stopped_at'] - recording['started_at']
-            - recording['total_pause_duration']
+    def stop_recording(
+        self,
+        name: str,
+        category: str = "general",
+        tags: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        if not self._current_recording:
+            return None
+        recording_id = self._current_recording
+        duration = time.time() - self._recording_start
+        file_path = self._save_recording(recording_id, self._current_actions)
+        recording = Recording(
+            recording_id=recording_id,
+            name=name,
+            created_at=self._recording_start,
+            duration_sec=duration,
+            action_count=len(self._current_actions),
+            category=category,
+            tags=tags or [],
+            file_path=str(file_path),
+            metadata=metadata or {},
         )
+        self._recordings[recording_id] = recording
+        self._current_recording = None
+        self._current_actions = []
+        self._save_index()
+        self._notify("recording_stop", recording)
+        logger.info(f"Stopped recording {recording_id}: {name}")
+        return recording_id
 
-        self._recordings[recording['session_id']] = recording
-        self._active_recording = None
-
-        return ActionResult(
-            success=True,
-            message=f"Recording stopped: {recording['session_id']}",
-            data={
-                'session_id': recording['session_id'],
-                'event_count': len(recording['events']),
-                'duration': recording['duration']
-            },
-            duration=time.time() - start_time
-        )
-
-    def _pause_recording(self, start_time: float) -> ActionResult:
-        """Pause the current recording."""
-        if self._active_recording is None:
-            return ActionResult(
-                success=False,
-                message="No active recording to pause",
-                duration=time.time() - start_time
-            )
-
-        if self._active_recording['paused_at'] is not None:
-            return ActionResult(
-                success=False,
-                message="Recording already paused",
-                duration=time.time() - start_time
-            )
-
-        self._active_recording['paused_at'] = time.time()
-        self._active_recording['status'] = 'paused'
-
-        return ActionResult(
-            success=True,
-            message=f"Recording paused",
-            data={'session_id': self._active_recording['session_id']},
-            duration=time.time() - start_time
-        )
-
-    def _resume_recording(self, start_time: float) -> ActionResult:
-        """Resume a paused recording."""
-        if self._active_recording is None:
-            return ActionResult(
-                success=False,
-                message="No active recording to resume",
-                duration=time.time() - start_time
-            )
-
-        if self._active_recording['paused_at'] is None:
-            return ActionResult(
-                success=False,
-                message="Recording is not paused",
-                duration=time.time() - start_time
-            )
-
-        pause_duration = time.time() - self._active_recording['paused_at']
-        self._active_recording['total_pause_duration'] += pause_duration
-        self._active_recording['paused_at'] = None
-        self._active_recording['status'] = 'recording'
-
-        return ActionResult(
-            success=True,
-            message="Recording resumed",
-            data={'session_id': self._active_recording['session_id']},
-            duration=time.time() - start_time
-        )
-
-    def _add_event(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Add an event to the active recording."""
-        if self._active_recording is None:
-            return ActionResult(
-                success=False,
-                message="No active recording",
-                duration=time.time() - start_time
-            )
-
-        if self._active_recording['status'] != 'recording':
-            return ActionResult(
-                success=False,
-                message=f"Cannot add event while recording is {self._active_recording['status']}",
-                duration=time.time() - start_time
-            )
-
-        event_type = params.get('event_type', 'custom')
-        event_data = params.get('event_data', {})
-
-        event = {
-            'event_id': str(uuid.uuid4()),
-            'type': event_type,
-            'data': event_data,
-            'timestamp': time.time(),
-            'seq': len(self._active_recording['events'])
+    def _save_recording(
+        self,
+        recording_id: str,
+        actions: List[RecordedAction],
+    ) -> Path:
+        file_path = self.storage_dir / f"{recording_id}.json"
+        data = {
+            "recording_id": recording_id,
+            "actions": [
+                {
+                    "index": a.index,
+                    "timestamp": a.timestamp,
+                    "relative_time": a.relative_time,
+                    "action_type": a.action_type,
+                    "params": a.params,
+                    "screen_region": a.screen_region,
+                    "result": str(a.result) if a.result else None,
+                }
+                for a in actions
+            ],
         }
+        with open(file_path, "w") as f:
+            json.dump(data, f, indent=2)
+        return file_path
 
-        if 'delay_before' in event_data:
-            event['delay_before'] = event_data['delay_before']
-        if 'description' in event_data:
-            event['description'] = event_data['description']
-
-        self._active_recording['events'].append(event)
-
-        return ActionResult(
-            success=True,
-            message=f"Event added: {event_type}",
-            data={
-                'event_id': event['event_id'],
-                'event_count': len(self._active_recording['events'])
-            },
-            duration=time.time() - start_time
-        )
-
-    def _play_recording(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Playback a recorded session."""
-        session_id = params.get('session_id')
-        speed = params.get('speed', 1.0)
-        loop = params.get('loop', False)
-
-        recording = None
-        if session_id and session_id in self._recordings:
-            recording = self._recordings[session_id]
-        elif self._active_recording:
-            recording = self._active_recording
-        else:
-            return ActionResult(
-                success=False,
-                message="No recording to play",
-                duration=time.time() - start_time
+    def load_recording(self, recording_id: str) -> Optional[List[RecordedAction]]:
+        recording = self._recordings.get(recording_id)
+        if not recording:
+            return None
+        file_path = Path(recording.file_path)
+        if not file_path.exists():
+            return None
+        with open(file_path) as f:
+            data = json.load(f)
+        return [
+            RecordedAction(
+                index=a["index"],
+                timestamp=a["timestamp"],
+                relative_time=a["relative_time"],
+                action_type=a["action_type"],
+                params=a["params"],
+                screen_region=a.get("screen_region"),
+                result=a.get("result"),
             )
-
-        events_played = 0
-        max_iterations = 100 if loop else 1
-        for iteration in range(max_iterations):
-            for event in recording['events']:
-                events_played += 1
-                if speed > 0:
-                    delay = event.get('delay_before', 0) / speed
-                    if delay > 0:
-                        time.sleep(delay)
-
-        return ActionResult(
-            success=True,
-            message=f"Playback completed: {events_played} events",
-            data={
-                'session_id': recording['session_id'],
-                'events_played': events_played,
-                'iterations': max_iterations if loop else 1
-            },
-            duration=time.time() - start_time
-        )
-
-    def _save_recording(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Save recording to disk."""
-        session_id = params.get('session_id')
-        file_path = params.get('file_path', f'/tmp/recording_{session_id}.json')
-
-        recording = None
-        if session_id and session_id in self._recordings:
-            recording = self._recordings[session_id]
-        elif self._active_recording:
-            recording = self._active_recording
-        else:
-            return ActionResult(
-                success=False,
-                message="No recording to save",
-                duration=time.time() - start_time
-            )
-
-        try:
-            with open(file_path, 'w') as f:
-                json.dump(recording, f, indent=2, default=str)
-
-            return ActionResult(
-                success=True,
-                message=f"Recording saved: {file_path}",
-                data={'file_path': file_path, 'session_id': recording['session_id']},
-                duration=time.time() - start_time
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Failed to save recording: {e}",
-                duration=time.time() - start_time
-            )
-
-    def _load_recording(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Load recording from disk."""
-        file_path = params.get('file_path')
-        if not file_path:
-            return ActionResult(
-                success=False,
-                message="file_path is required",
-                duration=time.time() - start_time
-            )
-
-        try:
-            with open(file_path, 'r') as f:
-                recording = json.load(f)
-
-            self._recordings[recording['session_id']] = recording
-
-            return ActionResult(
-                success=True,
-                message=f"Recording loaded: {recording['session_id']}",
-                data={
-                    'session_id': recording['session_id'],
-                    'event_count': len(recording['events'])
-                },
-                duration=time.time() - start_time
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Failed to load recording: {e}",
-                duration=time.time() - start_time
-            )
-
-    def _list_recordings(self, start_time: float) -> ActionResult:
-        """List all saved recordings."""
-        recordings = [
-            {
-                'session_id': sid,
-                'name': r['name'],
-                'event_count': len(r['events']),
-                'status': r['status'],
-                'duration': r.get('duration', 0)
-            }
-            for sid, r in self._recordings.items()
+            for a in data.get("actions", [])
         ]
 
-        return ActionResult(
-            success=True,
-            message=f"Recordings: {len(recordings)}",
-            data={'recordings': recordings, 'count': len(recordings)},
-            duration=time.time() - start_time
-        )
+    def delete_recording(self, recording_id: str) -> bool:
+        recording = self._recordings.pop(recording_id, None)
+        if not recording:
+            return False
+        path = Path(recording.file_path)
+        if path.exists():
+            path.unlink()
+        self._save_index()
+        return True
+
+    def list_recordings(
+        self,
+        category: Optional[str] = None,
+        tag: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        results = []
+        for rec in self._recordings.values():
+            if category and rec.category != category:
+                continue
+            if tag and tag not in rec.tags:
+                continue
+            results.append(
+                {
+                    "recording_id": rec.recording_id,
+                    "name": rec.name,
+                    "created_at": rec.created_at,
+                    "duration_sec": rec.duration_sec,
+                    "action_count": rec.action_count,
+                    "category": rec.category,
+                    "tags": rec.tags,
+                    "metadata": rec.metadata,
+                }
+            )
+        results.sort(key=lambda x: x["created_at"], reverse=True)
+        return results[:limit]
+
+    def export_recording(
+        self,
+        recording_id: str,
+        format: str = "json",
+    ) -> Optional[str]:
+        actions = self.load_recording(recording_id)
+        if not actions:
+            return None
+        if format == "json":
+            return json.dumps(
+                [{"action_type": a.action_type, "params": a.params, "time": a.relative_time} for a in actions],
+                indent=2,
+            )
+        return None
+
+    def add_listener(self, event: str, callback: Callable) -> None:
+        if event in self._listeners:
+            self._listeners[event].append(callback)
+
+    def _notify(self, event: str, data: Any) -> None:
+        for cb in self._listeners.get(event, []):
+            try:
+                cb(data)
+            except Exception as e:
+                logger.error(f"Recorder listener error for {event}: {e}")
+
+    def _load_index(self) -> None:
+        index_path = self.storage_dir / "recordings_index.json"
+        if index_path.exists():
+            try:
+                with open(index_path) as f:
+                    raw = json.load(f)
+                    for item in raw.get("recordings", []):
+                        self._recordings[item["recording_id"]] = Recording(**item)
+            except Exception as e:
+                logger.warning(f"Failed to load recordings index: {e}")
+
+    def _save_index(self) -> None:
+        index_path = self.storage_dir / "recordings_index.json"
+        data = {
+            "recordings": [
+                {
+                    "recording_id": r.recording_id,
+                    "name": r.name,
+                    "created_at": r.created_at,
+                    "duration_sec": r.duration_sec,
+                    "action_count": r.action_count,
+                    "category": r.category,
+                    "tags": r.tags,
+                    "file_path": r.file_path,
+                    "metadata": r.metadata,
+                }
+                for r in self._recordings.values()
+            ]
+        }
+        with open(index_path, "w") as f:
+            json.dump(data, f, indent=2)

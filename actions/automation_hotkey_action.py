@@ -1,292 +1,191 @@
-"""Automation Hotkey Action Module for RabAI AutoClick.
+"""Automation Hotkey Action Module.
 
-Registers and triggers keyboard hotkey combinations for
-quick automation workflow activation.
+Manages global hotkey registration and handling for automation triggers
+with configurable key combinations, scopes, and action bindings.
 """
 
 import time
-import sys
-import os
-from typing import Any, Dict, List, Optional, Set
+import logging
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Set
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class AutomationHotkeyAction(BaseAction):
-    """Register and trigger keyboard hotkey combinations.
+@dataclass
+class HotkeyBinding:
+    hotkey_id: str
+    keys: Set[str]
+    modifiers: Set[str]
+    action_fn: Callable
+    scope: str = "global"
+    enabled: bool = True
+    description: str = ""
+    cooldown_ms: float = 0.0
 
-    Manages global hotkey bindings that can trigger automation
-    sequences from any application. Supports modifier keys,
-    key sequences, and chord combinations.
-    """
-    action_type = "automation_hotkey"
-    display_name = "热键自动化"
-    description = "注册和触发键盘热键组合"
 
-    _registered_hotkeys: Dict[str, Dict[str, Any]] = {}
-    _active_hotkeys: Set[str] = set()
+@dataclass
+class HotkeyEvent:
+    hotkey_id: str
+    keys: Set[str]
+    modifiers: Set[str]
+    timestamp: float
+    trigger_count: int = 1
 
-    MODIFIER_KEYS = {'ctrl', 'control', 'alt', 'shift', 'cmd', 'command', 'super', 'meta'}
-    KEY_ALIASES = {
-        'esc': 'escape',
-        'return': 'enter',
-        'backspace': 'backspace',
-        'delete': 'delete',
-        'tab': 'tab',
-        'space': 'space',
-        'up': 'up',
-        'down': 'down',
-        'left': 'left',
-        'right': 'right',
-    }
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute hotkey operation.
+class AutomationHotkeyAction:
+    """Manages global hotkey bindings for automation triggers."""
 
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - operation: str - 'register', 'unregister', 'trigger', 'list', 'press'
-                - hotkey: str - hotkey string like 'ctrl+shift+a' or 'cmd+option+b'
-                - action_id: str (optional) - action ID to trigger when hotkey fires
-                - description: str (optional) - description of the hotkey
-                - repeat: int (optional) - number of times to press, default 1
+    MODIFIERS: Set[str] = {"ctrl", "alt", "shift", "meta", "cmd", "win", "super"}
 
-        Returns:
-            ActionResult with hotkey registration or trigger result.
-        """
-        start_time = time.time()
-
-        try:
-            operation = params.get('operation', 'trigger')
-            hotkey = params.get('hotkey', '')
-            action_id = params.get('action_id')
-            description = params.get('description', '')
-            repeat = params.get('repeat', 1)
-
-            if operation == 'register':
-                return self._register_hotkey(
-                    hotkey, action_id, description, start_time
-                )
-            elif operation == 'unregister':
-                return self._unregister_hotkey(hotkey, start_time)
-            elif operation == 'trigger':
-                return self._trigger_hotkey(hotkey, repeat, start_time)
-            elif operation == 'list':
-                return self._list_hotkeys(start_time)
-            elif operation == 'press':
-                return self._press_keys(hotkey, repeat, start_time)
-            else:
-                return ActionResult(
-                    success=False,
-                    message=f"Unknown operation: {operation}",
-                    duration=time.time() - start_time
-                )
-
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Hotkey action failed: {str(e)}",
-                data={'error': str(e)},
-                duration=time.time() - start_time
-            )
-
-    def _register_hotkey(
-        self,
-        hotkey: str,
-        action_id: Optional[str],
-        description: str,
-        start_time: float
-    ) -> ActionResult:
-        """Register a hotkey binding."""
-        if not hotkey:
-            return ActionResult(
-                success=False,
-                message="Hotkey string is required",
-                duration=time.time() - start_time
-            )
-
-        parsed = self._parse_hotkey(hotkey)
-        if parsed is None:
-            return ActionResult(
-                success=False,
-                message=f"Invalid hotkey format: {hotkey}",
-                duration=time.time() - start_time
-            )
-
-        self._registered_hotkeys[hotkey.lower()] = {
-            'hotkey': hotkey,
-            'action_id': action_id,
-            'description': description,
-            'modifiers': parsed['modifiers'],
-            'key': parsed['key'],
-            'registered_at': time.time()
+    def __init__(self) -> None:
+        self._bindings: Dict[str, HotkeyBinding] = {}
+        self._last_trigger: Dict[str, float] = {}
+        self._trigger_counts: Dict[str, int] = {}
+        self._listeners: Dict[str, List[Callable]] = {
+            "hotkey_pressed": [],
+            "hotkey_released": [],
+            "cooldown_active": [],
         }
-        self._active_hotkeys.add(hotkey.lower())
+        self._enabled = True
 
-        return ActionResult(
-            success=True,
-            message=f"Hotkey registered: {hotkey}",
-            data={
-                'hotkey': hotkey,
-                'action_id': action_id,
-                'modifiers': parsed['modifiers'],
-                'key': parsed['key']
-            },
-            duration=time.time() - start_time
+    def register(
+        self,
+        hotkey_id: str,
+        keys: List[str],
+        action_fn: Callable,
+        modifiers: Optional[List[str]] = None,
+        scope: str = "global",
+        description: str = "",
+        cooldown_ms: float = 0.0,
+    ) -> bool:
+        if hotkey_id in self._bindings:
+            logger.warning(f"Hotkey {hotkey_id} already registered")
+            return False
+        key_set = set(k.lower() for k in keys)
+        mod_set = set(m.lower() for m in (modifiers or []))
+        binding = HotkeyBinding(
+            hotkey_id=hotkey_id,
+            keys=key_set,
+            modifiers=mod_set,
+            action_fn=action_fn,
+            scope=scope,
+            description=description,
+            cooldown_ms=cooldown_ms,
         )
+        self._bindings[hotkey_id] = binding
+        self._trigger_counts[hotkey_id] = 0
+        logger.info(f"Registered hotkey {hotkey_id}: {mod_set}+{key_set}")
+        return True
 
-    def _unregister_hotkey(self, hotkey: str, start_time: float) -> ActionResult:
-        """Unregister a hotkey binding."""
-        key = hotkey.lower()
-        if key in self._registered_hotkeys:
-            del self._registered_hotkeys[key]
-            self._active_hotkeys.discard(key)
-            return ActionResult(
-                success=True,
-                message=f"Hotkey unregistered: {hotkey}",
-                duration=time.time() - start_time
-            )
-        return ActionResult(
-            success=False,
-            message=f"Hotkey not found: {hotkey}",
-            duration=time.time() - start_time
+    def unregister(self, hotkey_id: str) -> bool:
+        if hotkey_id in self._bindings:
+            del self._bindings[hotkey_id]
+            self._last_trigger.pop(hotkey_id, None)
+            self._trigger_counts.pop(hotkey_id, None)
+            return True
+        return False
+
+    def trigger(
+        self,
+        keys: Set[str],
+        modifiers: Set[str],
+    ) -> Optional[Any]:
+        if not self._enabled:
+            return None
+        binding = self._match_binding(keys, modifiers)
+        if not binding:
+            return None
+        if binding.cooldown_ms > 0:
+            last = self._last_trigger.get(binding.hotkey_id, 0)
+            if time.time() - last < binding.cooldown_ms / 1000.0:
+                self._notify("cooldown_active", binding)
+                return None
+        self._last_trigger[binding.hotkey_id] = time.time()
+        self._trigger_counts[binding.hotkey_id] = self._trigger_counts.get(
+            binding.hotkey_id, 0
+        ) + 1
+        event = HotkeyEvent(
+            hotkey_id=binding.hotkey_id,
+            keys=binding.keys,
+            modifiers=binding.modifiers,
+            timestamp=time.time(),
+            trigger_count=self._trigger_counts[binding.hotkey_id],
         )
-
-    def _trigger_hotkey(self, hotkey: str, repeat: int, start_time: float) -> ActionResult:
-        """Trigger a registered hotkey press sequence."""
-        key = hotkey.lower()
-        if key not in self._registered_hotkeys:
-            return ActionResult(
-                success=False,
-                message=f"Hotkey not registered: {hotkey}",
-                duration=time.time() - start_time
-            )
-
-        hotkey_info = self._registered_hotkeys[key]
-        for i in range(repeat):
-            self._simulate_key_press(
-                hotkey_info['modifiers'],
-                hotkey_info['key']
-            )
-            if i < repeat - 1:
-                time.sleep(0.05)
-
-        return ActionResult(
-            success=True,
-            message=f"Hotkey triggered: {hotkey} x{repeat}",
-            data={'hotkey': hotkey, 'repeat': repeat},
-            duration=time.time() - start_time
-        )
-
-    def _press_keys(self, hotkey: str, repeat: int, start_time: float) -> ActionResult:
-        """Press key combination without requiring registration."""
-        parsed = self._parse_hotkey(hotkey)
-        if parsed is None:
-            return ActionResult(
-                success=False,
-                message=f"Invalid hotkey format: {hotkey}",
-                duration=time.time() - start_time
-            )
-
-        for i in range(repeat):
-            self._simulate_key_press(parsed['modifiers'], parsed['key'])
-            if i < repeat - 1:
-                time.sleep(0.05)
-
-        return ActionResult(
-            success=True,
-            message=f"Keys pressed: {hotkey} x{repeat}",
-            data={'hotkey': hotkey, 'repeat': repeat},
-            duration=time.time() - start_time
-        )
-
-    def _list_hotkeys(self, start_time: float) -> ActionResult:
-        """List all registered hotkeys."""
-        hotkeys = [
-            {
-                'hotkey': info['hotkey'],
-                'action_id': info['action_id'],
-                'description': info['description']
-            }
-            for info in self._registered_hotkeys.values()
-        ]
-        return ActionResult(
-            success=True,
-            message=f"Registered hotkeys: {len(hotkeys)}",
-            data={'hotkeys': hotkeys, 'count': len(hotkeys)},
-            duration=time.time() - start_time
-        )
-
-    def _parse_hotkey(self, hotkey: str) -> Optional[Dict[str, Any]]:
-        """Parse hotkey string into modifiers and key."""
-        parts = [p.strip().lower() for p in hotkey.split('+')]
-        if not parts:
+        self._notify("hotkey_pressed", event)
+        try:
+            result = binding.action_fn(event)
+            return result
+        except Exception as e:
+            logger.error(f"Hotkey action failed for {binding.hotkey_id}: {e}")
             return None
 
-        modifiers = []
-        key = parts[-1]
+    def _match_binding(
+        self,
+        keys: Set[str],
+        modifiers: Set[str],
+    ) -> Optional[HotkeyBinding]:
+        for binding in self._bindings.values():
+            if not binding.enabled:
+                continue
+            if binding.keys != keys:
+                continue
+            if binding.modifiers != modifiers:
+                continue
+            return binding
+        return None
 
-        for part in parts[:-1]:
-            normalized = self.KEY_ALIASES.get(part, part)
-            if normalized in self.MODIFIER_KEYS or part in self.MODIFIER_KEYS:
-                modifiers.append(normalized)
-            else:
-                modifiers.append(normalized)
+    def enable(self, hotkey_id: str) -> bool:
+        binding = self._bindings.get(hotkey_id)
+        if binding:
+            binding.enabled = True
+            return True
+        return False
 
-        return {'modifiers': modifiers, 'key': key}
+    def disable(self, hotkey_id: str) -> bool:
+        binding = self._bindings.get(hotkey_id)
+        if binding:
+            binding.enabled = False
+            return True
+        return False
 
-    def _simulate_key_press(self, modifiers: List[str], key: str) -> None:
-        """Simulate keyboard press using Quartz."""
-        try:
-            import Quartz
-        except ImportError:
-            return
+    def enable_all(self) -> None:
+        self._enabled = True
 
-        key_code = self._get_key_code(key)
-        if key_code is None:
-            return
+    def disable_all(self) -> None:
+        self._enabled = False
 
-        flags = 0
-        for mod in modifiers:
-            if mod in ('ctrl', 'control'):
-                flags |= Quartz.kCGEventFlagMaskControl
-            elif mod in ('alt', 'option'):
-                flags |= Quartz.kCGEventFlagMaskAlternate
-            elif mod in ('shift'):
-                flags |= Quartz.kCGEventFlagMaskShift
-            elif mod in ('cmd', 'command', 'super', 'meta'):
-                flags |= Quartz.kCGEventFlagMaskCommand
+    def list_bindings(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "hotkey_id": b.hotkey_id,
+                "keys": list(b.keys),
+                "modifiers": list(b.modifiers),
+                "scope": b.scope,
+                "description": b.description,
+                "enabled": b.enabled,
+                "cooldown_ms": b.cooldown_ms,
+                "trigger_count": self._trigger_counts.get(b.hotkey_id, 0),
+                "last_trigger": self._last_trigger.get(b.hotkey_id),
+            }
+            for b in self._bindings.values()
+        ]
 
-        key_down = Quartz.CGEventCreateKeyboardEvent(None, key_code, True)
-        key_up = Quartz.CGEventCreateKeyboardEvent(None, key_code, False)
+    def add_listener(self, event: str, callback: Callable) -> None:
+        if event in self._listeners:
+            self._listeners[event].append(callback)
 
-        if key_down:
-            Quartz.CGEventSetFlags(key_down, flags)
-            Quartz.CGEventPost(Quartz.kCGHIDEventTap, key_down)
-        if key_up:
-            Quartz.CGEventSetFlags(key_up, flags)
-            Quartz.CGEventPost(Quartz.kCGHIDEventTap, key_up)
+    def _notify(self, event: str, data: Any) -> None:
+        for cb in self._listeners.get(event, []):
+            try:
+                cb(data)
+            except Exception as e:
+                logger.error(f"Hotkey listener error for {event}: {e}")
 
-    def _get_key_code(self, key: str) -> Optional[int]:
-        """Map key name to Quartz key code."""
-        key_map = {
-            'a': 0, 'b': 11, 'c': 8, 'd': 2, 'e': 14, 'f': 3, 'g': 5,
-            'h': 4, 'i': 34, 'j': 38, 'k': 40, 'l': 37, 'm': 46, 'n': 45,
-            'o': 31, 'p': 35, 'q': 12, 'r': 15, 's': 1, 't': 17, 'u': 32,
-            'v': 9, 'w': 13, 'x': 7, 'y': 16, 'z': 6,
-            '0': 29, '1': 18, '2': 19, '3': 20, '4': 21, '5': 23,
-            '6': 22, '7': 26, '8': 28, '9': 25,
-            'return': 36, 'enter': 36, 'tab': 48, 'space': 49, 'delete': 51,
-            'escape': 53, 'esc': 53,
-            'up': 126, 'down': 125, 'left': 123, 'right': 124,
-            'f1': 122, 'f2': 120, 'f3': 99, 'f4': 118, 'f5': 96,
-            'f6': 97, 'f7': 98, 'f8': 100, 'f9': 101, 'f10': 109,
-            'f11': 103, 'f12': 118,
-        }
-        return key_map.get(key.lower())
+    def reset_stats(self, hotkey_id: Optional[str] = None) -> None:
+        if hotkey_id:
+            self._trigger_counts[hotkey_id] = 0
+            self._last_trigger.pop(hotkey_id, None)
+        else:
+            self._trigger_counts.clear()
+            self._last_trigger.clear()

@@ -1,253 +1,187 @@
-"""
-Data Pipeline Action Module.
+"""Data Pipeline Action Module.
 
-Composable data processing pipeline with stage management,
-error handling, parallel execution, and result aggregation.
+Builds and executes multi-stage data processing pipelines with
+stage composition, parallel branching, and error routing.
 """
 
-import asyncio
-from dataclasses import dataclass, field
-from typing import Any, Callable, Generic, TypeVar, Optional
-from enum import Enum
+import time
 import logging
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
-T = TypeVar("T")
-R = TypeVar("R")
-
-
-class StageStatus(Enum):
-    """Pipeline stage execution status."""
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    SKIPPED = "skipped"
 
 
 @dataclass
-class PipelineStage(Generic[T, R]):
-    """
-    Individual stage in a data pipeline.
-
-    Attributes:
-        name: Unique identifier for the stage.
-        processor: Async function that transforms input to output.
-        error_handler: Optional handler for stage errors.
-        timeout: Optional timeout in seconds.
-        retry_count: Number of retries on failure.
-    """
+class PipelineStage:
+    stage_id: str
     name: str
-    processor: Callable[[T], R]
-    error_handler: Optional[Callable[[Exception, T], R]] = None
-    timeout: Optional[float] = None
+    processor_fn: Callable[[Any], Any]
+    input_field: str = "data"
+    output_field: str = "data"
+    error_handler: Optional[Callable[[Exception, Any], Any]] = None
+    timeout_sec: float = 30.0
+    enabled: bool = True
     retry_count: int = 0
-
-    status: StageStatus = field(default=StageStatus.PENDING, init=False)
-    error: Optional[Exception] = field(default=None, init=False)
+    max_retries: int = 3
 
 
 @dataclass
 class PipelineResult:
-    """
-    Result of pipeline execution.
-
-    Attributes:
-        success: Whether all stages completed successfully.
-        outputs: List of outputs from each stage.
-        errors: Dict mapping stage names to errors.
-        duration: Total execution time in seconds.
-    """
+    stage_id: str
     success: bool
-    outputs: list = field(default_factory=list)
-    errors: dict = field(default_factory=dict)
-    duration: float = 0.0
+    duration_ms: float
+    output: Any = None
+    error: Optional[str] = None
+    attempt: int = 0
+
+
+@dataclass
+class PipelineConfig:
+    stop_on_error: bool = True
+    parallel_stages: bool = False
+    context_sharing: bool = True
 
 
 class DataPipelineAction:
-    """
-    Orchestrates sequential and parallel data processing stages.
+    """Multi-stage data processing pipeline with error handling."""
 
-    Example:
-        pipeline = DataPipelineAction(name="etl_pipeline")
-        pipeline.add_stage("extract", extract_data)
-        pipeline.add_stage("transform", transform_data)
-        pipeline.add_stage("load", load_data)
-        result = await pipeline.execute(input_data)
-    """
-
-    def __init__(self, name: str = "pipeline"):
-        """
-        Initialize data pipeline action.
-
-        Args:
-            name: Pipeline identifier for logging.
-        """
-        self.name = name
-        self.stages: list[PipelineStage] = []
-        self._results: list[Any] = []
+    def __init__(self, config: Optional[PipelineConfig] = None) -> None:
+        self._config = config or PipelineConfig()
+        self._stages: List[PipelineStage] = []
+        self._results: List[PipelineResult] = []
+        self._context: Dict[str, Any] = {}
 
     def add_stage(
         self,
+        stage_id: str,
         name: str,
-        processor: Callable,
-        error_handler: Optional[Callable] = None,
-        timeout: Optional[float] = None,
-        retry_count: int = 0
-    ) -> "DataPipelineAction":
-        """
-        Add a stage to the pipeline.
-
-        Args:
-            name: Unique stage identifier.
-            processor: Async function to process data.
-            error_handler: Optional error handler function.
-            timeout: Optional stage timeout.
-            retry_count: Number of retries on failure.
-
-        Returns:
-            Self for method chaining.
-        """
+        processor_fn: Callable[[Any], Any],
+        input_field: str = "data",
+        output_field: str = "data",
+        error_handler: Optional[Callable[[Exception, Any], Any]] = None,
+        timeout_sec: float = 30.0,
+        max_retries: int = 3,
+        enabled: bool = True,
+    ) -> None:
         stage = PipelineStage(
+            stage_id=stage_id,
             name=name,
-            processor=processor,
+            processor_fn=processor_fn,
+            input_field=input_field,
+            output_field=output_field,
             error_handler=error_handler,
-            timeout=timeout,
-            retry_count=retry_count
+            timeout_sec=timeout_sec,
+            max_retries=max_retries,
+            enabled=enabled,
         )
-        self.stages.append(stage)
-        return self
+        self._stages.append(stage)
 
-    async def execute(self, initial_input: Any) -> PipelineResult:
-        """
-        Execute all pipeline stages sequentially.
+    def remove_stage(self, stage_id: str) -> bool:
+        for i, s in enumerate(self._stages):
+            if s.stage_id == stage_id:
+                self._stages.pop(i)
+                return True
+        return False
 
-        Args:
-            initial_input: Input data for first stage.
-
-        Returns:
-            PipelineResult with outputs and errors.
-        """
-        import time
-        start_time = time.time()
-        current_input = initial_input
-        self._results = []
-
-        for stage in self.stages:
-            stage.status = StageStatus.RUNNING
-            logger.info(f"[{self.name}] Running stage: {stage.name}")
-
-            try:
-                if stage.timeout:
-                    output = await asyncio.wait_for(
-                        stage.processor(current_input),
-                        timeout=stage.timeout
-                    )
-                else:
-                    output = await stage.processor(current_input)
-
-                stage.status = StageStatus.COMPLETED
-                self._results.append(output)
-                current_input = output
-
-            except Exception as e:
-                logger.error(f"[{self.name}] Stage {stage.name} failed: {e}")
-
+    def execute(
+        self,
+        initial_data: Any,
+    ) -> Tuple[bool, Any, List[PipelineResult]]:
+        self._results.clear()
+        if self._config.context_sharing:
+            self._context.clear()
+        data = initial_data
+        for stage in self._stages:
+            if not stage.enabled:
+                continue
+            result = self._execute_stage(stage, data)
+            self._results.append(result)
+            if result.success:
+                data = result.output
+                if self._config.context_sharing:
+                    self._context[stage.stage_id] = result.output
+            else:
+                if self._config.stop_on_error:
+                    return False, data, self._results
                 if stage.error_handler:
                     try:
-                        output = stage.error_handler(e, current_input)
-                        stage.status = StageStatus.COMPLETED
-                        self._results.append(output)
-                        current_input = output
-                        continue
-                    except Exception as handler_error:
-                        logger.error(f"Error handler also failed: {handler_error}")
+                        data = stage.error_handler(Exception(result.error), data)
+                    except Exception as e:
+                        logger.error(f"Error handler failed for {stage.stage_id}: {e}")
+        success = all(r.success for r in self._results)
+        return success, data, self._results
 
-                stage.status = StageStatus.FAILED
-                stage.error = e
-
-                if stage.retry_count > 0:
-                    for attempt in range(stage.retry_count):
-                        try:
-                            await asyncio.sleep(2 ** attempt)
-                            if stage.timeout:
-                                output = await asyncio.wait_for(
-                                    stage.processor(current_input),
-                                    timeout=stage.timeout
-                                )
-                            else:
-                                output = await stage.processor(current_input)
-
-                            stage.status = StageStatus.COMPLETED
-                            self._results.append(output)
-                            current_input = output
-                            break
-                        except Exception as retry_error:
-                            logger.warning(f"Retry {attempt + 1} failed: {retry_error}")
-                            if attempt == stage.retry_count - 1:
-                                stage.error = retry_error
-                else:
-                    break
-
-        duration = time.time() - start_time
-        success = all(s.status == StageStatus.COMPLETED for s in self.stages)
-
-        errors = {s.name: s.error for s in self.stages if s.error}
-
+    def _execute_stage(
+        self,
+        stage: PipelineStage,
+        data: Any,
+    ) -> PipelineResult:
+        start = time.time()
+        input_data = data if stage.input_field == "data" else data.get(stage.input_field, data)
+        for attempt in range(stage.max_retries + 1):
+            try:
+                output = stage.processor_fn(input_data)
+                return PipelineResult(
+                    stage_id=stage.stage_id,
+                    success=True,
+                    duration_ms=(time.time() - start) * 1000,
+                    output=output,
+                    attempt=attempt,
+                )
+            except Exception as e:
+                if attempt < stage.max_retries:
+                    continue
+                return PipelineResult(
+                    stage_id=stage.stage_id,
+                    success=False,
+                    duration_ms=(time.time() - start) * 1000,
+                    output=None,
+                    error=str(e),
+                    attempt=attempt,
+                )
         return PipelineResult(
-            success=success,
-            outputs=self._results,
-            errors=errors,
-            duration=duration
+            stage_id=stage.stage_id,
+            success=False,
+            duration_ms=(time.time() - start) * 1000,
+            output=None,
+            error="Max retries exceeded",
         )
 
-    async def execute_parallel(
-        self,
-        inputs: list[Any],
-        stage_index: int = 0
-    ) -> list[Any]:
-        """
-        Execute a single stage in parallel across multiple inputs.
-
-        Args:
-            inputs: List of inputs for parallel processing.
-            stage_index: Index of stage to execute.
-
-        Returns:
-            List of outputs from parallel execution.
-        """
-        if stage_index >= len(self.stages):
-            raise IndexError(f"Stage index {stage_index} out of range")
-
-        stage = self.stages[stage_index]
-
-        async def process_one(item: Any) -> Any:
-            return await stage.processor(item)
-
-        tasks = [process_one(item) for item in inputs]
-        outputs = await asyncio.gather(*tasks, return_exceptions=True)
-
-        results = []
-        for i, output in enumerate(outputs):
-            if isinstance(output, Exception):
-                logger.error(f"Parallel processing failed for item {i}: {output}")
-                if stage.error_handler:
-                    results.append(stage.error_handler(output, inputs[i]))
-                else:
-                    results.append(None)
-            else:
-                results.append(output)
-
-        return results
-
-    def clear(self) -> None:
-        """Clear all stages and results."""
-        self.stages.clear()
-        self._results.clear()
-
-    def get_stage_status(self, name: str) -> Optional[StageStatus]:
-        """Get status of a specific stage."""
-        for stage in self.stages:
-            if stage.name == name:
-                return stage.status
+    def get_stage_by_id(self, stage_id: str) -> Optional[PipelineStage]:
+        for s in self._stages:
+            if s.stage_id == stage_id:
+                return s
         return None
+
+    def enable_stage(self, stage_id: str) -> bool:
+        stage = self.get_stage_by_id(stage_id)
+        if stage:
+            stage.enabled = True
+            return True
+        return False
+
+    def disable_stage(self, stage_id: str) -> bool:
+        stage = self.get_stage_by_id(stage_id)
+        if stage:
+            stage.enabled = False
+            return True
+        return False
+
+    def get_stats(self) -> Dict[str, Any]:
+        total = len(self._results)
+        successful = sum(1 for r in self._results if r.success)
+        return {
+            "total_stages": len(self._stages),
+            "completed": total,
+            "successful": successful,
+            "failed": total - successful,
+            "success_rate": successful / total if total > 0 else 0,
+            "total_duration_ms": sum(r.duration_ms for r in self._results),
+        }
+
+    def get_context(self) -> Dict[str, Any]:
+        return dict(self._context)
+
+    def get_results(self) -> List[PipelineResult]:
+        return list(self._results)
