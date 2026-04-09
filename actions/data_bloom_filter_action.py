@@ -1,146 +1,357 @@
-"""Data bloom filter action module for RabAI AutoClick.
+"""
+Data Bloom Filter Action Module.
 
-Provides Bloom filter for probabilistic data filtering:
-- BloomFilter: Memory-efficient membership testing
-- ScalableBloomFilter: Automatically scales Bloom filter
-- BloomFilterManager: Manage multiple Bloom filters
+Provides a memory-efficient probabilistic data structure for
+membership testing in data processing pipelines.
 """
 
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
-import time
-import threading
+from typing import Any, Callable, Dict, List, Optional, Set, Union
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import hashlib
 import logging
 import math
-import mmh3
-from dataclasses import dataclass, field
 
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
 @dataclass
-class BloomFilterConfig:
-    """Configuration for Bloom filter."""
-    size: int = 10000
-    false_positive_rate: float = 0.01
-    num_hashes: int = 7
-    bit_array_size: int = 95858
+class BloomFilterStats:
+    """Statistics for a bloom filter."""
+    size_bits: int
+    size_bytes: int
+    item_count: int
+    expected_false_positive_rate: float
+    actual_false_positive_rate: Optional[float] = None
+    hash_functions: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "size_bits": self.size_bits,
+            "size_bytes": self.size_bytes,
+            "item_count": self.item_count,
+            "expected_false_positive_rate": self.expected_false_positive_rate,
+            "actual_false_positive_rate": self.actual_false_positive_rate,
+            "hash_functions": self.hash_functions,
+        }
 
 
-class BloomFilter:
-    """Bloom filter implementation."""
-    
-    def __init__(self, config: Optional[BloomFilterConfig] = None):
-        self.config = config or BloomFilterConfig()
-        self._bits: List[bool] = [False] * self.config.bit_array_size
-        self._lock = threading.RLock()
-        self._count = 0
-        self._stats = {"adds": 0, "lookups": 0, "positives": 0, "probable_negatives": 0}
-    
-    def _get_bit_positions(self, item: str) -> List[int]:
-        """Get bit positions for item."""
-        positions = []
-        for i in range(self.config.num_hashes):
-            pos = mmh3.hash(item, i) % self.config.bit_array_size
-            positions.append(pos)
-        return positions
-    
-    def add(self, item: str) -> bool:
-        """Add item to Bloom filter."""
-        with self._lock:
-            positions = self._get_bit_positions(str(item))
-            for pos in positions:
-                self._bits[pos] = True
-            self._count += 1
-            self._stats["adds"] += 1
-            return True
-    
-    def contains(self, item: str) -> bool:
-        """Check if item might be in set."""
-        with self._lock:
-            self._stats["lookups"] += 1
-            positions = self._get_bit_positions(str(item))
-            for pos in positions:
-                if not self._bits[pos]:
-                    self._stats["probable_negatives"] += 1
-                    return False
-            self._stats["positives"] += 1
-            return True
-    
-    def clear(self):
-        """Clear all items."""
-        with self._lock:
-            self._bits = [False] * self.config.bit_array_size
-            self._count = 0
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get Bloom filter statistics."""
-        with self._lock:
-            fill_rate = sum(self._bits) / len(self._bits) if self._bits else 0
-            return {
-                "count": self._count,
-                "fill_rate": fill_rate,
-                "size": self.config.bit_array_size,
-                **{k: v for k, v in self._stats.items()},
-            }
+class DataBloomFilterAction:
+    """
+    Implements a Bloom Filter for efficient membership testing.
+
+    A Bloom filter is a probabilistic data structure that can
+    test whether an element is possibly in a set or definitely not.
+    It may give false positives but never false negatives.
+
+    Example:
+        >>> bloom = DataBloomFilterAction(expected_items=10000, false_positive_rate=0.01)
+        >>> bloom.add("item1")
+        >>> bloom.contains("item1")
+        True
+        >>> bloom.contains("item2")
+        False
+    """
+
+    def __init__(
+        self,
+        expected_items: int = 10000,
+        false_positive_rate: float = 0.01,
+        custom_hash_func: Optional[Callable[[Any], int]] = None,
+    ):
+        """
+        Initialize the Bloom Filter.
+
+        Args:
+            expected_items: Expected number of items to store.
+            false_positive_rate: Desired false positive probability.
+            custom_hash_func: Optional custom hash function.
+        """
+        self.expected_items = expected_items
+        self.false_positive_rate = false_positive_rate
+        self.custom_hash_func = custom_hash_func
+
+        self._size_bits = self._calculate_size(expected_items, false_positive_rate)
+        self._hash_count = self._calculate_hash_count(self._size_bits, expected_items)
+        self._bit_array: List[bool] = [False] * self._size_bits
+        self._item_count = 0
+
+    @staticmethod
+    def _calculate_size(n: int, p: float) -> int:
+        """Calculate optimal bit array size."""
+        m = -(n * math.log(p)) / (math.log(2) ** 2)
+        return int(math.ceil(m))
+
+    @staticmethod
+    def _calculate_hash_count(m: int, n: int) -> int:
+        """Calculate optimal number of hash functions."""
+        k = (m / n) * math.log(2)
+        return max(1, int(math.ceil(k)))
+
+    def _hash(self, item: Any, seed: int) -> int:
+        """Hash an item with a seed."""
+        if self.custom_hash_func:
+            hash_val = self.custom_hash_func(item)
+        else:
+            item_bytes = str(item).encode("utf-8")
+            hash_val = int(hashlib.sha256(item_bytes + str(seed).encode()).hexdigest(), 16)
+
+        return hash_val % self._size_bits
+
+    def _get_hashes(self, item: Any) -> List[int]:
+        """Get all hash values for an item."""
+        return [self._hash(item, i) for i in range(self._hash_count)]
+
+    def add(self, item: Any) -> None:
+        """
+        Add an item to the filter.
+
+        Args:
+            item: Item to add.
+        """
+        for hash_val in self._get_hashes(item):
+            self._bit_array[hash_val] = True
+        self._item_count += 1
+
+    def add_many(self, items: List[Any]) -> None:
+        """
+        Add multiple items to the filter.
+
+        Args:
+            items: Items to add.
+        """
+        for item in items:
+            self.add(item)
+
+    def contains(self, item: Any) -> bool:
+        """
+        Check if an item might be in the filter.
+
+        Args:
+            item: Item to check.
+
+        Returns:
+            True if possibly present, False if definitely not.
+        """
+        for hash_val in self._get_hashes(item):
+            if not self._bit_array[hash_val]:
+                return False
+        return True
+
+    def might_contain(self, item: Any) -> bool:
+        """Alias for contains()."""
+        return self.contains(item)
+
+    def definitely_not_contains(self, item: Any) -> bool:
+        """
+        Check if an item is definitely not in the filter.
+
+        Args:
+            item: Item to check.
+
+        Returns:
+            True if definitely not present.
+        """
+        return not self.contains(item)
+
+    def get_stats(self) -> BloomFilterStats:
+        """Get filter statistics."""
+        expected_fp = self.false_positive_rate
+
+        return BloomFilterStats(
+            size_bits=self._size_bits,
+            size_bytes=self._size_bits // 8,
+            item_count=self._item_count,
+            expected_false_positive_rate=expected_fp,
+            hash_functions=self._hash_count,
+        )
+
+    def clear(self) -> None:
+        """Clear the filter."""
+        self._bit_array = [False] * self._size_bits
+        self._item_count = 0
+
+    def union(self, other: "DataBloomFilterAction") -> bool:
+        """
+        Perform OR operation with another bloom filter.
+
+        Args:
+            other: Another filter of the same size.
+
+        Returns:
+            True if union succeeded.
+        """
+        if self._size_bits != other._size_bits:
+            logger.error("Cannot union filters of different sizes")
+            return False
+
+        for i in range(self._size_bits):
+            self._bit_array[i] = self._bit_array[i] or other._bit_array[i]
+
+        self._item_count = max(self._item_count, other._item_count)
+        return True
+
+    def intersection(self, other: "DataBloomFilterAction") -> bool:
+        """
+        Perform AND operation with another bloom filter.
+
+        Args:
+            other: Another filter of the same size.
+
+        Returns:
+            True if intersection succeeded.
+        """
+        if self._size_bits != other._size_bits:
+            logger.error("Cannot intersect filters of different sizes")
+            return False
+
+        for i in range(self._size_bits):
+            self._bit_array[i] = self._bit_array[i] and other._bit_array[i]
+
+        return True
+
+    def estimated_count(self) -> int:
+        """Estimate the number of items in the filter."""
+        if self._item_count == 0:
+            return 0
+
+        set_bits = sum(1 for bit in self._bit_array if bit)
+        m = self._size_bits
+        k = self._hash_count
+
+        if set_bits == 0:
+            return 0
+
+        count = math.log(1 - set_bits / m) / (k * math.log(1 - 1 / m))
+        return max(0, int(-count))
+
+    def fill_ratio(self) -> float:
+        """Get the ratio of set bits to total bits."""
+        set_bits = sum(1 for bit in self._bit_array if bit)
+        return set_bits / self._size_bits if self._size_bits > 0 else 0
+
+    def serialize(self) -> bytes:
+        """
+        Serialize the filter to bytes.
+
+        Returns:
+            Serialized filter data.
+        """
+        import json
+
+        data = {
+            "size_bits": self._size_bits,
+            "hash_count": self._hash_count,
+            "expected_items": self.expected_items,
+            "false_positive_rate": self.false_positive_rate,
+            "bit_array": [
+                1 if bit else 0 for bit in self._bit_array
+            ],
+            "item_count": self._item_count,
+        }
+
+        json_str = json.dumps(data)
+        return json_str.encode("utf-8")
+
+    @classmethod
+    def deserialize(cls, data: bytes) -> "DataBloomFilterAction":
+        """
+        Deserialize a filter from bytes.
+
+        Args:
+            data: Serialized filter data.
+
+        Returns:
+            Reconstructed BloomFilterAction.
+        """
+        import json
+
+        parsed = json.loads(data.decode("utf-8"))
+
+        filter_obj = cls(
+            expected_items=parsed["expected_items"],
+            false_positive_rate=parsed["false_positive_rate"],
+        )
+
+        filter_obj._size_bits = parsed["size_bits"]
+        filter_obj._hash_count = parsed["hash_count"]
+        filter_obj._item_count = parsed["item_count"]
+        filter_obj._bit_array = [
+            bool(bit) for bit in parsed["bit_array"]
+        ]
+
+        return filter_obj
 
 
-class DataBloomFilterAction(BaseAction):
-    """Data bloom filter action."""
-    action_type = "data_bloom_filter"
-    display_name = "数据布隆过滤器"
-    description = "概率数据去重与成员检测"
-    
-    def __init__(self):
-        super().__init__()
-        self._filters: Dict[str, BloomFilter] = {}
-        self._lock = threading.Lock()
-    
-    def _get_filter(self, name: str, config: Optional[BloomFilterConfig] = None) -> BloomFilter:
-        """Get or create Bloom filter."""
-        with self._lock:
-            if name not in self._filters:
-                self._filters[name] = BloomFilter(config)
-            return self._filters[name]
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute Bloom filter operation."""
-        try:
-            name = params.get("name", "default")
-            command = params.get("command", "add")
-            
-            config = BloomFilterConfig(
-                size=params.get("size", 10000),
-                false_positive_rate=params.get("false_positive_rate", 0.01),
+class ScalableBloomFilter(DataBloomFilterAction):
+    """
+    A scalable bloom filter that grows as needed.
+
+    Starts with a small filter and adds new segments when
+    the false positive rate gets too high.
+    """
+
+    def __init__(
+        self,
+        initial_items: int = 1000,
+        false_positive_rate: float = 0.01,
+        max_filters: int = 10,
+    ):
+        """
+        Initialize scalable bloom filter.
+
+        Args:
+            initial_items: Initial expected items.
+            false_positive_rate: Target false positive rate.
+            max_filters: Maximum number of filter segments.
+        """
+        super().__init__(initial_items, false_positive_rate)
+        self.max_filters = max_filters
+        self._filters: List[DataBloomFilterAction] = [self]
+        self._current_filter_index = 0
+
+    def add(self, item: Any) -> None:
+        """Add an item to the current filter."""
+        current = self._filters[self._current_filter_index]
+
+        if current.fill_ratio() > 0.5 and len(self._filters) < self.max_filters:
+            new_filter = DataBloomFilterAction(
+                expected_items=current.expected_items * 2,
+                false_positive_rate=current.false_positive_rate,
             )
-            
-            bfilter = self._get_filter(name, config)
-            
-            if command == "add":
-                item = params.get("item")
-                if item:
-                    bfilter.add(str(item))
-                return ActionResult(success=True)
-            
-            elif command == "contains":
-                item = params.get("item")
-                if item:
-                    result = bfilter.contains(str(item))
-                    return ActionResult(success=True, data={"contains": result})
-                return ActionResult(success=False, message="item required")
-            
-            elif command == "stats":
-                stats = bfilter.get_stats()
-                return ActionResult(success=True, data={"stats": stats})
-            
-            elif command == "clear":
-                bfilter.clear()
-                return ActionResult(success=True)
-            
-            return ActionResult(success=False, message=f"Unknown command: {command}")
-            
-        except Exception as e:
-            return ActionResult(success=False, message=f"DataBloomFilterAction error: {str(e)}")
+            self._filters.append(new_filter)
+            self._current_filter_index += 1
+
+        self._filters[self._current_filter_index].add(item)
+
+    def contains(self, item: Any) -> bool:
+        """Check if item might be in any filter."""
+        return any(f.contains(item) for f in self._filters)
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get combined statistics."""
+        total_items = sum(f.item_count for f in self._filters)
+        total_bits = sum(f._size_bits for f in self._filters)
+        total_bytes = total_bits // 8
+
+        return {
+            "filter_count": len(self._filters),
+            "total_items": total_items,
+            "total_size_bits": total_bits,
+            "total_size_bytes": total_bytes,
+            "filters": [f.get_stats().to_dict() for f in self._filters],
+        }
+
+
+def create_bloom_filter(
+    expected_items: int = 10000,
+    false_positive_rate: float = 0.01,
+    **kwargs,
+) -> DataBloomFilterAction:
+    """Factory function to create a DataBloomFilterAction."""
+    return DataBloomFilterAction(
+        expected_items=expected_items,
+        false_positive_rate=false_positive_rate,
+        **kwargs,
+    )

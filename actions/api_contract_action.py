@@ -1,504 +1,488 @@
 """
-API Contract Action Module
+API Contract Action Module.
 
-Provides API contract testing, validation, and specification management.
+Provides API contract validation and testing, ensuring API responses
+conform to expected schemas and contracts.
 """
-from typing import Any, Optional, Callable
+
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
+from datetime import datetime, timezone
+from enum import Enum, auto
+import logging
 import re
-import json
+
+logger = logging.getLogger(__name__)
 
 
-class ContractType(Enum):
-    """API contract type."""
-    OPENAPI = "openapi"
-    SWAGGER = "swagger"
-    GRAPHQL = "graphql"
-    GRPC = "grpc"
-    CUSTOM = "custom"
-
-
-class ViolationSeverity(Enum):
-    """Severity of contract violation."""
-    ERROR = "error"
-    WARNING = "warning"
-    INFO = "info"
+class ContractStatus(Enum):
+    """Status of contract validation."""
+    PASSED = auto()
+    FAILED = auto()
+    SKIPPED = auto()
+    WARNING = auto()
 
 
 @dataclass
-class ContractEndpoint:
-    """An API endpoint in the contract."""
-    path: str
-    method: str
-    summary: str
-    parameters: list[dict] = field(default_factory=list)
-    request_body: Optional[dict] = None
-    responses: dict[str, dict] = field(default_factory=dict)
-    security: list[str] = field(default_factory=list)
-    deprecated: bool = False
-
-
-@dataclass
-class ContractSchema:
-    """Schema definition for contract."""
+class ContractField:
+    """Defines a field in a contract."""
     name: str
-    schema_type: str  # object, array, primitive
-    properties: dict[str, dict] = field(default_factory=list)
-    required: list[str] = field(default_factory=list)
-    description: Optional[str] = None
+    field_type: str
+    required: bool = True
+    nullable: bool = False
+    pattern: Optional[str] = None
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    min_length: Optional[int] = None
+    max_length: Optional[int] = None
+    allowed_values: Optional[Set[Any]] = None
+    custom_validator: Optional[Callable[[Any], bool]] = None
+    description: str = ""
 
+    def validate(self, value: Any) -> Tuple[bool, Optional[str]]:
+        """Validate a value against this field definition."""
+        if value is None:
+            if self.required and not self.nullable:
+                return False, f"Field '{self.name}' is required"
+            return True, None
 
-@dataclass
-class ContractViolation:
-    """A contract violation."""
-    severity: ViolationSeverity
-    endpoint: str
-    method: str
-    rule: str
-    message: str
-    actual_value: Any = None
-    expected_value: Any = None
-    timestamp: datetime = field(default_factory=datetime.now)
+        type_checks = {
+            "string": lambda v: isinstance(v, str),
+            "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+            "number": lambda v: isinstance(v, (int, float)),
+            "boolean": lambda v: isinstance(v, bool),
+            "array": lambda v: isinstance(v, list),
+            "object": lambda v: isinstance(v, dict),
+        }
 
+        if self.field_type in type_checks:
+            if not type_checks[self.field_type](value):
+                return False, f"Field '{self.name}' must be of type {self.field_type}"
 
-@dataclass
-class ContractTestResult:
-    """Result of contract test."""
-    passed: bool
-    violations: list[ContractViolation]
-    tested_endpoints: int
-    coverage_percent: float
-    duration_ms: float
+        if self.pattern:
+            if not isinstance(value, str):
+                return False, f"Field '{self.name}' must be a string for pattern matching"
+            if not re.match(self.pattern, value):
+                return False, f"Field '{self.name}' does not match pattern {self.pattern}"
+
+        if self.min_value is not None:
+            if isinstance(value, (int, float)) and value < self.min_value:
+                return False, f"Field '{self.name}' must be >= {self.min_value}"
+
+        if self.max_value is not None:
+            if isinstance(value, (int, float)) and value > self.max_value:
+                return False, f"Field '{self.name}' must be <= {self.max_value}"
+
+        if self.min_length is not None:
+            if isinstance(value, (str, list)) and len(value) < self.min_length:
+                return False, f"Field '{self.name}' must have length >= {self.min_length}"
+
+        if self.max_length is not None:
+            if isinstance(value, (str, list)) and len(value) > self.max_length:
+                return False, f"Field '{self.name}' must have length <= {self.max_length}"
+
+        if self.allowed_values is not None:
+            if value not in self.allowed_values:
+                return False, f"Field '{self.name}' must be one of {self.allowed_values}"
+
+        if self.custom_validator:
+            try:
+                if not self.custom_validator(value):
+                    return False, f"Field '{self.name}' failed custom validation"
+            except Exception as e:
+                return False, f"Field '{self.name}' custom validation error: {e}"
+
+        return True, None
 
 
 @dataclass
 class ContractDefinition:
-    """Full API contract definition."""
+    """Defines an API contract."""
     name: str
     version: str
-    contract_type: ContractType
-    description: str
-    base_url: str
-    endpoints: dict[str, ContractEndpoint] = field(default_factory=dict)
-    schemas: dict[str, ContractSchema] = field(default_factory=dict)
-    security_schemes: dict[str, dict] = field(default_factory=dict)
-    metadata: dict[str, Any] = field(default_factory=dict)
+    fields: Dict[str, ContractField]
+    required_fields: List[str] = field(default_factory=list)
+    description: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def add_field(self, field: ContractField) -> None:
+        """Add a field to the contract."""
+        self.fields[field.name] = field
+        if field.required:
+            self.required_fields.append(field.name)
+
+
+@dataclass
+class ContractViolation:
+    """Represents a contract violation."""
+    field_name: str
+    expected: str
+    actual: Any
+    message: str
+    severity: str = "error"
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "field": self.field_name,
+            "expected": self.expected,
+            "actual": str(self.actual),
+            "message": self.message,
+            "severity": self.severity,
+        }
+
+
+@dataclass
+class ContractResult:
+    """Result of contract validation."""
+    status: ContractStatus
+    contract_name: str
+    violations: List[ContractViolation] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    validated_at: datetime = field(default_factory=datetime.now)
+    duration_ms: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def passed(self) -> bool:
+        """Check if validation passed."""
+        return self.status == ContractStatus.PASSED
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "status": self.status.name,
+            "contract": self.contract_name,
+            "violation_count": len(self.violations),
+            "warning_count": len(self.warnings),
+            "validated_at": self.validated_at.isoformat(),
+            "duration_ms": self.duration_ms,
+            "violations": [v.to_dict() for v in self.violations],
+            "warnings": self.warnings,
+        }
+
+
+class ContractRegistry:
+    """Registry for API contracts."""
+
+    def __init__(self):
+        """Initialize the contract registry."""
+        self._contracts: Dict[str, ContractDefinition] = {}
+
+    def register(self, contract: ContractDefinition) -> None:
+        """Register a contract."""
+        self._contracts[contract.name] = contract
+        logger.info(f"Registered contract: {contract.name} v{contract.version}")
+
+    def get(self, name: str) -> Optional[ContractDefinition]:
+        """Get a contract by name."""
+        return self._contracts.get(name)
+
+    def list_contracts(self) -> List[str]:
+        """List all registered contract names."""
+        return list(self._contracts.keys())
+
+    def unregister(self, name: str) -> bool:
+        """Unregister a contract."""
+        if name in self._contracts:
+            del self._contracts[name]
+            return True
+        return False
 
 
 class ApiContractAction:
-    """Main API contract action handler."""
-    
+    """
+    Validates API responses against defined contracts.
+
+    This action provides contract-based validation for API responses,
+    ensuring that data conforms to expected schemas and business rules.
+
+    Example:
+        >>> action = ApiContractAction()
+        >>> contract = ContractDefinition(name="user", version="1.0")
+        >>> contract.add_field(ContractField("id", "integer", required=True))
+        >>> action.register(contract)
+        >>> result = action.validate("user", {"id": 123, "name": "Alice"})
+        >>> print(result.passed())
+        True
+    """
+
     def __init__(self):
-        self._contracts: dict[str, ContractDefinition] = {}
-        self._validators: dict[str, Callable] = {}
-        self._contract_stats: dict[str, dict] = {}
-    
-    def register_contract(
-        self,
-        contract: ContractDefinition
-    ) -> "ApiContractAction":
-        """Register an API contract."""
-        self._contracts[contract.name] = contract
-        return self
-    
-    def register_validator(
+        """Initialize the API Contract Action."""
+        self.registry = ContractRegistry()
+        self._validation_cache: Dict[str, ContractResult] = {}
+        self._cache_ttl_seconds: float = 300.0
+
+    def create_contract(
         self,
         name: str,
-        validator: Callable[[dict], bool]
-    ) -> "ApiContractAction":
-        """Register a custom validator function."""
-        self._validators[name] = validator
-        return self
-    
-    async def load_from_openapi(
-        self,
-        name: str,
-        spec: dict
+        version: str,
+        description: str = "",
     ) -> ContractDefinition:
-        """Load contract from OpenAPI specification."""
-        info = spec.get("info", {})
-        servers = spec.get("servers", [{"url": "/"}])
-        
-        endpoints = {}
-        schemas = {}
-        
-        # Parse paths
-        for path, path_item in spec.get("paths", {}).items():
-            for method, operation in path_item.items():
-                if method in ["get", "post", "put", "delete", "patch", "options", "head"]:
-                    endpoint = ContractEndpoint(
-                        path=path,
-                        method=method.upper(),
-                        summary=operation.get("summary", ""),
-                        parameters=operation.get("parameters", []),
-                        request_body=operation.get("requestBody"),
-                        responses=operation.get("responses", {}),
-                        security=operation.get("security", []),
-                        deprecated=operation.get("deprecated", False)
-                    )
-                    
-                    key = f"{method.upper()}:{path}"
-                    endpoints[key] = endpoint
-        
-        # Parse schemas
-        for schema_name, schema_def in spec.get("components", {}).get("schemas", {}).items():
-            schema = ContractSchema(
-                name=schema_name,
-                schema_type=schema_def.get("type", "object"),
-                properties=schema_def.get("properties", {}),
-                required=schema_def.get("required", []),
-                description=schema_def.get("description")
-            )
-            schemas[schema_name] = schema
-        
+        """
+        Create a new contract definition.
+
+        Args:
+            name: Contract name.
+            version: Contract version.
+            description: Optional description.
+
+        Returns:
+            Created ContractDefinition.
+        """
         contract = ContractDefinition(
             name=name,
-            version=info.get("version", "1.0.0"),
-            contract_type=ContractType.OPENAPI,
-            description=info.get("description", ""),
-            base_url=servers[0].get("url", "/") if servers else "/",
-            endpoints=endpoints,
-            schemas=schemas,
-            security_schemes=spec.get("components", {}).get("securitySchemes", {}),
-            metadata={"title": info.get("title")}
+            version=version,
+            fields={},
+            description=description,
         )
-        
-        self._contracts[name] = contract
+        self.registry.register(contract)
         return contract
-    
-    async def validate_request(
+
+    def add_field(
         self,
         contract_name: str,
-        endpoint: str,
-        method: str,
-        request_data: dict[str, Any]
-    ) -> list[ContractViolation]:
+        name: str,
+        field_type: str,
+        required: bool = True,
+        **kwargs,
+    ) -> bool:
         """
-        Validate a request against the contract.
-        
+        Add a field to a contract.
+
         Args:
-            contract_name: Name of registered contract
-            endpoint: API endpoint path
-            method: HTTP method
-            request_data: Request data to validate
-            
+            contract_name: Name of the contract.
+            name: Field name.
+            field_type: Field type.
+            required: Whether field is required.
+            **kwargs: Additional field parameters.
+
         Returns:
-            List of violations found
+            True if added successfully.
         """
-        violations = []
-        
-        if contract_name not in self._contracts:
-            violations.append(ContractViolation(
-                severity=ViolationSeverity.ERROR,
-                endpoint=endpoint,
-                method=method,
-                rule="contract_not_found",
-                message=f"Contract '{contract_name}' not found"
-            ))
-            return violations
-        
-        contract = self._contracts[contract_name]
-        key = f"{method.upper()}:{endpoint}"
-        
-        if key not in contract.endpoints:
-            violations.append(ContractViolation(
-                severity=ViolationSeverity.ERROR,
-                endpoint=endpoint,
-                method=method,
-                rule="endpoint_not_found",
-                message=f"Endpoint '{key}' not defined in contract"
-            ))
-            return violations
-        
-        endpoint_def = contract.endpoints[key]
-        
-        # Check deprecated
-        if endpoint_def.deprecated:
-            violations.append(ContractViolation(
-                severity=ViolationSeverity.WARNING,
-                endpoint=endpoint,
-                method=method,
-                rule="deprecated",
-                message=f"Endpoint '{key}' is deprecated"
-            ))
-        
-        # Validate parameters
-        param_violations = self._validate_parameters(
-            endpoint, method,
-            request_data.get("params", {}),
-            endpoint_def.parameters
-        )
-        violations.extend(param_violations)
-        
-        # Validate request body
-        if endpoint_def.request_body and "body" in request_data:
-            body_violations = self._validate_request_body(
-                endpoint, method,
-                request_data["body"],
-                endpoint_def.request_body,
-                contract
-            )
-            violations.extend(body_violations)
-        
-        return violations
-    
-    def _validate_parameters(
-        self,
-        endpoint: str,
-        method: str,
-        provided_params: dict,
-        expected_params: list[dict]
-    ) -> list[ContractViolation]:
-        """Validate request parameters."""
-        violations = []
-        
-        # Check required parameters
-        for param in expected_params:
-            if param.get("required") and param["name"] not in provided_params:
-                violations.append(ContractViolation(
-                    severity=ViolationSeverity.ERROR,
-                    endpoint=endpoint,
-                    method=method,
-                    rule="missing_required_param",
-                    message=f"Required parameter '{param['name']}' is missing",
-                    expected_value=param["name"]
-                ))
-        
-        # Validate parameter types
-        for param_name, param_value in provided_params.items():
-            expected_param = next(
-                (p for p in expected_params if p["name"] == param_name),
-                None
-            )
-            
-            if expected_param:
-                expected_type = expected_param.get("schema", {}).get("type")
-                if expected_type and not self._check_type(param_value, expected_type):
-                    violations.append(ContractViolation(
-                        severity=ViolationSeverity.ERROR,
-                        endpoint=endpoint,
-                        method=method,
-                        rule="invalid_param_type",
-                        message=f"Parameter '{param_name}' should be {expected_type}",
-                        actual_value=type(param_value).__name__,
-                        expected_value=expected_type
-                    ))
-        
-        return violations
-    
-    def _validate_request_body(
-        self,
-        endpoint: str,
-        method: str,
-        body: Any,
-        body_def: dict,
-        contract: ContractDefinition
-    ) -> list[ContractViolation]:
-        """Validate request body against contract."""
-        violations = []
-        
-        content = body_def.get("content", {})
-        json_content = content.get("application/json", {})
-        schema_ref = json_content.get("schema", {}).get("$ref", "")
-        
-        if schema_ref:
-            schema_name = schema_ref.split("/")[-1]
-            if schema_name in contract.schemas:
-                schema = contract.schemas[schema_name]
-                violations.extend(
-                    self._validate_with_schema(endpoint, method, body, schema)
-                )
-        
-        return violations
-    
-    def _validate_with_schema(
-        self,
-        endpoint: str,
-        method: str,
-        data: Any,
-        schema: ContractSchema
-    ) -> list[ContractViolation]:
-        """Validate data against a schema."""
-        violations = []
-        
-        if not isinstance(data, dict):
-            violations.append(ContractViolation(
-                severity=ViolationSeverity.ERROR,
-                endpoint=endpoint,
-                method=method,
-                rule="invalid_type",
-                message=f"Expected object, got {type(data).__name__}"
-            ))
-            return violations
-        
-        # Check required fields
-        for required_field in schema.required:
-            if required_field not in data:
-                violations.append(ContractViolation(
-                    severity=ViolationSeverity.ERROR,
-                    endpoint=endpoint,
-                    method=method,
-                    rule="missing_required_field",
-                    message=f"Required field '{required_field}' is missing",
-                    expected_value=required_field
-                ))
-        
-        # Validate field types
-        for field_name, field_def in schema.properties.items():
-            if field_name in data:
-                expected_type = field_def.get("type")
-                actual_value = data[field_name]
-                
-                if expected_type and not self._check_type(actual_value, expected_type):
-                    violations.append(ContractViolation(
-                        severity=ViolationSeverity.ERROR,
-                        endpoint=endpoint,
-                        method=method,
-                        rule="invalid_field_type",
-                        message=f"Field '{field_name}' should be {expected_type}",
-                        actual_value=type(actual_value).__name__,
-                        expected_value=expected_type
-                    ))
-        
-        return violations
-    
-    def _check_type(self, value: Any, expected_type: str) -> bool:
-        """Check if value matches expected type."""
-        type_map = {
-            "string": str,
-            "number": (int, float),
-            "integer": int,
-            "boolean": bool,
-            "array": list,
-            "object": dict,
-            "null": type(None)
-        }
-        
-        expected = type_map.get(expected_type)
-        if expected:
-            return isinstance(value, expected)
+        contract = self.registry.get(contract_name)
+        if not contract:
+            return False
+
+        field = ContractField(name=name, field_type=field_type, required=required, **kwargs)
+        contract.add_field(field)
         return True
-    
-    async def validate_response(
+
+    def validate(
         self,
         contract_name: str,
-        endpoint: str,
-        method: str,
-        status_code: int,
-        response_data: Any
-    ) -> list[ContractViolation]:
-        """Validate a response against the contract."""
-        violations = []
-        
-        if contract_name not in self._contracts:
-            return [ContractViolation(
-                severity=ViolationSeverity.ERROR,
-                endpoint=endpoint,
-                method=method,
-                rule="contract_not_found",
-                message=f"Contract '{contract_name}' not found"
-            )]
-        
-        contract = self._contracts[contract_name]
-        key = f"{method.upper()}:{endpoint}"
-        
-        if key not in contract.endpoints:
-            return [ContractViolation(
-                severity=ViolationSeverity.ERROR,
-                endpoint=endpoint,
-                method=method,
-                rule="endpoint_not_found",
-                message=f"Endpoint '{key}' not defined in contract"
-            )]
-        
-        endpoint_def = contract.endpoints[key]
-        responses = endpoint_def.responses
-        
-        # Check if status code is defined
-        status_str = str(status_code)
-        if status_str not in responses:
-            # Check for default response
-            if "default" not in responses:
-                violations.append(ContractViolation(
-                    severity=ViolationSeverity.WARNING,
-                    endpoint=endpoint,
-                    method=method,
-                    rule="undefined_status_code",
-                    message=f"Status code {status_code} not defined in contract",
-                    actual_value=status_code
-                ))
-        
-        return violations
-    
-    async def test_contract(
-        self,
-        contract_name: str,
-        test_cases: list[dict[str, Any]]
-    ) -> ContractTestResult:
-        """Run contract tests against test cases."""
-        start_time = datetime.now()
-        violations = []
-        tested = 0
-        
-        for test_case in test_cases:
-            endpoint = test_case.get("endpoint")
-            method = test_case.get("method", "GET")
-            request_data = test_case.get("request", {})
-            expected_status = test_case.get("expected_status", 200)
-            
-            violations.extend(
-                await self.validate_request(
-                    contract_name, endpoint, method, request_data
-                )
+        data: Dict[str, Any],
+        strict: bool = True,
+        use_cache: bool = False,
+    ) -> ContractResult:
+        """
+        Validate data against a contract.
+
+        Args:
+            contract_name: Name of the contract.
+            data: Data to validate.
+            strict: Whether to fail on unexpected fields.
+            use_cache: Whether to use cached results.
+
+        Returns:
+            ContractResult with validation outcome.
+        """
+        import time
+        start = time.perf_counter()
+
+        contract = self.registry.get(contract_name)
+        if not contract:
+            return ContractResult(
+                status=ContractStatus.FAILED,
+                contract_name=contract_name,
+                violations=[
+                    ContractViolation(
+                        field_name="",
+                        expected="contract",
+                        actual="none",
+                        message=f"Contract '{contract_name}' not found",
+                    )
+                ],
+                duration_ms=(time.perf_counter() - start) * 1000,
             )
-            
-            tested += 1
-        
-        # Calculate coverage
-        contract = self._contracts.get(contract_name)
-        total_endpoints = len(contract.endpoints) if contract else 0
-        coverage = (tested / max(1, total_endpoints)) * 100
-        
-        duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-        
-        return ContractTestResult(
-            passed=len([v for v in violations if v.severity == ViolationSeverity.ERROR]) == 0,
+
+        violations: List[ContractViolation] = []
+        warnings: List[str] = []
+
+        required_fields = set(contract.required_fields)
+        provided_fields = set(data.keys())
+
+        missing_required = required_fields - provided_fields
+        if missing_required:
+            for field_name in missing_required:
+                violations.append(ContractViolation(
+                    field_name=field_name,
+                    expected="present",
+                    actual="missing",
+                    message=f"Required field '{field_name}' is missing",
+                ))
+
+        if strict:
+            unexpected = provided_fields - set(contract.fields.keys())
+            if unexpected:
+                for field_name in unexpected:
+                    warnings.append(f"Unexpected field '{field_name}' present in data")
+
+        for field_name, field_def in contract.fields.items():
+            if field_name not in data:
+                continue
+
+            value = data[field_name]
+            valid, message = field_def.validate(value)
+
+            if not valid:
+                violations.append(ContractViolation(
+                    field_name=field_name,
+                    expected=field_def.field_type,
+                    actual=type(value).__name__,
+                    message=message or "Validation failed",
+                ))
+
+        status = ContractStatus.PASSED
+        if violations:
+            status = ContractStatus.FAILED
+        elif warnings:
+            status = ContractStatus.WARNING
+
+        duration = (time.perf_counter() - start) * 1000
+
+        result = ContractResult(
+            status=status,
+            contract_name=contract_name,
             violations=violations,
-            tested_endpoints=tested,
-            coverage_percent=coverage,
-            duration_ms=duration_ms
+            warnings=warnings,
+            duration_ms=duration,
         )
-    
-    def get_contract_info(self, name: str) -> Optional[dict[str, Any]]:
-        """Get contract information."""
-        if name not in self._contracts:
-            return None
-        
-        contract = self._contracts[name]
+
+        return result
+
+    def validate_many(
+        self,
+        contract_name: str,
+        items: List[Dict[str, Any]],
+        stop_on_first_failure: bool = False,
+    ) -> List[ContractResult]:
+        """
+        Validate multiple items against a contract.
+
+        Args:
+            contract_name: Name of the contract.
+            items: List of items to validate.
+            stop_on_first_failure: Whether to stop on first failure.
+
+        Returns:
+            List of ContractResults.
+        """
+        results = []
+        for item in items:
+            result = self.validate(contract_name, item)
+            results.append(result)
+
+            if stop_on_first_failure and not result.passed():
+                break
+
+        return results
+
+    def compare_contracts(
+        self,
+        contract_name1: str,
+        contract_name2: str,
+    ) -> Dict[str, Any]:
+        """
+        Compare two contracts for compatibility.
+
+        Args:
+            contract_name1: First contract name.
+            contract_name2: Second contract name.
+
+        Returns:
+            Dictionary describing differences.
+        """
+        contract1 = self.registry.get(contract_name1)
+        contract2 = self.registry.get(contract_name2)
+
+        if not contract1 or not contract2:
+            return {"error": "Contract not found"}
+
+        fields1 = set(contract1.fields.keys())
+        fields2 = set(contract2.fields.keys())
+
         return {
-            "name": contract.name,
-            "version": contract.version,
-            "type": contract.contract_type.value,
-            "description": contract.description,
-            "base_url": contract.base_url,
-            "endpoint_count": len(contract.endpoints),
-            "schema_count": len(contract.schemas)
+            "added": list(fields2 - fields1),
+            "removed": list(fields1 - fields2),
+            "common": list(fields1 & fields2),
+            "breaking_changes": self._find_breaking_changes(contract1, contract2),
         }
-    
-    def list_endpoints(self, contract_name: str) -> list[dict[str, Any]]:
-        """List all endpoints in a contract."""
-        if contract_name not in self._contracts:
-            return []
-        
-        contract = self._contracts[contract_name]
-        return [
-            {
-                "path": ep.path,
-                "method": ep.method,
-                "summary": ep.summary,
-                "deprecated": ep.deprecated
+
+    def _find_breaking_changes(
+        self,
+        old_contract: ContractDefinition,
+        new_contract: ContractDefinition,
+    ) -> List[str]:
+        """Find breaking changes between contracts."""
+        breaking = []
+
+        for field_name in old_contract.required_fields:
+            if field_name not in new_contract.fields:
+                breaking.append(f"Required field '{field_name}' was removed")
+            elif not new_contract.fields[field_name].required:
+                breaking.append(f"Required field '{field_name}' is now optional")
+
+        return breaking
+
+    def get_contract_schema(self, contract_name: str) -> Optional[Dict[str, Any]]:
+        """Get JSON schema for a contract."""
+        contract = self.registry.get(contract_name)
+        if not contract:
+            return None
+
+        required = []
+        properties = {}
+
+        for field_name, field_def in contract.fields.items():
+            type_mapping = {
+                "string": "string",
+                "integer": "integer",
+                "number": "number",
+                "boolean": "boolean",
+                "array": "array",
+                "object": "object",
             }
-            for ep in contract.endpoints.values()
-        ]
+
+            schema_type = type_mapping.get(field_def.field_type, "string")
+
+            prop = {
+                "type": schema_type,
+                "description": field_def.description,
+            }
+
+            if field_def.pattern:
+                prop["pattern"] = field_def.pattern
+            if field_def.min_length is not None:
+                prop["minLength"] = field_def.min_length
+            if field_def.max_length is not None:
+                prop["maxLength"] = field_def.max_length
+            if field_def.allowed_values is not None:
+                prop["enum"] = list(field_def.allowed_values)
+
+            properties[field_name] = prop
+
+            if field_def.required:
+                required.append(field_name)
+
+        return {
+            "title": contract.name,
+            "version": contract.version,
+            "type": "object",
+            "properties": properties,
+            "required": required,
+        }
+
+
+def create_contract_action() -> ApiContractAction:
+    """Factory function to create an ApiContractAction."""
+    return ApiContractAction()
