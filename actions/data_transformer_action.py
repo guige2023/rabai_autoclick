@@ -1,399 +1,255 @@
+"""Data transformer action module.
+
+Provides data transformation operations:
+- DataTransformer: Generic data transformations
+- FieldMapper: Map and rename fields
+- DataConverter: Convert between data formats
+- RowTransformer: Row-level transformations
+- AggregationTransformer: Aggregation operations
 """
-Data Transformer Action Module.
 
-Provides comprehensive data transformation utilities including
-mapping, filtering, aggregation, and format conversion.
+from __future__ import annotations
 
-Author: rabai_autoclick team
-"""
-
-import logging
-from typing import (
-    Optional, Dict, Any, List, Callable, Union, TypeVar, Generic
-)
+import json
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
+import logging
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar("T")
-
 
 class TransformType(Enum):
-    """Types of data transformations."""
+    """Type of transformation."""
     MAP = "map"
     FILTER = "filter"
     REDUCE = "reduce"
-    FLATTEN = "flatten"
-    GROUP = "group"
     SORT = "sort"
+    GROUP = "group"
     MERGE = "merge"
     SPLIT = "split"
 
 
 @dataclass
 class TransformConfig:
-    """Configuration for a data transformation."""
-    source_key: str
-    target_key: Optional[str] = None
-    transform_func: Optional[Callable] = None
-    default_value: Any = None
-    required: bool = False
-    type_hint: Optional[type] = None
+    """Configuration for a transformation."""
+    name: str
+    transform_type: TransformType
+    params: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class DataMapRule:
-    """Rule for mapping data from source to target."""
-    source: str
-    target: str
-    transform: Optional[Callable] = None
-    default: Any = None
-    required: bool = False
+class TransformResult:
+    """Result of a transformation."""
+    success: bool
+    data: Any
+    transformed_count: int = 0
+    error: Optional[str] = None
 
 
-class DataTransformerAction:
-    """
-    Data Transformation Engine.
+class FieldMapper:
+    """Map and transform fields in records."""
 
-    Provides declarative data transformation with validation,
-    error handling, and support for complex data structures.
+    def __init__(
+        self,
+        mapping: Optional[Dict[str, str]] = None,
+        transforms: Optional[Dict[str, Callable]] = None,
+    ):
+        self.mapping = mapping or {}
+        self.transforms = transforms or {}
 
-    Example:
-        >>> transformer = DataTransformerAction()
-        >>> transformer.add_rule(DataMapRule(source="name", target="full_name", transform=str.upper))
-        >>> result = transformer.transform({"name": "john"})
-    """
-
-    def __init__(self):
-        self._rules: List[DataMapRule] = []
-        self._transforms: Dict[str, Callable] = {}
-        self._validators: Dict[str, Callable] = {}
-
-    def add_rule(self, rule: DataMapRule) -> "DataTransformerAction":
-        """
-        Add a mapping rule.
-
-        Args:
-            rule: DataMapRule defining the transformation
-
-        Returns:
-            Self for chaining
-        """
-        self._rules.append(rule)
-        return self
-
-    def register_transform(self, name: str, func: Callable) -> "DataTransformerAction":
-        """
-        Register a named transformation function.
-
-        Args:
-            name: Name for the transform
-            func: Transformation function
-
-        Returns:
-            Self for chaining
-        """
-        self._transforms[name] = func
-        return self
-
-    def register_validator(self, field: str, validator: Callable) -> "DataTransformerAction":
-        """
-        Register a field validator.
-
-        Args:
-            field: Field name to validate
-            validator: Function that returns bool
-
-        Returns:
-            Self for chaining
-        """
-        self._validators[field] = validator
-        return self
-
-    def transform(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Transform data according to registered rules.
-
-        Args:
-            data: Input data dictionary
-
-        Returns:
-            Transformed data dictionary
-        """
+    def map_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """Map a single record."""
         result = {}
-
-        for rule in self._rules:
-            value = data.get(rule.source, rule.default)
-
-            if value is None and rule.required:
-                raise ValueError(f"Required field '{rule.source}' is missing")
-
-            if value is not None and rule.transform:
-                try:
-                    value = rule.transform(value)
-                except Exception as e:
-                    raise ValueError(f"Transform failed for '{rule.source}': {e}")
-
-            result[rule.target] = value
-
+        for source_field, target_field in self.mapping.items():
+            if source_field in record:
+                value = record[source_field]
+                if source_field in self.transforms:
+                    value = self.transforms[source_field](value)
+                result[target_field] = value
+        for field_name, value in record.items():
+            if field_name not in self.mapping:
+                result[field_name] = value
         return result
 
-    def transform_batch(
-        self, data_list: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        """
-        Transform a batch of data records.
+    def map_records(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Map multiple records."""
+        return [self.map_record(r) for r in records]
 
-        Args:
-            data_list: List of input data dictionaries
+    def add_mapping(self, source: str, target: str) -> None:
+        """Add a field mapping."""
+        self.mapping[source] = target
 
-        Returns:
-            List of transformed data dictionaries
-        """
-        return [self.transform(data) for data in data_list]
+    def add_transform(self, field_name: str, transform_fn: Callable) -> None:
+        """Add a field transformation."""
+        self.transforms[field_name] = transform_fn
 
-    def map_values(
-        self,
-        data: Dict[str, Any],
-        mapping: Dict[str, Callable],
-    ) -> Dict[str, Any]:
-        """
-        Apply multiple transformations to data values.
 
-        Args:
-            data: Input data
-            mapping: Dict mapping keys to transform functions
+class DataConverter:
+    """Convert data between formats."""
 
-        Returns:
-            Transformed data
-        """
-        result = data.copy()
-        for key, transform in mapping.items():
-            if key in result:
-                try:
-                    result[key] = transform(result[key])
-                except Exception as e:
-                    logger.warning(f"Transform failed for key '{key}': {e}")
-        return result
-
-    def filter_fields(
-        self,
-        data: Dict[str, Any],
-        fields: List[str],
-        exclude: bool = False,
-    ) -> Dict[str, Any]:
-        """
-        Filter data fields.
-
-        Args:
-            data: Input data
-            fields: List of field names
-            exclude: If True, exclude listed fields instead of including
-
-        Returns:
-            Filtered data
-        """
-        if exclude:
-            return {k: v for k, v in data.items() if k not in fields}
-        return {k: v for k, v in data.items() if k in fields}
-
-    def flatten(
-        self,
+    @staticmethod
+    def to_json(
         data: Any,
+        pretty: bool = False,
+        ensure_ascii: bool = False,
+    ) -> str:
+        """Convert data to JSON string."""
+        if pretty:
+            return json.dumps(data, indent=2, ensure_ascii=ensure_ascii)
+        return json.dumps(data, ensure_ascii=ensure_ascii)
+
+    @staticmethod
+    def from_json(json_str: str) -> Any:
+        """Parse JSON string."""
+        return json.loads(json_str)
+
+    @staticmethod
+    def flatten(
+        data: Dict[str, Any],
         separator: str = ".",
         parent_key: str = "",
     ) -> Dict[str, Any]:
-        """
-        Flatten nested data structures.
-
-        Args:
-            data: Nested data structure
-            separator: Key separator for nested fields
-            parent_key: Parent key prefix
-
-        Returns:
-            Flattened dictionary
-        """
-        items: List[tuple] = []
-
-        if isinstance(data, dict):
-            for key, value in data.items():
-                new_key = f"{parent_key}{separator}{key}" if parent_key else key
-                items.extend(self.flatten(value, separator, new_key).items())
-        elif isinstance(data, (list, tuple)):
-            for i, value in enumerate(data):
-                new_key = f"{parent_key}[{i}]"
-                items.extend(self.flatten(value, separator, new_key).items())
-        else:
-            items.append((parent_key, data))
-
+        """Flatten a nested dictionary."""
+        items: List[Tuple[str, Any]] = []
+        for key, value in data.items():
+            new_key = f"{parent_key}{separator}{key}" if parent_key else key
+            if isinstance(value, dict):
+                items.extend(DataConverter.flatten(value, separator, new_key).items())
+            elif isinstance(value, list):
+                for i, item in enumerate(value):
+                    if isinstance(item, dict):
+                        items.extend(
+                            DataConverter.flatten(item, separator, f"{new_key}[{i}]").items()
+                        )
+                    else:
+                        items.append((f"{new_key}[{i}]", item))
+            else:
+                items.append((new_key, value))
         return dict(items)
 
-    def unflatten(
-        self,
-        data: Dict[str, Any],
-        separator: str = ".",
-    ) -> Dict[str, Any]:
-        """
-        Unflatten a dictionary into nested structure.
-
-        Args:
-            data: Flattened dictionary
-            separator: Key separator
-
-        Returns:
-            Nested dictionary
-        """
+    @staticmethod
+    def unflatten(data: Dict[str, Any], separator: str = ".") -> Dict[str, Any]:
+        """Unflatten a dictionary."""
         result: Dict[str, Any] = {}
-
-        for flat_key, value in data.items():
-            keys = flat_key.split(separator)
-            current = result
-
-            for key in keys[:-1]:
-                if key not in current:
-                    current[key] = {}
-                current = current[key]
-
-            current[keys[-1]] = value
-
-        return result
-
-    def group_by(
-        self,
-        data: List[Dict[str, Any]],
-        key: str,
-    ) -> Dict[Any, List[Dict[str, Any]]]:
-        """
-        Group data by a specific key.
-
-        Args:
-            data: List of data records
-            key: Field name to group by
-
-        Returns:
-            Dictionary of grouped records
-        """
-        groups: Dict[Any, List[Dict[str, Any]]] = {}
-
-        for record in data:
-            group_key = record.get(key)
-            if group_key not in groups:
-                groups[group_key] = []
-            groups[group_key].append(record)
-
-        return groups
-
-    def aggregate(
-        self,
-        data: List[Dict[str, Any]],
-        group_key: str,
-        agg_funcs: Dict[str, Callable],
-    ) -> List[Dict[str, Any]]:
-        """
-        Aggregate data by grouping and applying functions.
-
-        Args:
-            data: List of data records
-            group_key: Field to group by
-            agg_funcs: Dict mapping result fields to aggregation functions
-
-        Returns:
-            List of aggregated results
-        """
-        groups = self.group_by(data, group_key)
-        results = []
-
-        for group_value, records in groups.items():
-            result = {group_key: group_value}
-
-            for field, func in agg_funcs.items():
-                values = [r.get(field) for r in records if field in r]
-                try:
-                    result[field] = func(values) if values else None
-                except Exception as e:
-                    logger.warning(f"Aggregation failed for {field}: {e}")
-                    result[field] = None
-
-            results.append(result)
-
-        return results
-
-    def merge(
-        self,
-        left: Dict[str, Any],
-        right: Dict[str, Any],
-        strategy: str = "override",
-    ) -> Dict[str, Any]:
-        """
-        Merge two dictionaries.
-
-        Args:
-            left: Left dictionary
-            right: Right dictionary
-            strategy: Merge strategy (override, preserve, combine)
-
-        Returns:
-            Merged dictionary
-        """
-        if strategy == "override":
-            return {**left, **right}
-        elif strategy == "preserve":
-            return {**right, **left}
-        elif strategy == "combine":
-            result = left.copy()
-            for key, value in right.items():
-                if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-                    result[key] = self.merge(result[key], value, strategy)
-                else:
-                    result[key] = value
-            return result
-        else:
-            raise ValueError(f"Unknown merge strategy: {strategy}")
-
-    def rename_fields(
-        self,
-        data: Dict[str, Any],
-        mapping: Dict[str, str],
-    ) -> Dict[str, Any]:
-        """
-        Rename data fields.
-
-        Args:
-            data: Input data
-            mapping: Dict mapping old names to new names
-
-        Returns:
-            Data with renamed fields
-        """
-        result = {}
         for key, value in data.items():
-            new_key = mapping.get(key, key)
-            result[new_key] = value
+            parts = key.split(separator)
+            current = result
+            for part in parts[:-1]:
+                if part not in current:
+                    current[part] = {}
+                current = current[part]
+            current[parts[-1]] = value
         return result
 
-    def cast_types(
+
+class RowTransformer:
+    """Row-level data transformations."""
+
+    def __init__(
         self,
-        data: Dict[str, Any],
-        type_map: Dict[str, type],
-    ) -> Dict[str, Any]:
-        """
-        Cast field values to specified types.
+        row_filter: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        row_mapper: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+    ):
+        self.row_filter = row_filter
+        self.row_mapper = row_mapper
 
-        Args:
-            data: Input data
-            type_map: Dict mapping field names to target types
+    def transform(
+        self,
+        rows: List[Dict[str, Any]],
+    ) -> TransformResult:
+        """Transform rows with filter and mapper."""
+        transformed = []
+        errors = []
 
-        Returns:
-            Data with cast types
-        """
-        result = data.copy()
-        for field, target_type in type_map.items():
-            if field in result and result[field] is not None:
-                try:
-                    result[field] = target_type(result[field])
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"Type cast failed for {field} to {target_type}: {e}")
+        for row in rows:
+            try:
+                if self.row_filter and not self.row_filter(row):
+                    continue
+                if self.row_mapper:
+                    row = self.row_mapper(row)
+                transformed.append(row)
+            except Exception as e:
+                errors.append(str(e))
+
+        return TransformResult(
+            success=len(errors) == 0,
+            data=transformed,
+            transformed_count=len(transformed),
+            error="; ".join(errors) if errors else None,
+        )
+
+    def filter_rows(
+        self,
+        rows: List[Dict[str, Any]],
+        filter_fn: Callable[[Dict[str, Any]], bool],
+    ) -> List[Dict[str, Any]]:
+        """Filter rows."""
+        return [r for r in rows if filter_fn(r)]
+
+    def sort_rows(
+        self,
+        rows: List[Dict[str, Any]],
+        key_fn: Callable[[Dict[str, Any]], Any],
+        reverse: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Sort rows."""
+        return sorted(rows, key=key_fn, reverse=reverse)
+
+
+class DataTransformer:
+    """General-purpose data transformer."""
+
+    def __init__(self):
+        self._pipeline: List[Callable] = []
+
+    def add_step(self, fn: Callable[[Any], Any]) -> "DataTransformer":
+        """Add a transformation step to the pipeline."""
+        self._pipeline.append(fn)
+        return self
+
+    def transform(self, data: Any) -> Any:
+        """Execute the transformation pipeline."""
+        result = data
+        for step in self._pipeline:
+            result = step(result)
         return result
+
+    def transform_dict(
+        self,
+        record: Dict[str, Any],
+        field_transforms: Dict[str, Callable],
+    ) -> Dict[str, Any]:
+        """Transform specific fields in a dictionary."""
+        result = dict(record)
+        for field_name, transform_fn in field_transforms.items():
+            if field_name in result:
+                result[field_name] = transform_fn(result[field_name])
+        return result
+
+    def batch_transform(
+        self,
+        records: List[Dict[str, Any]],
+        field_transforms: Dict[str, Callable],
+    ) -> List[Dict[str, Any]]:
+        """Transform fields in a batch of records."""
+        return [self.transform_dict(r, field_transforms) for r in records]
+
+
+def transform_data(
+    data: Any,
+    transforms: List[Callable[[Any], Any]],
+) -> Any:
+    """Apply a list of transformations to data."""
+    result = data
+    for t in transforms:
+        result = t(result)
+    return result
+
+
+def filter_records(
+    records: List[Dict[str, Any]],
+    filter_fn: Callable[[Dict[str, Any]], bool],
+) -> List[Dict[str, Any]]:
+    """Filter records using a predicate."""
+    return [r for r in records if filter_fn(r)]

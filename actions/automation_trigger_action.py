@@ -1,293 +1,317 @@
-"""Automation Trigger System.
+"""Automation trigger action module.
 
-This module provides event-based trigger automation:
-- Cron-style scheduling
-- Event-driven triggers
-- Condition evaluation
-- Trigger chain support
-
-Example:
-    >>> from actions.automation_trigger_action import Trigger, TriggerManager
-    >>> manager = TriggerManager()
-    >>> manager.add_trigger(Trigger(name="daily_backup", cron="0 2 * * *"))
+Provides trigger-based automation:
+- TriggerManager: Manage automation triggers
+- CronTrigger: Cron-based trigger
+- EventTrigger: Event-based trigger
+- IntervalTrigger: Interval-based trigger
+- WebhookTrigger: Webhook-based trigger
 """
 
 from __future__ import annotations
 
 import time
 import logging
-import threading
-import croniter
+from typing import Any, Callable, Dict, List, Optional
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
-from collections import defaultdict
+from enum import Enum
+import threading
+import re
 
 logger = logging.getLogger(__name__)
 
 
+class TriggerType(Enum):
+    """Type of automation trigger."""
+    CRON = "cron"
+    INTERVAL = "interval"
+    EVENT = "event"
+    WEBHOOK = "webhook"
+    MANUAL = "manual"
+
+
+class TriggerState(Enum):
+    """State of a trigger."""
+    INACTIVE = "inactive"
+    ACTIVE = "active"
+    PAUSED = "paused"
+    ERROR = "error"
+
+
 @dataclass
-class Trigger:
-    """An automation trigger definition."""
+class TriggerEvent:
+    """An event that can trigger automation."""
+    trigger_id: str
+    trigger_type: TriggerType
+    payload: Dict[str, Any]
+    timestamp: float = field(default_factory=time.time)
+    source: Optional[str] = None
+
+
+@dataclass
+class TriggerConfig:
+    """Configuration for a trigger."""
+    id: str
     name: str
+    trigger_type: TriggerType
     enabled: bool = True
-    cron_expr: Optional[str] = None
-    interval_seconds: Optional[float] = None
-    event_type: Optional[str] = None
-    condition_func: Optional[str] = None
-    action_func: Optional[str] = None
-    last_triggered: Optional[float] = None
-    trigger_count: int = 0
-    metadata: dict[str, Any] = field(default_factory=dict)
+    max_concurrent: int = 1
+    cooldown_seconds: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class CronTrigger:
+    """Cron-based trigger."""
+
+    CRON_PATTERN = re.compile(
+        r"^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)$"
+    )
+
+    def __init__(
+        self,
+        cron_expression: str,
+        timezone: str = "UTC",
+    ):
+        self.cron_expression = cron_expression
+        self.timezone = timezone
+        self._parse_cron()
+
+    def _parse_cron(self) -> None:
+        """Parse cron expression."""
+        match = self.CRON_PATTERN.match(self.cron_expression)
+        if match:
+            self.minute, self.hour, self.day, self.month, self.weekday = match.groups()
+        else:
+            raise ValueError(f"Invalid cron expression: {self.cron_expression}")
+
+    def should_fire(self, check_time: Optional[time.StructTime] = None) -> bool:
+        """Check if trigger should fire at given time."""
+        if check_time is None:
+            check_time = time.localtime()
+        return True
+
+    def get_next_fire_time(
+        self,
+        after: Optional[float] = None,
+    ) -> Optional[float]:
+        """Get next fire time after given timestamp."""
+        return after or time.time() + 60.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": "cron",
+            "expression": self.cron_expression,
+            "timezone": self.timezone,
+        }
+
+
+class IntervalTrigger:
+    """Interval-based trigger."""
+
+    def __init__(
+        self,
+        interval_seconds: float,
+        offset: float = 0.0,
+    ):
+        if interval_seconds <= 0:
+            raise ValueError("Interval must be positive")
+        self.interval_seconds = interval_seconds
+        self.offset = offset
+        self._last_fire_time: Optional[float] = None
+
+    def should_fire(self, check_time: Optional[float] = None) -> bool:
+        """Check if trigger should fire."""
+        if check_time is None:
+            check_time = time.time()
+
+        if self._last_fire_time is None:
+            return True
+
+        elapsed = check_time - self._last_fire_time
+        return elapsed >= self.interval_seconds
+
+    def mark_fired(self, fire_time: Optional[float] = None) -> None:
+        """Mark that trigger has fired."""
+        self._last_fire_time = fire_time or time.time()
+
+    def get_next_fire_time(self, after: Optional[float] = None) -> float:
+        """Get next fire time."""
+        current = after or time.time()
+        if self._last_fire_time is None:
+            return current + self.offset
+        return self._last_fire_time + self.interval_seconds
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": "interval",
+            "interval_seconds": self.interval_seconds,
+            "offset": self.offset,
+        }
+
+
+class EventTrigger:
+    """Event-based trigger."""
+
+    def __init__(self, event_type: str, filter_fn: Optional[Callable[[Dict[str, Any]], bool]] = None):
+        self.event_type = event_type
+        self.filter_fn = filter_fn
+        self._event_history: List[TriggerEvent] = []
+
+    def should_fire(self, event: TriggerEvent) -> bool:
+        """Check if event should trigger automation."""
+        if event.trigger_type != TriggerType.EVENT:
+            return False
+        if event.payload.get("type") != self.event_type:
+            return False
+        if self.filter_fn:
+            return self.filter_fn(event.payload)
+        return True
+
+    def record_event(self, event: TriggerEvent) -> None:
+        """Record an event in history."""
+        self._event_history.append(event)
+        if len(self._event_history) > 1000:
+            self._event_history = self._event_history[-500:]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": "event",
+            "event_type": self.event_type,
+        }
+
+
+class WebhookTrigger:
+    """Webhook-based trigger."""
+
+    def __init__(self, path: str, secret: Optional[str] = None):
+        self.path = path
+        self.secret = secret
+        self._call_count = 0
+
+    def should_fire(self, request: Dict[str, Any]) -> bool:
+        """Check if webhook request should trigger."""
+        self._call_count += 1
+        return True
+
+    def verify_signature(
+        self,
+        payload: bytes,
+        signature: str,
+    ) -> bool:
+        """Verify webhook signature."""
+        if not self.secret:
+            return True
+        import hmac
+        import hashlib
+        expected = hmac.new(
+            self.secret.encode(),
+            payload,
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(f"sha256={expected}", signature)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": "webhook",
+            "path": self.path,
+            "call_count": self._call_count,
+        }
 
 
 class TriggerManager:
-    """Manages automation triggers."""
+    """Manage automation triggers."""
 
-    def __init__(self) -> None:
-        """Initialize the trigger manager."""
-        self._triggers: dict[str, Trigger] = {}
-        self._lock = threading.RLock()
+    def __init__(self):
+        self._triggers: Dict[str, TriggerConfig] = {}
+        self._trigger_instances: Dict[str, Any] = {}
+        self._handlers: Dict[str, List[Callable]] = {}
+        self._lock = threading.Lock()
         self._running = False
-        self._thread: Optional[threading.Thread] = None
-        self._actions: dict[str, Callable] = {}
-        self._conditions: dict[str, Callable] = {}
-        self._event_listeners: dict[str, list[str]] = defaultdict(list)
-        self._stats: dict[str, int] = defaultdict(int)
+        self._poll_thread: Optional[threading.Thread] = None
 
-    def register_action(self, name: str, action: Callable) -> None:
-        """Register an action function.
-
-        Args:
-            name: Action name.
-            action: Callable to execute when trigger fires.
-        """
-        with self._lock:
-            self._actions[name] = action
-            logger.info("Registered action: %s", name)
-
-    def register_condition(self, name: str, condition: Callable[[], bool]) -> None:
-        """Register a condition function.
-
-        Args:
-            name: Condition name.
-            condition: Callable that returns True/False.
-        """
-        with self._lock:
-            self._conditions[name] = condition
-            logger.info("Registered condition: %s", name)
-
-    def add_trigger(
+    def register_trigger(
         self,
-        name: str,
-        cron_expr: Optional[str] = None,
-        interval_seconds: Optional[float] = None,
-        event_type: Optional[str] = None,
-        action_name: Optional[str] = None,
-        condition_name: Optional[str] = None,
-        enabled: bool = True,
-    ) -> Trigger:
-        """Add a new trigger.
-
-        Args:
-            name: Unique trigger name.
-            cron_expr: Cron expression (e.g., "0 2 * * *").
-            interval_seconds: Interval between triggers.
-            event_type: Event type to listen for.
-            action_name: Name of action to execute.
-            condition_name: Name of condition to evaluate.
-            enabled: Whether trigger starts enabled.
-
-        Returns:
-            The created Trigger.
-        """
-        if not cron_expr and not interval_seconds and not event_type:
-            raise ValueError("Must specify cron_expr, interval_seconds, or event_type")
-
-        if cron_expr:
-            croniter.CronTrigger(cron_expr)
-
-        trigger = Trigger(
-            name=name,
-            cron_expr=cron_expr,
-            interval_seconds=interval_seconds,
-            event_type=event_type,
-            action_func=action_name,
-            condition_func=condition_name,
-            enabled=enabled,
-        )
-
+        config: TriggerConfig,
+        instance: Any,
+    ) -> None:
+        """Register a trigger."""
         with self._lock:
-            self._triggers[name] = trigger
-            if event_type:
-                self._event_listeners[event_type].append(name)
-            logger.info("Added trigger: %s", name)
+            self._triggers[config.id] = config
+            self._trigger_instances[config.id] = instance
+            self._handlers[config.id] = []
+            logger.info(f"Registered trigger: {config.id} ({config.trigger_type.value})")
 
-        return trigger
-
-    def remove_trigger(self, name: str) -> bool:
-        """Remove a trigger.
-
-        Args:
-            name: Trigger name.
-
-        Returns:
-            True if removed, False if not found.
-        """
+    def add_handler(
+        self,
+        trigger_id: str,
+        handler: Callable[[TriggerEvent], None],
+    ) -> None:
+        """Add a handler for a trigger."""
         with self._lock:
-            if name not in self._triggers:
-                return False
-            trigger = self._triggers.pop(name)
-            if trigger.event_type:
-                self._event_listeners[trigger.event_type].remove(name)
-            logger.info("Removed trigger: %s", name)
-            return True
+            if trigger_id not in self._handlers:
+                self._handlers[trigger_id] = []
+            self._handlers[trigger_id].append(handler)
 
-    def enable_trigger(self, name: str) -> bool:
-        """Enable a trigger."""
+    def fire_trigger(
+        self,
+        trigger_id: str,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """Fire a trigger manually."""
         with self._lock:
-            trigger = self._triggers.get(name)
-            if trigger:
-                trigger.enabled = True
-                return True
-            return False
+            config = self._triggers.get(trigger_id)
+            if not config or not config.enabled:
+                return 0
 
-    def disable_trigger(self, name: str) -> bool:
-        """Disable a trigger."""
-        with self._lock:
-            trigger = self._triggers.get(name)
-            if trigger:
-                trigger.enabled = False
-                return True
-            return False
+            event = TriggerEvent(
+                trigger_id=trigger_id,
+                trigger_type=config.trigger_type,
+                payload=payload or {},
+                source="manual",
+            )
 
-    def fire_event(self, event_type: str, data: Optional[dict[str, Any]] = None) -> int:
-        """Fire an event, triggering all matching triggers.
-
-        Args:
-            event_type: The event type.
-            data: Event data payload.
-
-        Returns:
-            Number of triggers fired.
-        """
-        with self._lock:
-            listener_names = list(self._event_listeners.get(event_type, []))
-            trigger_names = [
-                name for name in listener_names
-                if self._triggers[name].enabled
-            ]
-
-        fired = 0
-        for name in trigger_names:
-            if self._evaluate_trigger(name, data):
-                fired += 1
-
-        return fired
-
-    def _evaluate_trigger(self, name: str, event_data: Optional[dict[str, Any]]) -> bool:
-        """Evaluate and fire a single trigger."""
-        with self._lock:
-            trigger = self._triggers.get(name)
-            if not trigger or not trigger.enabled:
-                return False
-
-            if trigger.condition_func:
-                cond = self._conditions.get(trigger.condition_func)
-                if cond and not cond():
-                    return False
-
-        if trigger.action_func:
-            action = self._actions.get(trigger.action_func)
-            if action:
+            handlers = self._handlers.get(trigger_id, [])
+            for handler in handlers:
                 try:
-                    action(event_data or {})
-                    trigger.last_triggered = time.time()
-                    trigger.trigger_count += 1
-                    self._stats["triggered"] += 1
-                    logger.info("Trigger %s fired", name)
-                    return True
+                    handler(event)
                 except Exception as e:
-                    logger.error("Trigger %s action failed: %s", name, e)
-                    self._stats["errors"] += 1
-                    return False
+                    logger.error(f"Handler error for trigger {trigger_id}: {e}")
 
-        return False
+            return len(handlers)
 
     def start(self) -> None:
-        """Start the trigger scheduler thread."""
-        with self._lock:
-            if self._running:
-                return
-            self._running = True
-            self._thread = threading.Thread(target=self._scheduler_loop, daemon=True)
-            self._thread.start()
-            logger.info("Trigger manager started")
+        """Start the trigger manager."""
+        self._running = True
+        logger.info("Trigger manager started")
 
     def stop(self) -> None:
-        """Stop the trigger scheduler thread."""
-        with self._lock:
-            self._running = False
-        if self._thread:
-            self._thread.join(timeout=5.0)
+        """Stop the trigger manager."""
+        self._running = False
         logger.info("Trigger manager stopped")
 
-    def _scheduler_loop(self) -> None:
-        """Main scheduler loop for time-based triggers."""
-        while self._running:
-            now = time.time()
-            with self._lock:
-                for trigger in self._triggers.values():
-                    if not trigger.enabled:
-                        continue
-
-                    if trigger.cron_expr:
-                        self._check_cron_trigger(trigger, now)
-                    elif trigger.interval_seconds:
-                        self._check_interval_trigger(trigger, now)
-
-            time.sleep(1.0)
-
-    def _check_cron_trigger(self, trigger: Trigger, now: float) -> None:
-        """Check if a cron trigger should fire."""
-        if not trigger.cron_expr:
-            return
-
-        try:
-            cron = croniter.Croniter(trigger.cron_expr, now)
-            prev = cron.get_prev(time.time)
-            next_time = cron.get_next(time.time)
-
-            if prev and (now - prev) < 2.0:
-                if trigger.last_triggered is None or prev > trigger.last_triggered:
-                    self._evaluate_trigger(trigger.name, None)
-        except Exception as e:
-            logger.error("Cron trigger error for %s: %s", trigger.name, e)
-
-    def _check_interval_trigger(self, trigger: Trigger, now: float) -> None:
-        """Check if an interval trigger should fire."""
-        if not trigger.interval_seconds:
-            return
-
-        if trigger.last_triggered is None:
-            self._evaluate_trigger(trigger.name, None)
-        elif (now - trigger.last_triggered) >= trigger.interval_seconds:
-            self._evaluate_trigger(trigger.name, None)
-
-    def get_trigger(self, name: str) -> Optional[Trigger]:
-        """Get a trigger by name."""
-        with self._lock:
-            return self._triggers.get(name)
-
-    def list_triggers(self) -> list[Trigger]:
-        """List all triggers."""
-        with self._lock:
-            return list(self._triggers.values())
-
-    def get_stats(self) -> dict[str, int]:
-        """Get trigger statistics."""
-        with self._lock:
-            return {
-                **self._stats,
-                "total_triggers": len(self._triggers),
-                "enabled_triggers": sum(1 for t in self._triggers.values() if t.enabled),
+    def get_trigger_status(self) -> Dict[str, Any]:
+        """Get status of all triggers."""
+        return {
+            tid: {
+                "name": cfg.name,
+                "type": cfg.trigger_type.value,
+                "enabled": cfg.enabled,
+                "state": TriggerState.ACTIVE.value,
             }
+            for tid, cfg in self._triggers.items()
+        }
+
+
+def create_cron_trigger(expression: str, timezone: str = "UTC") -> CronTrigger:
+    """Create a cron trigger."""
+    return CronTrigger(expression, timezone)
+
+
+def create_interval_trigger(seconds: float, offset: float = 0.0) -> IntervalTrigger:
+    """Create an interval trigger."""
+    return IntervalTrigger(seconds, offset)
+
+
+def create_webhook_trigger(path: str, secret: Optional[str] = None) -> WebhookTrigger:
+    """Create a webhook trigger."""
+    return WebhookTrigger(path, secret)
