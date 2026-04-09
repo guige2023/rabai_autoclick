@@ -1,151 +1,355 @@
 """
-Touch action builder utilities for composing complex touch interactions.
+Touch action builder and trajectory utilities.
 
-Provides a fluent builder API for constructing multi-step
-touch actions including taps, swipes, long-presses, and custom sequences.
+Provides a builder pattern for constructing touch gestures
+with multiple points and trajectories.
+
+Author: Auto-generated
 """
 
 from __future__ import annotations
 
+import math
+import time
 from dataclasses import dataclass, field
-from typing import Optional
+from enum import Enum, auto
+from typing import Callable
+
+
+class TouchPhase(Enum):
+    """Phase of a touch gesture."""
+    BEGAN = auto()
+    MOVED = auto()
+    STATIONARY = auto()
+    ENDED = auto()
+    CANCELLED = auto()
 
 
 @dataclass
-class TouchStep:
-    """A single step in a touch action sequence."""
-    step_type: str  # "tap", "swipe", "long_press", "wait", "drag"
-    x: float = 0
-    y: float = 0
-    x2: float = 0  # For swipe/drag
-    y2: float = 0
-    duration_ms: float = 100
+class TouchPoint:
+    """A touch point with position and metadata."""
+    x: float
+    y: float
+    timestamp: float
+    pressure: float = 1.0
+    radius_x: float = 1.0
+    radius_y: float = 1.0
+    azimuth: float = 0.0
+    altitude: float = 0.0
     finger_id: int = 0
-    metadata: dict = field(default_factory=dict)
 
 
 @dataclass
 class TouchAction:
-    """A complete touch action with multiple steps."""
-    name: str
-    finger_count: int = 1
-    steps: list[TouchStep] = field(default_factory=list)
+    """A touch action in a gesture sequence."""
+    phase: TouchPhase
+    point: TouchPoint
+    duration_ms: float = 0
+
+
+@dataclass
+class TouchGesture:
+    """A complete touch gesture."""
+    actions: list[TouchAction] = field(default_factory=list)
+    gesture_type: str = "custom"
+    metadata: dict = field(default_factory=dict)
+    
+    def add_action(self, action: TouchAction) -> None:
+        """Add an action to the gesture."""
+        self.actions.append(action)
+    
+    def duration_ms(self) -> float:
+        """Total duration of the gesture."""
+        if not self.actions:
+            return 0
+        return (self.actions[-1].point.timestamp - self.actions[0].point.timestamp) * 1000
 
 
 class TouchActionBuilder:
-    """Fluent builder for composing touch action sequences."""
-
-    def __init__(self, name: str = ""):
-        self._action = TouchAction(name=name)
-
-    def with_name(self, name: str) -> TouchActionBuilder:
-        self._action.name = name
+    """
+    Builder for constructing touch gestures.
+    
+    Example:
+        builder = TouchActionBuilder()
+        gesture = (builder
+            .start(100, 100)
+            .move_to(200, 200, duration=0.3)
+            .move_to(300, 100, duration=0.2)
+            .release()
+            .build())
+    """
+    
+    def __init__(self, gesture_type: str = "custom"):
+        self._gesture_type = gesture_type
+        self._actions: list[TouchAction] = []
+        self._start_time: float | None = None
+        self._current_x: float = 0
+        self._current_y: float = 0
+        self._finger_id: int = 0
+    
+    def start(
+        self,
+        x: float,
+        y: float,
+        finger_id: int = 0,
+        pressure: float = 1.0,
+    ) -> TouchActionBuilder:
+        """
+        Start a touch gesture at position.
+        
+        Args:
+            x, y: Starting position
+            finger_id: ID for this finger (for multi-touch)
+            pressure: Touch pressure
+            
+        Returns:
+            Self for chaining
+        """
+        self._start_time = time.time()
+        self._current_x = x
+        self._current_y = y
+        self._finger_id = finger_id
+        
+        point = TouchPoint(
+            x=x, y=y,
+            timestamp=0,
+            pressure=pressure,
+            finger_id=finger_id,
+        )
+        
+        self._actions.append(TouchAction(phase=TouchPhase.BEGAN, point=point))
         return self
-
-    def with_finger_count(self, count: int) -> TouchActionBuilder:
-        self._action.finger_count = count
+    
+    def move_to(
+        self,
+        x: float,
+        y: float,
+        duration: float = 0.1,
+        num_points: int = 10,
+    ) -> TouchActionBuilder:
+        """
+        Add a move action to position.
+        
+        Args:
+            x, y: Target position
+            duration: Duration in seconds
+            num_points: Number of intermediate points
+            
+        Returns:
+            Self for chaining
+        """
+        if self._start_time is None:
+            raise ValueError("Must call start() before move_to()")
+        
+        for i in range(num_points):
+            t = i / num_points
+            px = self._current_x + (x - self._current_x) * t
+            py = self._current_y + (y - self._current_y) * t
+            elapsed = duration * t
+            timestamp = self._start_time + elapsed
+            
+            point = TouchPoint(
+                x=px, y=py,
+                timestamp=timestamp,
+                finger_id=self._finger_id,
+            )
+            
+            self._actions.append(TouchAction(
+                phase=TouchPhase.MOVED,
+                point=point,
+                duration_ms=duration * 1000 / num_points,
+            ))
+        
+        self._current_x = x
+        self._current_y = y
         return self
-
-    def tap(self, x: float, y: float, finger_id: int = 0) -> TouchActionBuilder:
-        """Add a tap step."""
-        self._action.steps.append(TouchStep(
-            step_type="tap", x=x, y=y, finger_id=finger_id, duration_ms=50
-        ))
+    
+    def move_by(
+        self,
+        dx: float,
+        dy: float,
+        duration: float = 0.1,
+        num_points: int = 10,
+    ) -> TouchActionBuilder:
+        """Move relative to current position."""
+        return self.move_to(
+            self._current_x + dx,
+            self._current_y + dy,
+            duration=duration,
+            num_points=num_points,
+        )
+    
+    def release(self) -> TouchActionBuilder:
+        """Release the touch."""
+        if self._start_time is None:
+            raise ValueError("Must call start() before release()")
+        
+        point = TouchPoint(
+            x=self._current_x,
+            y=self._current_y,
+            timestamp=time.time(),
+            finger_id=self._finger_id,
+        )
+        
+        self._actions.append(TouchAction(phase=TouchPhase.ENDED, point=point))
         return self
-
-    def double_tap(self, x: float, y: float, finger_id: int = 0) -> TouchActionBuilder:
-        """Add two rapid taps."""
-        self._action.steps.append(TouchStep(
-            step_type="tap", x=x, y=y, finger_id=finger_id, duration_ms=50
-        ))
-        self._action.steps.append(TouchStep(
-            step_type="tap", x=x, y=y, finger_id=finger_id, duration_ms=50
-        ))
+    
+    def tap(
+        self,
+        x: float,
+        y: float,
+        duration: float = 0.1,
+    ) -> TouchActionBuilder:
+        """Add a tap gesture at position."""
+        self.start(x, y)
+        self.move_to(x, y, duration=0.001, num_points=1)
+        self.release()
         return self
-
-    def long_press(self, x: float, y: float, duration_ms: float = 500.0, finger_id: int = 0) -> TouchActionBuilder:
-        """Add a long press step."""
-        self._action.steps.append(TouchStep(
-            step_type="long_press", x=x, y=y, finger_id=finger_id, duration_ms=duration_ms
-        ))
+    
+    def long_press(
+        self,
+        x: float,
+        y: float,
+        duration: float = 0.5,
+    ) -> TouchActionBuilder:
+        """Add a long press gesture."""
+        self.start(x, y)
+        time.sleep(duration)
+        self.release()
         return self
-
+    
     def swipe(
         self,
-        x1: float, y1: float,
-        x2: float, y2: float,
-        duration_ms: float = 200.0,
-        finger_id: int = 0,
+        start_x: float,
+        start_y: float,
+        end_x: float,
+        end_y: float,
+        duration: float = 0.3,
     ) -> TouchActionBuilder:
-        """Add a swipe step."""
-        self._action.steps.append(TouchStep(
-            step_type="swipe",
-            x=x1, y=y1,
-            x2=x2, y2=y2,
-            finger_id=finger_id,
-            duration_ms=duration_ms,
-        ))
+        """Add a swipe gesture from start to end."""
+        self.start(start_x, start_y)
+        self.move_to(end_x, end_y, duration=duration, num_points=20)
+        self.release()
+        return self
+    
+    def build(self) -> TouchGesture:
+        """Build and return the gesture."""
+        gesture = TouchGesture(
+            gesture_type=self._gesture_type,
+            actions=list(self._actions),
+        )
+        return gesture
+    
+    def reset(self) -> TouchActionBuilder:
+        """Reset the builder."""
+        self._actions.clear()
+        self._start_time = None
+        self._current_x = 0
+        self._current_y = 0
         return self
 
-    def drag(
+
+class MultiTouchGestureBuilder:
+    """
+    Builder for multi-touch gestures.
+    
+    Example:
+        builder = MultiTouchGestureBuilder()
+        builder.add_finger(1).start(100, 100).move_to(200, 200).release()
+        builder.add_finger(2).start(300, 100).move_to(200, 200).release()
+        gesture = builder.build()
+    """
+    
+    def __init__(self):
+        self._builders: dict[int, TouchActionBuilder] = {}
+        self._current_finger: int = 0
+    
+    def add_finger(self, finger_id: int) -> MultiTouchGestureBuilder:
+        """Add a finger to the gesture."""
+        self._builders[finger_id] = TouchActionBuilder()
+        self._current_finger = finger_id
+        return self
+    
+    def start(
         self,
-        x1: float, y1: float,
-        x2: float, y2: float,
-        duration_ms: float = 300.0,
-        finger_id: int = 0,
-    ) -> TouchActionBuilder:
-        """Add a drag step (slow swipe with hold)."""
-        self._action.steps.append(TouchStep(
-            step_type="drag",
-            x=x1, y=y1,
-            x2=x2, y2=y2,
-            finger_id=finger_id,
-            duration_ms=duration_ms,
-        ))
+        x: float,
+        y: float,
+        pressure: float = 1.0,
+    ) -> MultiTouchGestureBuilder:
+        """Start touch for current finger."""
+        if self._current_finger not in self._builders:
+            self.add_finger(self._current_finger)
+        self._builders[self._current_finger].start(x, y, pressure=pressure)
         return self
-
-    def wait(self, duration_ms: float = 100.0) -> TouchActionBuilder:
-        """Add a wait step between actions."""
-        self._action.steps.append(TouchStep(
-            step_type="wait", duration_ms=duration_ms
-        ))
+    
+    def move_to(
+        self,
+        x: float,
+        y: float,
+        duration: float = 0.1,
+    ) -> MultiTouchGestureBuilder:
+        """Move current finger."""
+        self._builders[self._current_finger].move_to(x, y, duration=duration)
         return self
-
-    def build(self) -> TouchAction:
-        return self._action
-
-    def clear(self) -> TouchActionBuilder:
-        self._action = TouchAction(name=self._action.name, finger_count=self._action.finger_count)
+    
+    def release(self) -> MultiTouchGestureBuilder:
+        """Release current finger."""
+        self._builders[self._current_finger].release()
         return self
+    
+    def build(self) -> list[TouchGesture]:
+        """Build all finger gestures."""
+        return [b.build() for b in self._builders.values()]
 
 
-# Preset touch actions
-def two_finger_swipe_down(y_start: float, screen_width: float, screen_height: float, duration_ms: float = 200.0) -> TouchAction:
-    """Create a two-finger swipe down action."""
-    x = screen_width / 2
-    return TouchActionBuilder("two_finger_swipe_down") \
-        .with_finger_count(2) \
-        .swipe(x, y_start, x, y_start - 300, duration_ms, finger_id=0) \
-        .build()
-
-
-def pinch_to_zoom(cx: float, cy: float, start_scale: float, end_scale: float) -> TouchAction:
-    """Create a pinch-to-zoom action."""
-    distance = 100
-    b = TouchActionBuilder("pinch_zoom").with_finger_count(2)
-
-    # Start positions
-    x1, y1 = cx - distance, cy
-    x2, y2 = cx + distance, cy
-
-    if end_scale > start_scale:  # Zoom in
-        b.swipe(x1, y1, x1 - 50, y1, 150, finger_id=0)
-        b.swipe(x2, y2, x2 + 50, y2, 150, finger_id=1)
-    else:  # Zoom out
-        b.swipe(x1, y1, x1 + 50, y1, 150, finger_id=0)
-        b.swipe(x2, y2, x2 - 50, y2, 150, finger_id=1)
-
-    return b.build()
-
-
-__all__ = ["TouchActionBuilder", "TouchAction", "TouchStep", "two_finger_swipe_down", "pinch_to_zoom"]
+def create_drag_trajectory(
+    start_x: float,
+    start_y: float,
+    end_x: float,
+    end_y: float,
+    num_points: int = 20,
+    curve_factor: float = 0.0,
+) -> list[tuple[float, float]]:
+    """
+    Create a curved drag trajectory.
+    
+    Args:
+        start_x, start_y: Start position
+        end_x, end_y: End position
+        num_points: Number of points in trajectory
+        curve_factor: Curvature (-1.0 to 1.0)
+        
+    Returns:
+        List of (x, y) points
+    """
+    points = []
+    
+    for i in range(num_points + 1):
+        t = i / num_points
+        
+        # Linear interpolation
+        x = start_x + (end_x - start_x) * t
+        y = start_y + (end_y - start_y) * t
+        
+        # Add curve
+        if curve_factor != 0:
+            mid_x = (start_x + end_x) / 2
+            mid_y = (start_y + end_y) / 2
+            
+            # Perpendicular offset
+            dx = end_x - start_x
+            dy = end_y - start_y
+            length = math.sqrt(dx * dx + dy * dy)
+            
+            if length > 0:
+                nx = -dy / length
+                ny = dx / length
+                
+                # Parabolic curve
+                curve = 4 * t * (1 - t) * curve_factor
+                x += nx * curve * length * 0.3
+                y += ny * curve * length * 0.3
+        
+        points.append((x, y))
+    
+    return points
