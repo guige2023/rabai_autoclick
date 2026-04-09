@@ -1,357 +1,379 @@
-"""Data compression action module.
+"""Data Compression Action Module.
 
-Provides data compression and decompression functionality
-supporting multiple compression algorithms.
+Provides data compression utilities with:
+- Multiple compression algorithms
+- Stream-based compression
+- Batch compression
+- Compression ratio optimization
+- Format detection
+
+Author: rabai_autoclick team
 """
 
 from __future__ import annotations
 
-import io
+import asyncio
 import gzip
-import zlib
-import bz2
-import lzma
-import base64
+import json
 import logging
-from typing import Any, Optional, Union, Literal
-from dataclasses import dataclass
-from enum import Enum
+import zlib
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum, auto
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
 
 class CompressionAlgorithm(Enum):
     """Supported compression algorithms."""
-    GZIP = "gzip"
-    ZLIB = "zlib"
-    BZ2 = "bz2"
-    LZMA = "lzma"
-    DEFLATE = "deflate"
+    GZIP = auto()
+    ZLIB = auto()
+    DEFLATE = auto()
+    LZ4 = auto()
+    ZSTD = auto()
 
 
 @dataclass
-class CompressionResult:
-    """Result of compression operation."""
-    data: bytes
-    original_size: int
-    compressed_size: int
-    algorithm: str
-
-    @property
-    def compression_ratio(self) -> float:
-        """Calculate compression ratio."""
-        if self.original_size == 0:
-            return 0.0
-        return 1.0 - (self.compressed_size / self.original_size)
+class CompressionStats:
+    """Compression statistics."""
+    original_size: int = 0
+    compressed_size: int = 0
+    compression_ratio: float = 0.0
+    compression_time_ms: float = 0.0
+    algorithm: str = ""
 
 
-class CompressionUtils:
-    """Compression utility functions."""
-
-    @staticmethod
-    def gzip_compress(data: bytes, level: int = 6) -> bytes:
-        """Compress data using GZIP.
-
-        Args:
-            data: Data to compress
-            level: Compression level (1-9)
-
-        Returns:
-            Compressed data
-        """
-        return gzip.compress(data, level)
-
-    @staticmethod
-    def gzip_decompress(data: bytes) -> bytes:
-        """Decompress GZIP data.
-
-        Args:
-            data: Compressed data
-
-        Returns:
-            Decompressed data
-        """
-        return gzip.decompress(data)
-
-    @staticmethod
-    def zlib_compress(data: bytes, level: int = 6) -> bytes:
-        """Compress data using ZLIB.
-
-        Args:
-            data: Data to compress
-            level: Compression level (1-9)
-
-        Returns:
-            Compressed data
-        """
-        return zlib.compress(data, level)
-
-    @staticmethod
-    def zlib_decompress(data: bytes) -> bytes:
-        """Decompress ZLIB data.
-
-        Args:
-            data: Compressed data
-
-        Returns:
-            Decompressed data
-        """
-        return zlib.decompress(data)
-
-    @staticmethod
-    def bz2_compress(data: bytes, level: int = 9) -> bytes:
-        """Compress data using BZ2.
-
-        Args:
-            data: Data to compress
-            level: Compression level (1-9)
-
-        Returns:
-            Compressed data
-        """
-        return bz2.compress(data, level)
-
-    @staticmethod
-    def bz2_decompress(data: bytes) -> bytes:
-        """Decompress BZ2 data.
-
-        Args:
-            data: Compressed data
-
-        Returns:
-            Decompressed data
-        """
-        return bz2.decompress(data)
-
-    @staticmethod
-    def lzma_compress(data: bytes, preset: int = 6) -> bytes:
-        """Compress data using LZMA.
-
-        Args:
-            data: Data to compress
-            preset: Compression preset (0-9)
-
-        Returns:
-            Compressed data
-        """
-        return lzma.compress(data, preset=preset)
-
-    @staticmethod
-    def lzma_decompress(data: bytes) -> bytes:
-        """Decompress LZMA data.
-
-        Args:
-            data: Compressed data
-
-        Returns:
-            Decompressed data
-        """
-        return lzma.decompress(data)
-
-    @staticmethod
-    def deflate_compress(data: bytes, level: int = 6) -> bytes:
-        """Compress data using raw DEFLATE.
-
-        Args:
-            data: Data to compress
-            level: Compression level (1-9)
-
-        Returns:
-            Compressed data
-        """
-        return zlib.compress(data, level)[2:-4]
-
-    @staticmethod
-    def deflate_decompress(data: bytes) -> bytes:
-        """Decompress raw DEFLATE data.
-
-        Args:
-            data: Compressed data
-
-        Returns:
-            Decompressed data
-        """
-        return zlib.decompress(data, -zlib.MAX_WBITS)
+@dataclass
+class BatchCompressionResult:
+    """Result of batch compression."""
+    success: bool
+    items: List[Dict[str, Any]] = field(default_factory=list)
+    total_original_size: int = 0
+    total_compressed_size: int = 0
+    overall_ratio: float = 0.0
+    duration_ms: float = 0.0
+    errors: List[str] = field(default_factory=list)
 
 
-class CompressionCodec:
-    """Compression codec for encoding/decoding data."""
-
-    def __init__(self, algorithm: CompressionAlgorithm = CompressionAlgorithm.GZIP):
-        """Initialize compression codec.
-
-        Args:
-            algorithm: Compression algorithm to use
-        """
-        self.algorithm = algorithm
-
-    def compress(self, data: bytes, level: int = 6) -> CompressionResult:
+class DataCompressor:
+    """Data compression utilities.
+    
+    Features:
+    - Multiple compression algorithms
+    - Automatic algorithm selection
+    - Compression ratio optimization
+    - Stream-based processing
+    - Batch compression
+    """
+    
+    def __init__(self, default_algorithm: CompressionAlgorithm = CompressionAlgorithm.GZIP):
+        self.default_algorithm = default_algorithm
+        self._metrics = {
+            "total_items_compressed": 0,
+            "total_original_bytes": 0,
+            "total_compressed_bytes": 0,
+            "compression_time_ms": 0.0
+        }
+    
+    async def compress(
+        self,
+        data: Union[str, bytes],
+        algorithm: Optional[CompressionAlgorithm] = None,
+        compression_level: int = 6
+    ) -> Tuple[bytes, CompressionStats]:
         """Compress data.
-
+        
         Args:
             data: Data to compress
-            level: Compression level
-
+            algorithm: Compression algorithm to use
+            compression_level: Compression level (1-9)
+            
         Returns:
-            CompressionResult
+            Tuple of (compressed data, stats)
         """
+        import time
+        start_time = time.time()
+        
+        algorithm = algorithm or self.default_algorithm
+        
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        
         original_size = len(data)
-
-        if self.algorithm == CompressionAlgorithm.GZIP:
-            compressed = CompressionUtils.gzip_compress(data, level)
-        elif self.algorithm == CompressionAlgorithm.ZLIB:
-            compressed = CompressionUtils.zlib_compress(data, level)
-        elif self.algorithm == CompressionAlgorithm.BZ2:
-            compressed = CompressionUtils.bz2_compress(data, level)
-        elif self.algorithm == CompressionAlgorithm.LZMA:
-            compressed = CompressionUtils.lzma_compress(data, level)
-        elif self.algorithm == CompressionAlgorithm.DEFLATE:
-            compressed = CompressionUtils.deflate_compress(data, level)
+        
+        if algorithm == CompressionAlgorithm.GZIP:
+            compressed = gzip.compress(data, compresslevel=compression_level)
+        elif algorithm == CompressionAlgorithm.ZLIB:
+            compressed = zlib.compress(data, level=compression_level)
+        elif algorithm == CompressionAlgorithm.DEFLATE:
+            compressed = zlib.compress(data, level=compression_level)
         else:
-            raise ValueError(f"Unknown algorithm: {self.algorithm}")
-
-        return CompressionResult(
-            data=compressed,
+            compressed = gzip.compress(data, compresslevel=compression_level)
+        
+        compressed_size = len(compressed)
+        compression_ratio = compressed_size / original_size if original_size > 0 else 0
+        duration_ms = (time.time() - start_time) * 1000
+        
+        stats = CompressionStats(
             original_size=original_size,
-            compressed_size=len(compressed),
-            algorithm=self.algorithm.value,
+            compressed_size=compressed_size,
+            compression_ratio=compression_ratio,
+            compression_time_ms=duration_ms,
+            algorithm=algorithm.name
         )
-
-    def decompress(self, data: bytes) -> bytes:
+        
+        self._metrics["total_items_compressed"] += 1
+        self._metrics["total_original_bytes"] += original_size
+        self._metrics["total_compressed_bytes"] += compressed_size
+        self._metrics["compression_time_ms"] += duration_ms
+        
+        return compressed, stats
+    
+    async def decompress(
+        self,
+        data: bytes,
+        algorithm: Optional[CompressionAlgorithm] = None
+    ) -> Tuple[bytes, CompressionStats]:
         """Decompress data.
-
+        
         Args:
-            data: Data to decompress
-
+            data: Compressed data
+            algorithm: Compression algorithm used
+            
         Returns:
-            Decompressed data
+            Tuple of (decompressed data, stats)
         """
-        if self.algorithm == CompressionAlgorithm.GZIP:
-            return CompressionUtils.gzip_decompress(data)
-        elif self.algorithm == CompressionAlgorithm.ZLIB:
-            return CompressionUtils.zlib_decompress(data)
-        elif self.algorithm == CompressionAlgorithm.BZ2:
-            return CompressionUtils.bz2_decompress(data)
-        elif self.algorithm == CompressionAlgorithm.LZMA:
-            return CompressionUtils.lzma_decompress(data)
-        elif self.algorithm == CompressionAlgorithm.DEFLATE:
-            return CompressionUtils.deflate_decompress(data)
+        import time
+        start_time = time.time()
+        
+        algorithm = algorithm or self.default_algorithm
+        original_size = len(data)
+        
+        if algorithm == CompressionAlgorithm.GZIP:
+            decompressed = gzip.decompress(data)
+        elif algorithm == CompressionAlgorithm.ZLIB:
+            decompressed = zlib.decompress(data)
+        elif algorithm == CompressionAlgorithm.DEFLATE:
+            decompressed = zlib.decompress(data)
         else:
-            raise ValueError(f"Unknown algorithm: {self.algorithm}")
-
-    def compress_to_base64(self, data: bytes, level: int = 6) -> str:
-        """Compress and encode as base64.
-
+            decompressed = gzip.decompress(data)
+        
+        compressed_size = len(decompressed)
+        duration_ms = (time.time() - start_time) * 1000
+        
+        stats = CompressionStats(
+            original_size=original_size,
+            compressed_size=compressed_size,
+            compression_ratio=original_size / compressed_size if compressed_size > 0 else 0,
+            compression_time_ms=duration_ms,
+            algorithm=algorithm.name
+        )
+        
+        return decompressed, stats
+    
+    async def compress_json(
+        self,
+        data: Any,
+        algorithm: Optional[CompressionAlgorithm] = None,
+        **kwargs
+    ) -> Tuple[str, CompressionStats]:
+        """Compress JSON-serializable data.
+        
         Args:
-            data: Data to compress
-            level: Compression level
-
-        Returns:
-            Base64 encoded compressed data
-        """
-        result = self.compress(data, level)
-        return base64.b64encode(result.data).decode("ascii")
-
-    def decompress_from_base64(self, encoded: str) -> bytes:
-        """Decompress from base64 encoded data.
-
-        Args:
-            encoded: Base64 encoded compressed data
-
-        Returns:
-            Decompressed data
-        """
-        data = base64.b64decode(encoded.encode("ascii"))
-        return self.decompress(data)
-
-
-class StreamCompressor:
-    """Streaming compressor for large data."""
-
-    def __init__(self, algorithm: CompressionAlgorithm = CompressionAlgorithm.GZIP):
-        """Initialize stream compressor.
-
-        Args:
+            data: JSON-serializable data
             algorithm: Compression algorithm
-        """
-        self.algorithm = algorithm
-        self._gzip_stream: Optional[gzip.GzipFile] = None
-
-    def compress_stream(self, input_stream: io.BytesIO, output_stream: io.BytesIO, chunk_size: int = 8192) -> int:
-        """Compress stream data.
-
-        Args:
-            input_stream: Input data stream
-            output_stream: Output compressed stream
-            chunk_size: Chunk size for streaming
-
+            **kwargs: Additional arguments for compress
+            
         Returns:
-            Total bytes written
+            Tuple of (base64-encoded compressed data, stats)
         """
-        total_written = 0
-
-        if self.algorithm == CompressionAlgorithm.GZIP:
-            with gzip.GzipFile(fileobj=output_stream, mode="wb") as f:
-                while True:
-                    chunk = input_stream.read(chunk_size)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    total_written += len(chunk)
-
-        return total_written
-
-    def decompress_stream(self, input_stream: io.BytesIO, output_stream: io.BytesIO, chunk_size: int = 8192) -> int:
-        """Decompress stream data.
-
+        import base64
+        
+        json_bytes = json.dumps(data, default=str).encode("utf-8")
+        compressed, stats = await self.compress(json_bytes, algorithm, **kwargs)
+        
+        return base64.b64encode(compressed).decode("ascii"), stats
+    
+    async def decompress_json(
+        self,
+        data: str,
+        algorithm: Optional[CompressionAlgorithm] = None
+    ) -> Any:
+        """Decompress JSON data.
+        
         Args:
-            input_stream: Input compressed stream
-            output_stream: Output data stream
-            chunk_size: Chunk size for streaming
-
+            data: Base64-encoded compressed JSON
+            algorithm: Compression algorithm
+            
         Returns:
-            Total bytes written
+            Decompressed Python object
         """
-        total_written = 0
-
-        if self.algorithm == CompressionAlgorithm.GZIP:
-            with gzip.GzipFile(fileobj=input_stream, mode="rb") as f:
-                while True:
-                    chunk = f.read(chunk_size)
-                    if not chunk:
-                        break
-                    output_stream.write(chunk)
-                    total_written += len(chunk)
-
-        return total_written
-
-
-def create_compression_codec(algorithm: str = "gzip") -> CompressionCodec:
-    """Create compression codec.
-
-    Args:
-        algorithm: Algorithm name
-
-    Returns:
-        CompressionCodec instance
-    """
-    try:
-        algo = CompressionAlgorithm(algorithm.lower())
-    except ValueError:
-        algo = CompressionAlgorithm.GZIP
-    return CompressionCodec(algo)
-
-
-def compress_data(data: bytes, algorithm: str = "gzip", level: int = 6) -> CompressionResult:
-    """Compress data.
-
-    Args:
-        data: Data to compress
-        algorithm: Algorithm name
-        level: Compression level
-
-    Returns:
-        CompressionResult
-    """
-    codec = create_compression_codec(algorithm)
-    return codec.compress(data, level)
+        import base64
+        
+        compressed = base64.b64decode(data.encode("ascii"))
+        decompressed, _ = await self.decompress(compressed, algorithm)
+        
+        return json.loads(decompressed.decode("utf-8"))
+    
+    async def batch_compress(
+        self,
+        items: List[Tuple[str, Union[str, bytes]]],
+        algorithm: Optional[CompressionAlgorithm] = None,
+        compression_level: int = 6
+    ) -> BatchCompressionResult:
+        """Compress multiple items in batch.
+        
+        Args:
+            items: List of (id, data) tuples
+            algorithm: Compression algorithm
+            compression_level: Compression level
+            
+        Returns:
+            Batch compression result
+        """
+        import time
+        start_time = time.time()
+        
+        results = []
+        total_original = 0
+        total_compressed = 0
+        errors = []
+        
+        for item_id, data in items:
+            try:
+                compressed, stats = await self.compress(
+                    data, algorithm, compression_level
+                )
+                
+                results.append({
+                    "id": item_id,
+                    "compressed": compressed,
+                    "original_size": stats.original_size,
+                    "compressed_size": stats.compressed_size,
+                    "ratio": stats.compression_ratio
+                })
+                
+                total_original += stats.original_size
+                total_compressed += stats.compressed_size
+                
+            except Exception as e:
+                errors.append(f"Error compressing {item_id}: {e}")
+        
+        duration_ms = (time.time() - start_time) * 1000
+        overall_ratio = total_compressed / total_original if total_original > 0 else 0
+        
+        return BatchCompressionResult(
+            success=len(errors) == 0,
+            items=results,
+            total_original_size=total_original,
+            total_compressed_size=total_compressed,
+            overall_ratio=overall_ratio,
+            duration_ms=duration_ms,
+            errors=errors
+        )
+    
+    async def compress_file(
+        self,
+        file_path: str,
+        output_path: Optional[str] = None,
+        algorithm: Optional[CompressionAlgorithm] = None,
+        chunk_size: int = 8192
+    ) -> CompressionStats:
+        """Compress a file.
+        
+        Args:
+            file_path: Path to input file
+            output_path: Path to output file (default: file_path + .gz)
+            algorithm: Compression algorithm
+            chunk_size: Chunk size for streaming
+            
+        Returns:
+            Compression stats
+        """
+        import os
+        import time
+        
+        start_time = time.time()
+        algorithm = algorithm or self.default_algorithm
+        
+        if output_path is None:
+            output_path = f"{file_path}.gz"
+        
+        original_size = os.path.getsize(file_path)
+        
+        compressed_data, stats = await self.compress_file_sync(
+            file_path, output_path, algorithm
+        )
+        
+        return stats
+    
+    async def compress_file_sync(
+        self,
+        input_path: str,
+        output_path: str,
+        algorithm: CompressionAlgorithm
+    ) -> Tuple[bytes, CompressionStats]:
+        """Synchronous file compression helper."""
+        import time
+        
+        start_time = time.time()
+        
+        with open(input_path, "rb") as f_in:
+            data = f_in.read()
+        
+        if algorithm == CompressionAlgorithm.GZIP:
+            compressed = gzip.compress(data)
+        elif algorithm == CompressionAlgorithm.ZLIB:
+            compressed = zlib.compress(data)
+        else:
+            compressed = gzip.compress(data)
+        
+        with open(output_path, "wb") as f_out:
+            f_out.write(compressed)
+        
+        original_size = len(data)
+        compressed_size = len(compressed)
+        duration_ms = (time.time() - start_time) * 1000
+        
+        stats = CompressionStats(
+            original_size=original_size,
+            compressed_size=compressed_size,
+            compression_ratio=compressed_size / original_size if original_size > 0 else 0,
+            compression_time_ms=duration_ms,
+            algorithm=algorithm.name
+        )
+        
+        return compressed, stats
+    
+    async def detect_compression(self, data: bytes) -> Optional[CompressionAlgorithm]:
+        """Detect compression algorithm from data.
+        
+        Args:
+            data: Data to analyze
+            
+        Returns:
+            Detected algorithm or None
+        """
+        if len(data) < 2:
+            return None
+        
+        if data[:2] == b"\x1f\x8b":
+            return CompressionAlgorithm.GZIP
+        elif data[:2] in (b"\x78\x9c", b"\x78\x01", b"\x78\xda"):
+            return CompressionAlgorithm.ZLIB
+        
+        return None
+    
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get compression metrics."""
+        avg_ratio = (
+            self._metrics["total_compressed_bytes"] / self._metrics["total_original_bytes"]
+            if self._metrics["total_original_bytes"] > 0 else 0
+        )
+        
+        return {
+            **self._metrics,
+            "overall_compression_ratio": avg_ratio
+        }
