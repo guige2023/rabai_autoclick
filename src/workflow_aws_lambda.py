@@ -190,8 +190,8 @@ class FunctionInfo:
 class LayerConfig:
     """Configuration for creating a Lambda layer."""
     layer_name: str
-    description: str = ""
     code: Union[str, bytes, Dict[str, Any]]
+    description: str = ""
     compatible_runtimes: List[Union[Runtime, str]] = field(default_factory=list)
     license_info: str = ""
     zip_file_path: Optional[str] = None
