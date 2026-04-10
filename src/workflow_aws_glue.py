@@ -3271,7 +3271,7 @@ class GlueIntegration:
             logger.error(f"Error creating job metrics alarm: {e}")
             raise
     
-    def get Glue_job_logs(self, job_name: str, start_time: Optional[datetime] = None) -> List[str]:
+    def get_glue_job_logs(self, job_name: str, start_time: Optional[datetime] = None) -> List[str]:
         """Get Glue job logs from CloudWatch.
         
         Args:
@@ -3505,7 +3505,8 @@ class GlueIntegration:
         sql_parts.append(")")
         
         if partition_keys:
-            sql_parts.append(f"PARTITIONED BY ({', '.join([f'`{pk[\"Name\"]}`' for pk in partition_keys])})")
+            partition_cols = ', '.join([f'`{pk["Name"]}`' for pk in partition_keys])
+            sql_parts.append(f"PARTITIONED BY ({partition_cols})")
         
         sql_parts.append(f"ROW FORMAT SERDE '{serde_library}'")
         
