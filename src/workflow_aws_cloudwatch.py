@@ -1521,7 +1521,7 @@ class CloudWatchIntegration:
             response = self.cloudwatch.put_insight_rule(
                 RuleName=rule.rule_name,
                 RuleState=InsightRuleState.ENABLED.value,
-                Schema=Rule schema definition",
+                Schema=rule.schema,
                 LogGroupName=rule.log_group_name,
                 Tags=rule.tags if rule.tags else None
             )

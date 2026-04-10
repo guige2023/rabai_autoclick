@@ -271,11 +271,11 @@ class ApplicationInfo:
     """Information about a CodeDeploy application."""
     application_id: str
     application_name: str
+    created: str
+    last_modified: str
     compute_platform: Optional[str] = None
     linked_to_github: bool = False
     github_account_name: Optional[str] = None
-    created: str
-    last_modified: str
 
 
 @dataclass
@@ -285,9 +285,11 @@ class DeploymentGroupInfo:
     deployment_group_name: str
     application_name: str
     deployment_config_name: str
+    service_role_arn: str
+    created: str
+    last_modified: str
     ec2_tag_set: Optional[Dict[str, Any]] = None
     on_premises_tag_set: Optional[Dict[str, Any]] = None
-    service_role_arn: str
     auto_rollback_config: Optional[Dict[str, Any]] = None
     alarm_config: Optional[Dict[str, Any]] = None
     trigger_config: Optional[List[Dict[str, Any]]] = None
@@ -296,8 +298,6 @@ class DeploymentGroupInfo:
     deployment_style: Optional[Dict[str, Any]] = None
     target_instances: Optional[Dict[str, Any]] = None
     instances_count: Optional[Dict[str, int]] = None
-    created: str
-    last_modified: str
 
 
 @dataclass

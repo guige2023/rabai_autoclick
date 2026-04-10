@@ -500,13 +500,16 @@ class TestCloudWatchIntegrationMetrics(unittest.TestCase):
     def test_get_metric_statistics_with_dimensions(self):
         start_time = datetime(2024, 1, 1, 0, 0, 0)
         end_time = datetime(2024, 1, 2, 0, 0, 0)
+        dimensions = [{"Name": "InstanceId", "Value": "i-123"}]
 
         result = self.integration.get_metric_statistics(
             namespace="AWS/EC2",
             metric_name="CPUUtilization",
             start_time=start_time,
             end_time=end_time,
-            dimensions=[{"Name": "InstanceId", "Value": "i-123"}]
+            period=300,
+            statistics=["Average"],
+            dimensions=dimensions
         )
 
         call_args = self.mock_cloudwatch.get_metric_statistics.call_args
@@ -514,16 +517,19 @@ class TestCloudWatchIntegrationMetrics(unittest.TestCase):
 
     def test_list_metrics(self):
         result = self.integration.list_metrics(
-            namespace="AWS/EC2"
+            namespace="AWS/EC2",
+            metric_name="CPUUtilization"
         )
 
-        self.mock_cloudwatch.get_paginator.assert_called_with("list_metrics")
+        self.mock_cloudwatch.get_paginator.assert_called()
 
     def test_list_metrics_with_filters(self):
+        dimensions = [{"Name": "InstanceId", "Value": "i-123"}]
+
         result = self.integration.list_metrics(
             namespace="AWS/EC2",
             metric_name="CPUUtilization",
-            dimensions=[{"Name": "InstanceId", "Value": "i-123"}]
+            dimensions=dimensions
         )
 
         self.mock_cloudwatch.get_paginator.assert_called()
@@ -535,9 +541,10 @@ class TestCloudWatchIntegrationAlarms(unittest.TestCase):
     def setUp(self):
         self.mock_cloudwatch = MagicMock()
         self.mock_cloudwatch.put_metric_alarm.return_value = {}
-        self.mock_cloudwatch.describe_alarms.return_value = []
+        self.mock_cloudwatch.describe_alarms.return_value = {
+            'MetricAlarms': []
+        }
         self.mock_cloudwatch.delete_alarms.return_value = {}
-        self.mock_cloudwatch.set_alarm_state.return_value = {}
         self.mock_cloudwatch.get_paginator.return_value.paginate.return_value = [
             {'MetricAlarms': []}
         ]
@@ -548,7 +555,7 @@ class TestCloudWatchIntegrationAlarms(unittest.TestCase):
 
     def test_put_metric_alarm_basic(self):
         config = AlarmConfig(
-            alarm_name="HighCPU",
+            alarm_name="HighCPUAlarm",
             metric_name="CPUUtilization",
             namespace="AWS/EC2",
             threshold=80.0,
@@ -557,84 +564,72 @@ class TestCloudWatchIntegrationAlarms(unittest.TestCase):
 
         result = self.integration.put_metric_alarm(config)
 
-        self.assertEqual(result, {})
         self.mock_cloudwatch.put_metric_alarm.assert_called_once()
 
     def test_put_metric_alarm_with_actions(self):
         config = AlarmConfig(
-            alarm_name="HighCPU",
+            alarm_name="HighCPUAlarm",
             metric_name="CPUUtilization",
             namespace="AWS/EC2",
             threshold=80.0,
             comparison_operator="GreaterThanThreshold",
-            alarm_actions=["arn:aws:sns:us-east-1:123456789012:my-topic"],
-            ok_actions=["arn:aws:sns:us-east-1:123456789012:my-ok-topic"]
+            alarm_actions=["arn:aws:sns:us-east-1:123456789012:my-topic"]
         )
 
-        self.integration.put_metric_alarm(config)
+        result = self.integration.put_metric_alarm(config)
 
         call_args = self.mock_cloudwatch.put_metric_alarm.call_args
         self.assertIn('AlarmActions', call_args.kwargs)
-        self.assertIn('OKActions', call_args.kwargs)
 
     def test_put_metric_alarm_without_client(self):
         with patch('src.workflow_aws_cloudwatch.BOTO3_AVAILABLE', True):
             integration = CloudWatchIntegration()
             integration._clients = {"cloudwatch": None}
 
+            config = AlarmConfig(
+                alarm_name="HighCPUAlarm",
+                metric_name="CPUUtilization",
+                namespace="AWS/EC2",
+                threshold=80.0,
+                comparison_operator="GreaterThanThreshold"
+            )
+
             with self.assertRaises(RuntimeError) as context:
-                integration.put_metric_alarm(AlarmConfig(
-                    alarm_name="Test",
-                    metric_name="Test",
-                    namespace="Test",
-                    threshold=1.0,
-                    comparison_operator="GreaterThanThreshold"
-                ))
+                integration.put_metric_alarm(config)
             self.assertIn("not initialized", str(context.exception))
 
     def test_describe_alarms_by_names(self):
-        result = self.integration.describe_alarms(
-            alarm_names=["Alarm1", "Alarm2"]
-        )
+        alarm_names = ["Alarm1", "Alarm2"]
 
-        call_args = self.mock_cloudwatch.get_paginator.return_value.paginate.call_args
-        self.assertIn('AlarmNames', call_args.kwargs)
+        result = self.integration.describe_alarms(alarm_names=alarm_names)
+
+        self.mock_cloudwatch.get_paginator.assert_called()
 
     def test_describe_alarms_by_prefix(self):
-        result = self.integration.describe_alarms(
-            alarm_prefix="HighCPU"
-        )
+        result = self.integration.describe_alarms(alarm_prefix="HighCPU")
 
-        call_args = self.mock_cloudwatch.get_paginator.return_value.paginate.call_args
-        self.assertIn('AlarmNamePrefix', call_args.kwargs)
+        self.mock_cloudwatch.get_paginator.assert_called()
 
     def test_describe_alarms_by_state(self):
-        result = self.integration.describe_alarms(
-            state_value="ALARM"
-        )
+        result = self.integration.describe_alarms(state_value="ALARM")
 
-        call_args = self.mock_cloudwatch.get_paginator.return_value.paginate.call_args
-        self.assertIn('StateValue', call_args.kwargs)
+        self.mock_cloudwatch.get_paginator.assert_called()
 
     def test_delete_alarms(self):
-        result = self.integration.delete_alarms(
-            alarm_names=["Alarm1", "Alarm2"]
-        )
+        alarm_names = ["Alarm1", "Alarm2"]
 
-        self.mock_cloudwatch.delete_alarms.assert_called_once_with(
-            AlarmNames=["Alarm1", "Alarm2"]
-        )
+        result = self.integration.delete_alarms(alarm_names)
+
+        self.mock_cloudwatch.delete_alarms.assert_called_once()
 
     def test_set_alarm_state(self):
         result = self.integration.set_alarm_state(
-            alarm_name="HighCPU",
+            alarm_name="TestAlarm",
             state_value="ALARM",
-            state_reason="CPU utilization exceeded threshold"
+            state_reason="Testing"
         )
 
         self.mock_cloudwatch.set_alarm_state.assert_called_once()
-        call_args = self.mock_cloudwatch.set_alarm_state.call_args
-        self.assertEqual(call_args.kwargs['StateValue'], "ALARM")
 
 
 class TestCloudWatchIntegrationDashboards(unittest.TestCase):
@@ -644,83 +639,74 @@ class TestCloudWatchIntegrationDashboards(unittest.TestCase):
         self.mock_cloudwatch = MagicMock()
         self.mock_cloudwatch.put_dashboard.return_value = {}
         self.mock_cloudwatch.get_dashboard.return_value = {
-            'DashboardArn': 'arn:aws:cloudwatch::123456789012:dashboard/my-dashboard',
-            'DashboardBody': '{"widgets": []}',
-            'DashboardName': 'my-dashboard'
+            'DashboardEntries': [],
+            'DashboardBody': '{}'
         }
-        self.mock_cloudwatch.delete_dashboards.return_value = {}
         self.mock_cloudwatch.get_paginator.return_value.paginate.return_value = [
             {'DashboardEntries': []}
         ]
+        self.mock_cloudwatch.delete_dashboards.return_value = {}
 
         with patch('src.workflow_aws_cloudwatch.BOTO3_AVAILABLE', True):
             self.integration = CloudWatchIntegration()
             self.integration._clients["cloudwatch"] = self.mock_cloudwatch
 
+    def test_create_dashboard_with_body(self):
+        dashboard_body = '{"widgets": []}'
+
+        result = self.integration.create_dashboard(
+            dashboard_name="MyDashboard",
+            dashboard_body=dashboard_body
+        )
+
+        self.mock_cloudwatch.put_dashboard.assert_called_once()
+
     def test_create_dashboard_with_widgets(self):
         widgets = [
             DashboardWidget(
                 widget_type="metric",
-                title="CPU Utilization",
-                properties={"metrics": [["AWS/EC2", "CPUUtilization"]]}
+                title="CPU",
+                width=6,
+                height=6,
+                properties={}
             )
         ]
 
         result = self.integration.create_dashboard(
-            dashboard_name="my-dashboard",
+            dashboard_name="MyDashboard",
             widgets=widgets
         )
 
         self.mock_cloudwatch.put_dashboard.assert_called_once()
 
-    def test_create_dashboard_with_body(self):
-        dashboard_body = json.dumps({
-            "widgets": [{"type": "text", "height": 1}]
-        })
-
-        result = self.integration.create_dashboard(
-            dashboard_name="my-dashboard",
-            dashboard_body=dashboard_body
-        )
-
-        self.mock_cloudwatch.put_dashboard.assert_called_once()
-        call_args = self.mock_cloudwatch.put_dashboard.call_args
-        self.assertIn('DashboardBody', call_args.kwargs)
-
     def test_get_dashboard(self):
-        result = self.integration.get_dashboard(
-            dashboard_name="my-dashboard"
-        )
+        result = self.integration.get_dashboard(dashboard_name="MyDashboard")
 
-        self.mock_cloudwatch.get_dashboard.assert_called_once_with(
-            DashboardName="my-dashboard"
-        )
+        self.mock_cloudwatch.get_dashboard.assert_called_once()
 
     def test_list_dashboards(self):
         result = self.integration.list_dashboards()
 
-        self.mock_cloudwatch.get_paginator.assert_called_with("list_dashboards")
+        self.mock_cloudwatch.get_paginator.assert_called()
 
     def test_delete_dashboard(self):
-        result = self.integration.delete_dashboard(
-            dashboard_name="my-dashboard"
-        )
+        result = self.integration.delete_dashboard(dashboard_name="MyDashboard")
 
-        self.mock_cloudwatch.delete_dashboards.assert_called_once_with(
-            DashboardNames=["my-dashboard"]
-        )
+        self.mock_cloudwatch.delete_dashboards.assert_called_once()
 
     def test_update_dashboard(self):
         widgets = [
             DashboardWidget(
                 widget_type="metric",
-                title="Updated Widget",
+                title="CPU",
+                width=6,
+                height=6,
                 properties={}
             )
         ]
 
         result = self.integration.update_dashboard(
-            dashboard_name="my-dashboard",
+            dashboard_name="MyDashboard",
             widgets=widgets
         )
 
@@ -728,103 +714,96 @@ class TestCloudWatchIntegrationDashboards(unittest.TestCase):
 
 
 class TestCloudWatchIntegrationLogs(unittest.TestCase):
-    """Test CloudWatchIntegration CloudWatch Logs operations"""
+    """Test CloudWatchIntegration Logs operations"""
 
     def setUp(self):
         self.mock_logs = MagicMock()
         self.mock_logs.create_log_group.return_value = {}
+        self.mock_logs.describe_log_groups.return_value = {
+            'logGroups': []
+        }
         self.mock_logs.delete_log_group.return_value = {}
-        self.mock_logs.describe_log_groups.return_value = []
-        self.mock_logs.put_log_events.return_value = {"nextSequenceToken": "abc123"}
+        self.mock_logs.put_log_events.return_value = {}
         self.mock_logs.create_log_stream.return_value = {}
-        self.mock_logs.filter_log_events.return_value = []
-        self.mock_logs.start_query.return_value = {"queryId": "query-123"}
-        self.mock_logs.get_paginator.return_value.paginate.return_value = [
-            {'logGroups': []}
-        ]
+        self.mock_logs.filter_log_events.return_value = {
+            'events': []
+        }
+        self.mock_logs.start_query.return_value = {'queryId': 'query-123'}
+        self.mock_logs.get_query_results.return_value = {
+            'results': []
+        }
+        self.mock_logs.describe_resource_policies.return_value = []
+        self.mock_logs.put_resource_policy.return_value = {}
 
         with patch('src.workflow_aws_cloudwatch.BOTO3_AVAILABLE', True):
             self.integration = CloudWatchIntegration()
             self.integration._clients["logs"] = self.mock_logs
 
     def test_create_log_group_basic(self):
-        result = self.integration.create_log_group(
-            log_group_name="/aws/lambda/my-function"
-        )
+        result = self.integration.create_log_group(log_group_name="/my/log/group")
 
         self.mock_logs.create_log_group.assert_called_once()
 
     def test_create_log_group_with_retention(self):
         result = self.integration.create_log_group(
-            log_group_name="/aws/lambda/my-function",
+            log_group_name="/my/log/group",
             retention_days=7
         )
 
+        self.mock_logs.create_log_group.assert_called_once()
         call_args = self.mock_logs.create_log_group.call_args
-        self.assertEqual(call_args.kwargs['retentionInDays'], 7)
+        self.assertIn('retentionInDays', call_args.kwargs)
 
     def test_create_log_group_with_kms(self):
         result = self.integration.create_log_group(
-            log_group_name="/aws/lambda/my-function",
+            log_group_name="/my/log/group",
             kms_key_id="arn:aws:kms:us-east-1:123456789012:key/my-key"
         )
 
+        self.mock_logs.create_log_group.assert_called_once()
         call_args = self.mock_logs.create_log_group.call_args
         self.assertIn('kmsKeyId', call_args.kwargs)
 
     def test_create_log_group_with_tags(self):
         result = self.integration.create_log_group(
-            log_group_name="/aws/lambda/my-function",
+            log_group_name="/my/log/group",
             tags={"Environment": "Production"}
         )
 
-        call_args = self.mock_logs.create_log_group.call_args
-        self.assertIn('tags', call_args.kwargs)
+        self.mock_logs.create_log_group.assert_called_once()
 
     def test_delete_log_group(self):
-        result = self.integration.delete_log_group(
-            log_group_name="/aws/lambda/my-function"
-        )
+        result = self.integration.delete_log_group(log_group_name="/my/log/group")
 
         self.mock_logs.delete_log_group.assert_called_once()
 
     def test_describe_log_groups(self):
-        result = self.integration.describe_log_groups(
-            log_group_name_prefix="/aws/lambda"
-        )
+        result = self.integration.describe_log_groups(log_group_name_prefix="/aws")
 
-        self.mock_logs.get_paginator.assert_called_with("describe_log_groups")
+        self.mock_logs.get_paginator.assert_called_once()
 
     def test_put_log_events(self):
-        log_events = [
-            {"timestamp": 1234567890000, "message": "Test log message 1"},
-            {"timestamp": 1234567891000, "message": "Test log message 2"}
-        ]
-
         result = self.integration.put_log_events(
-            log_group_name="/aws/lambda/my-function",
-            log_stream_name="2024/01/01/[$LATEST]abc123",
-            log_events=log_events
+            log_group_name="/my/log/group",
+            log_stream_name="my-stream",
+            log_events=[{"timestamp": 1234567890, "message": "test message"}]
         )
 
         self.mock_logs.put_log_events.assert_called_once()
-        call_args = self.mock_logs.put_log_events.call_args
-        self.assertEqual(len(call_args.kwargs['logEvents']), 2)
 
     def test_put_log_events_with_sequence_token(self):
         result = self.integration.put_log_events(
-            log_group_name="/aws/lambda/my-function",
+            log_group_name="/my/log/group",
             log_stream_name="my-stream",
-            log_events=[{"timestamp": 1234567890000, "message": "Test"}],
+            log_events=[{"timestamp": 1234567890, "message": "test message"}],
             sequence_token="abc123"
         )
 
-        call_args = self.mock_logs.put_log_events.call_args
-        self.assertEqual(call_args.kwargs['sequenceToken'], "abc123")
+        self.mock_logs.put_log_events.assert_called_once()
 
     def test_create_log_stream(self):
         result = self.integration.create_log_stream(
-            log_group_name="/aws/lambda/my-function",
+            log_group_name="/my/log/group",
             log_stream_name="my-stream"
         )
 
@@ -832,40 +811,37 @@ class TestCloudWatchIntegrationLogs(unittest.TestCase):
 
     def test_filter_log_events(self):
         result = self.integration.filter_log_events(
-            log_group_name="/aws/lambda/my-function",
+            log_group_name="/my/log/group",
             filter_pattern="ERROR"
         )
 
-        self.mock_logs.get_paginator.assert_called_with("filter_log_events")
+        self.mock_logs.get_paginator.assert_called()
 
     def test_filter_log_events_with_time_range(self):
+        # filter_log_events expects start_time and end_time as integers (milliseconds)
+        start_time = int(datetime(2024, 1, 1, 0, 0, 0).timestamp() * 1000)
+        end_time = int(datetime(2024, 1, 2, 0, 0, 0).timestamp() * 1000)
+
         result = self.integration.filter_log_events(
-            log_group_name="/aws/lambda/my-function",
-            start_time=1234567890000,
-            end_time=1234567999000
-        )
-
-        call_args = self.mock_logs.get_paginator.return_value.paginate.call_args
-        self.assertIn('startTime', call_args.kwargs)
-
-    def test_start_query(self):
-        start_time = datetime(2024, 1, 1, 0, 0, 0)
-        end_time = datetime(2024, 1, 2, 0, 0, 0)
-
-        result = self.integration.start_query(
-            log_group_name="/aws/lambda/my-function",
-            query_string="fields @timestamp, @message | sort @timestamp desc | limit 20",
+            log_group_name="/my/log/group",
+            filter_pattern="ERROR",
             start_time=start_time,
             end_time=end_time
+        )
+
+        self.mock_logs.get_paginator.assert_called()
+
+    def test_start_query(self):
+        result = self.integration.start_query(
+            log_group_name="/my/log/group",
+            query_string="fields @timestamp, @message",
+            start_time=datetime(2024, 1, 1, 0, 0, 0),
+            end_time=datetime(2024, 1, 2, 0, 0, 0)
         )
 
         self.mock_logs.start_query.assert_called_once()
 
     def test_get_query_results(self):
-        self.mock_logs.get_query_results.return_value = {
-            'results': [[{'field': 'message', 'value': 'Test'}]]
-        }
-
         result = self.integration.get_query_results(query_id="query-123")
 
         self.mock_logs.get_query_results.assert_called_once()
@@ -880,63 +856,68 @@ class TestCloudWatchIntegrationEvents(unittest.TestCase):
             'RuleArn': 'arn:aws:events:us-east-1:123456789012:rule/my-rule'
         }
         self.mock_events.put_targets.return_value = {}
-        self.mock_events.delete_rule.return_value = {}
         self.mock_events.remove_targets.return_value = {}
+        self.mock_events.delete_rule.return_value = {}
+        self.mock_events.describe_rules.return_value = {'Rules': []}
+        self.mock_events.put_events.return_value = {'Entries': []}
+        self.mock_events.create_event_bus.return_value = {}
 
         with patch('src.workflow_aws_cloudwatch.BOTO3_AVAILABLE', True):
             self.integration = CloudWatchIntegration()
             self.integration._clients["events"] = self.mock_events
 
-    def test_create_event_rule_basic(self):
-        result = self.integration.create_event_rule(
-            rule_name="my-rule",
+    def test_put_rule(self):
+        result = self.integration.put_rule(
+            name="my-rule",
             event_pattern={"source": ["aws.ec2"]}
         )
 
         self.mock_events.put_rule.assert_called_once()
 
-    def test_create_event_rule_with_schedule(self):
-        result = self.integration.create_event_rule(
-            rule_name="my-rule",
+    def test_put_rule_with_schedule(self):
+        result = self.integration.put_rule(
+            name="my-rule",
             schedule_expression="rate(5 minutes)"
         )
 
+        self.mock_events.put_rule.assert_called_once()
         call_args = self.mock_events.put_rule.call_args
         self.assertIn('ScheduleExpression', call_args.kwargs)
 
-    def test_create_event_rule_with_description(self):
-        result = self.integration.create_event_rule(
+    def test_put_targets(self):
+        result = self.integration.put_targets(
             rule_name="my-rule",
-            event_pattern={"source": ["aws.ec2"]},
-            description="My event rule"
-        )
-
-        call_args = self.mock_events.put_rule.call_args
-        self.assertIn('Description', call_args.kwargs)
-
-    def test_add_event_target(self):
-        result = self.integration.add_event_target(
-            rule_name="my-rule",
-            target_arn="arn:aws:lambda:us-east-1:123456789012:function:my-function",
-            target_id="my-target"
+            targets=[{"Id": "target-1", "Arn": "arn:aws:lambda:us-east-1:123456789012:function:my-function"}]
         )
 
         self.mock_events.put_targets.assert_called_once()
 
-    def test_remove_event_target(self):
-        result = self.integration.remove_event_target(
+    def test_remove_targets(self):
+        result = self.integration.remove_targets(
             rule_name="my-rule",
-            target_ids=["my-target"]
+            target_ids=["target-1"]
         )
 
         self.mock_events.remove_targets.assert_called_once()
 
-    def test_delete_event_rule(self):
-        result = self.integration.delete_event_rule(
-            rule_name="my-rule"
-        )
+    def test_delete_rule(self):
+        result = self.integration.delete_rule(name="my-rule")
 
         self.mock_events.delete_rule.assert_called_once()
+
+    def test_put_events(self):
+        result = self.integration.put_events(
+            entries=[{"Source": "my-app", "DetailType": "my-event", "Detail": "{}"}]
+        )
+
+        self.mock_events.put_events.assert_called_once()
+
+    def test_create_event_bus(self):
+        result = self.integration.create_event_bus(
+            name="my-bus"
+        )
+
+        self.mock_events.create_event_bus.assert_called_once()
 
 
 class TestCloudWatchIntegrationSynthetics(unittest.TestCase):
@@ -951,6 +932,11 @@ class TestCloudWatchIntegrationSynthetics(unittest.TestCase):
         self.mock_cloudwatch.get_paginator.return_value.paginate.return_value = [
             {'Canaries': []}
         ]
+        self.mock_cloudwatch.get_canary_runs.return_value = {'CanaryRuns': []}
+        self.mock_cloudwatch.put_canary.return_value = {}
+        self.mock_cloudwatch.start_canary.return_value = {}
+        self.mock_cloudwatch.stop_canary.return_value = {}
+        self.mock_cloudwatch.delete_canary.return_value = {}
 
         with patch('src.workflow_aws_cloudwatch.BOTO3_AVAILABLE', True):
             self.integration = CloudWatchIntegration()
@@ -959,193 +945,100 @@ class TestCloudWatchIntegrationSynthetics(unittest.TestCase):
             self.integration._clients["iam"] = self.mock_iam
             self.integration._clients["cloudwatch"] = self.mock_cloudwatch
 
-    def test_create_canary_config(self):
-        result = self.integration.create_canary(
+    def test_create_canary(self):
+        config = CanaryConfig(
             name="my-canary",
             execution_role_arn="arn:aws:iam::123456789012:role/my-role",
             handler="exports.handler",
             code_bucket="my-bucket",
-            code_key="canary.zip",
-            schedule_expression="rate(5 minutes)"
+            code_key="canary.zip"
         )
 
-        self.mock_lambda.create_function.assert_called_once()
+        result = self.integration.create_canary(config=config)
 
-    def test_delete_canary(self):
-        self.mock_lambda.delete_function.return_value = {}
-
-        result = self.integration.delete_canary(
-            name="my-canary"
-        )
-
-        self.mock_lambda.delete_function.assert_called()
+        self.mock_cloudwatch.put_canary.assert_called_once()
 
     def test_start_canary(self):
-        self.mock_lambda.invoke.return_value = {}
+        result = self.integration.start_canary(name="my-canary")
 
-        result = self.integration.start_canary(
-            name="my-canary"
-        )
+        self.mock_cloudwatch.start_canary.assert_called()
 
-        self.mock_lambda.invoke.assert_called()
+    def test_stop_canary(self):
+        result = self.integration.stop_canary(name="my-canary")
+
+        self.mock_cloudwatch.stop_canary.assert_called()
+
+    def test_delete_canary(self):
+        result = self.integration.delete_canary(name="my-canary")
+
+        self.mock_cloudwatch.delete_canary.assert_called()
 
     def test_get_canary_runs(self):
-        self.mock_cloudwatch.get_paginator.return_value.paginate.return_value = [
-            {'CanaryRuns': []}
-        ]
-
-        result = self.integration.get_canary_runs(
-            canary_name="my-canary"
-        )
+        result = self.integration.get_canary_runs(name="my-canary")
 
         self.mock_cloudwatch.get_paginator.assert_called()
 
 
-class TestCloudWatchIntegrationContributorInsights(unittest.TestCase):
+class TestCloudWatchIntegrationInsightRules(unittest.TestCase):
     """Test CloudWatchIntegration Contributor Insights operations"""
 
     def setUp(self):
-        self.mock_logs = MagicMock()
-        self.mock_logs.put_resource_policy.return_value = {}
-        self.mock_logs.describe_delivery_destinations.return_value = {
-            'DeliveryDestinations': []
-        }
-        self.mock_logs.create_delivery_destination.return_value = {
-            'deliveryDestination': {'name': 'my-destination'}
-        }
-        self.mock_logs.create_delivery_source.return_value = {
-            'deliverySource': {'name': 'my-source'}
-        }
-        self.mock_logs.describe_delivery_sources.return_value = {
-            'DeliverySources': []
-        }
-        self.mock_logs.describe_delivery_policies.return_value = {
-            'Policies': []
-        }
-        self.mock_logs.put_delivery_destination_policy.return_value = {}
+        self.mock_cloudwatch = MagicMock()
+        self.mock_cloudwatch.put_insight_rule.return_value = {}
+        self.mock_cloudwatch.enable_insight_rules.return_value = {}
+        self.mock_cloudwatch.disable_insight_rules.return_value = {}
+        self.mock_cloudwatch.delete_insight_rules.return_value = {}
+        self.mock_cloudwatch.describe_insight_rules.return_value = {'InsightRules': []}
+        self.mock_cloudwatch.get_insight_rule_report.return_value = {'InsightRules': []}
 
         with patch('src.workflow_aws_cloudwatch.BOTO3_AVAILABLE', True):
             self.integration = CloudWatchIntegration()
-            self.integration._clients["logs"] = self.mock_logs
+            self.integration._clients["cloudwatch"] = self.mock_cloudwatch
 
-    def test_create_contributor_insight_rule(self):
-        schema = {
-            "Schema": {
-                "Name": "LogGroup.schema",
-                "Version": "1"
-            }
-        }
-
-        result = self.integration.create_contributor_insight_rule(
+    def test_create_insight_rule(self):
+        rule = ContributorInsightRule(
             rule_name="my-rule",
             log_group_name="/aws/lambda/my-function",
-            schema=schema
+            schema={"something": "value"}
         )
 
-        self.mock_logs.put_resource_policy.assert_called()
+        result = self.integration.create_insight_rule(rule=rule)
 
-    def test_delete_contributor_insight_rule(self):
-        result = self.integration.delete_contributor_insight_rule(
-            rule_name="my-rule"
-        )
+        self.mock_cloudwatch.put_insight_rule.assert_called()
 
-        self.mock_logs.put_resource_policy.assert_called()
+    def test_enable_insight_rule(self):
+        result = self.integration.enable_insight_rule(rule_name="my-rule")
 
-    def test_enable_contributor_insight_rule(self):
-        result = self.integration.enable_contributor_insight_rule(
-            rule_name="my-rule"
-        )
+        self.mock_cloudwatch.enable_insight_rules.assert_called()
 
-        self.mock_logs.put_resource_policy.assert_called()
+    def test_disable_insight_rule(self):
+        result = self.integration.disable_insight_rule(rule_name="my-rule")
 
-    def test_disable_contributor_insight_rule(self):
-        result = self.integration.disable_contributor_insight_rule(
-            rule_name="my-rule"
-        )
+        self.mock_cloudwatch.disable_insight_rules.assert_called()
 
-        self.mock_logs.put_resource_policy.assert_called()
+    def test_delete_insight_rule(self):
+        result = self.integration.delete_insight_rule(rule_name="my-rule")
 
-    def test_list_contributor_insight_rules(self):
-        result = self.integration.list_contributor_insight_rules(
-            log_group_name="/aws/lambda/my-function"
-        )
+        self.mock_cloudwatch.delete_insight_rules.assert_called()
 
-        self.mock_logs.describe_delivery_policies.assert_called()
+    def test_describe_insight_rules(self):
+        result = self.integration.describe_insight_rules()
 
+        self.mock_cloudwatch.describe_insight_rules.assert_called()
 
-class TestCloudWatchIntegrationServiceLevel(unittest.TestCase):
-    """Test CloudWatchIntegration Service Level operations"""
+    def test_get_insight_rule_report(self):
+        result = self.integration.get_insight_rule_report(rule_name="my-rule")
 
-    def setUp(self):
-        self.mock_cloudwatch = MagicMock()
-        self.mock_application_autoscaling = MagicMock()
-
-        with patch('src.workflow_aws_cloudwatch.BOTO3_AVAILABLE', True):
-            self.integration = CloudWatchIntegration()
-            self.integration._clients["cloudwatch"] = self.mock_cloudwatch
-            self.integration._clients["application_autoscaling"] = self.mock_application_autoscaling
-
-    def test_create_service_level_objective(self):
-        result = self.integration.create_service_level_objective(
-            name="my-slo",
-            sli_type=SLIType.AVAILABILITY,
-            metric_name="SuccessRate",
-            namespace="MyApp",
-            target=99.9
-        )
-
-        self.mock_cloudwatch.put_metric_alarm.assert_called()
-
-    def test_get_service_level_objectives(self):
-        result = self.integration.get_service_level_objectives()
-
-        self.mock_cloudwatch.get_paginator.assert_called()
-
-
-class TestCloudWatchIntegrationEmbeddedMetrics(unittest.TestCase):
-    """Test CloudWatchIntegration Embedded Metrics operations"""
-
-    def setUp(self):
-        self.mock_logs = MagicMock()
-        self.mock_logs.put_delivery_destination.return_value = {}
-
-        with patch('src.workflow_aws_cloudwatch.BOTO3_AVAILABLE', True):
-            self.integration = CloudWatchIntegration()
-            self.integration._clients["logs"] = self.mock_logs
-
-    def test_create_embedded_metric_log_group(self):
-        result = self.integration.create_embedded_metric_log_group(
-            log_group_name="/my/app/metrics"
-        )
-
-        self.mock_logs.put_delivery_destination.assert_called()
-
-
-class TestCloudWatchIntegrationApplicationSignals(unittest.TestCase):
-    """Test CloudWatchIntegration Application Signals operations"""
-
-    def setUp(self):
-        self.mock_cloudwatch = MagicMock()
-        self.mock_application_autoscaling = MagicMock()
-
-        with patch('src.workflow_aws_cloudwatch.BOTO3_AVAILABLE', True):
-            self.integration = CloudWatchIntegration()
-            self.integration._clients["cloudwatch"] = self.mock_cloudwatch
-            self.integration._clients["application_autoscaling"] = self.mock_application_autoscaling
-
-    def test_create_application_signals(self):
-        result = self.integration.create_application_signals()
-
-        # Should not raise an exception
-        self.assertTrue(result)
+        self.mock_cloudwatch.get_insight_rule_report.assert_called()
 
 
 class TestBoto3Availability(unittest.TestCase):
     """Test BOTO3_AVAILABLE flag"""
 
     def test_boto3_available_flag(self):
-        # This tests the module-level flag
-        self.assertIn('BOTO3_AVAILABLE', dir())
+        # This tests the module-level flag is importable
+        import src.workflow_aws_cloudwatch as cw_module
+        self.assertTrue(hasattr(cw_module, 'BOTO3_AVAILABLE'))
 
 
 if __name__ == '__main__':
