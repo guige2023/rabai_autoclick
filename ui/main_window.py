@@ -4,6 +4,8 @@ import platform
 import time
 import copy
 import logging
+import yaml
+import io
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
@@ -15,10 +17,16 @@ from PyQt5.QtWidgets import (
     QTextEdit, QGroupBox, QSplitter, QMessageBox, QFileDialog,
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QDialog, QDialogButtonBox, QProgressBar,
-    QMenu, QAction, QToolBar, QStatusBar, QCheckBox
+    QMenu, QAction, QToolBar, QStatusBar, QCheckBox,
+    QGraphicsView, QGraphicsScene, QGraphicsRectItem, QGraphicsTextItem,
+    QGraphicsLineItem, QGraphicsProxyWidget, QGraphicsItem,
+    QLineEdit, QSlider, QListView, QAbstractItemView, QSizePolicy,
+    QGraphicsSimpleTextItem, QPen, QBrush, QColor, QFont, QCursor,
+    QShortcut, QKeySequenceEdit, QColorDialog, QInputDialog,
+    QApplication, QFrame, QScrollArea, QDockWidget, QTextBrowser
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QThread, QObject
-from PyQt5.QtGui import QIcon, QColor, QFont, QCursor
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QThread, QObject, QRectF, QPointF
+from PyQt5.QtGui import QIcon, QColor, QFont, QCursor, QPainter, QPen, QBrush, QKeySequence
 
 from core.engine import FlowEngine
 from core.base_action import ActionResult
@@ -38,6 +46,13 @@ logger = logging.getLogger(__name__)
 
 IS_MACOS = platform.system() == 'Darwin'
 IS_WINDOWS = platform.system() == 'Windows'
+
+# YAML availability flag
+YAML_AVAILABLE = True
+try:
+    yaml.safe_dump({'test': 1})
+except AttributeError:
+    YAML_AVAILABLE = False
 
 
 class EngineSignals(QObject):
@@ -455,6 +470,7 @@ class ActionConfigWidget(QWidget):
 class StepListWidget(QWidget):
     step_selected = pyqtSignal(int)
     step_moved = pyqtSignal(int, int)
+    breakpoint_toggled = pyqtSignal(int, bool)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -494,6 +510,7 @@ class StepListWidget(QWidget):
             menu = QMenu()
             duplicate_action = menu.addAction("复制此步骤")
             delete_action = menu.addAction("删除此步骤")
+            breakpoint_action = menu.addAction("切换断点" if not self._has_breakpoint(item) else "取消断点")
             
             action = menu.exec_(self.list_widget.mapToGlobal(position))
             if action == duplicate_action:
@@ -501,11 +518,41 @@ class StepListWidget(QWidget):
                 self.add_step(data['id'] + 1000, data['type'], item.text().split('] ')[1] if '] ' in item.text() else data['type'])
             elif action == delete_action:
                 self.remove_step(self.list_widget.row(item))
+            elif action == breakpoint_action:
+                data = item.data(Qt.UserRole)
+                self.breakpoint_toggled.emit(data['id'], not self._has_breakpoint(item))
     
-    def add_step(self, step_id: int, action_type: str, display_name: str):
-        item = QListWidgetItem(f"[{step_id}] {display_name}")
-        item.setData(Qt.UserRole, {'id': step_id, 'type': action_type})
+    def _has_breakpoint(self, item):
+        return item.font().bold() and "🔴" in item.text()
+    
+    def add_step(self, step_id: int, action_type: str, display_name: str, has_breakpoint: bool = False):
+        prefix = "🔴 " if has_breakpoint else ""
+        item = QListWidgetItem(f"{prefix}[{step_id}] {display_name}")
+        item.setData(Qt.UserRole, {'id': step_id, 'type': action_type, 'breakpoint': has_breakpoint})
+        if has_breakpoint:
+            font = item.font()
+            font.setBold(True)
+            item.setFont(font)
         self.list_widget.addItem(item)
+    
+    def set_breakpoint(self, step_id: int, has_breakpoint: bool):
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            data = item.data(Qt.UserRole)
+            if data['id'] == step_id:
+                data['breakpoint'] = has_breakpoint
+                text = item.text()
+                if has_breakpoint and not text.startswith("🔴"):
+                    item.setText(f"🔴 {text}")
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                elif not has_breakpoint and text.startswith("🔴"):
+                    item.setText(text[2:])
+                    font = item.font()
+                    font.setBold(False)
+                    item.setFont(font)
+                break
     
     def get_current_index(self) -> int:
         return self.list_widget.currentRow()
@@ -583,6 +630,95 @@ class VariablesWidget(QWidget):
             self.table.insertRow(row)
             self.table.setItem(row, 0, QTableWidgetItem(name))
             self.table.setItem(row, 1, QTableWidgetItem(json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)))
+
+
+class VariableInspectorWidget(QWidget):
+    """Variable inspector for runtime debugging"""
+    variable_changed = pyqtSignal(str, object)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._context = {}
+        self._watched_vars = []
+        self._init_ui()
+    
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Watch section
+        watch_label = QLabel("监控变量:")
+        watch_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(watch_label)
+        
+        self.watch_table = QTableWidget()
+        self.watch_table.setColumnCount(2)
+        self.watch_table.setHorizontalHeaderLabels(["变量名", "当前值"])
+        self.watch_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.watch_table.setMaximumHeight(120)
+        layout.addWidget(self.watch_table)
+        
+        # Add watch row
+        watch_add_layout = QHBoxLayout()
+        self.watch_input = QLineEdit()
+        self.watch_input.setPlaceholderText("输入变量名添加监控...")
+        self.watch_add_btn = QPushButton("+ 添加")
+        self.watch_add_btn.clicked.connect(self._add_watch)
+        watch_add_layout.addWidget(self.watch_input)
+        watch_add_layout.addWidget(self.watch_add_btn)
+        layout.addLayout(watch_add_layout)
+        
+        # Context section
+        context_label = QLabel("执行上下文:")
+        context_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(context_label)
+        
+        self.context_table = QTableWidget()
+        self.context_table.setColumnCount(2)
+        self.context_table.setHorizontalHeaderLabels(["变量名", "值"])
+        self.context_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.context_table)
+        
+        # Refresh button
+        refresh_btn = QPushButton("刷新")
+        refresh_btn.clicked.connect(self._refresh_context)
+        layout.addWidget(refresh_btn)
+    
+    def _add_watch(self):
+        var_name = self.watch_input.text().strip()
+        if var_name and var_name not in self._watched_vars:
+            self._watched_vars.append(var_name)
+            row = self.watch_table.rowCount()
+            self.watch_table.insertRow(row)
+            self.watch_table.setItem(row, 0, QTableWidgetItem(var_name))
+            self.watch_table.setItem(row, 1, QTableWidgetItem(""))
+            self.watch_input.clear()
+    
+    def update_context(self, context: Dict[str, Any]):
+        """Update the context during execution"""
+        self._context = context
+        self.context_table.setRowCount(0)
+        for name, value in context.items():
+            row = self.context_table.rowCount()
+            self.context_table.insertRow(row)
+            value_str = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
+            self.context_table.setItem(row, 0, QTableWidgetItem(name))
+            self.context_table.setItem(row, 1, QTableWidgetItem(value_str))
+        
+        # Update watched variables
+        for i, var_name in enumerate(self._watched_vars):
+            if i < self.watch_table.rowCount():
+                value = context.get(var_name, "<undefined>")
+                value_str = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
+                self.watch_table.setItem(i, 1, QTableWidgetItem(value_str))
+    
+    def _refresh_context(self):
+        # Emit signal to request context update from engine
+        pass
+    
+    def clear(self):
+        self._context = {}
+        self.context_table.setRowCount(0)
 
 
 class LogWidget(QWidget):
@@ -756,16 +892,283 @@ class RecordingWidget(QWidget):
         return self._recording_manager.to_workflow()
 
 
+class WorkflowCanvasNode(QGraphicsRectItem):
+    """Node representation for workflow canvas"""
+    
+    def __init__(self, step_id: int, action_type: str, display_name: str, x: float, y: float):
+        super().__init__(0, 0, 160, 60)
+        self.step_id = step_id
+        self.action_type = action_type
+        self.display_name = display_name
+        self.has_breakpoint = False
+        
+        self.setPos(x, y)
+        self.setBrush(QBrush(QColor("#2d5a8a")))
+        self.setPen(QPen(QColor("#4a90d9"), 2))
+        self.setFlag(QGraphicsItem.ItemIsMovable)
+        self.setFlag(QGraphicsItem.ItemIsSelectable)
+        
+        # Node title
+        self.title_item = QGraphicsSimpleTextItem(display_name, self)
+        self.title_item.setPos(10, 10)
+        self.title_item.setBrush(QBrush(QColor("#ffffff")))
+        
+        # Step ID
+        self.id_item = QGraphicsSimpleTextItem(f"#{step_id}", self)
+        self.id_item.setPos(10, 35)
+        self.id_item.setBrush(QBrush(QColor("#a0c4e8")))
+        
+        # Input/output connection points
+        self.input_point = QGraphicsRectItem(-5, 25, 10, 10, self)
+        self.input_point.setBrush(QBrush(QColor("#ffcc00")))
+        self.input_point.setFlag(QGraphicsItem.ItemIsMovable, False)
+        
+        self.output_point = QGraphicsRectItem(155, 25, 10, 10, self)
+        self.output_point.setBrush(QBrush(QColor("#00cc00")))
+        self.output_point.setFlag(QGraphicsItem.ItemIsMovable, False)
+    
+    def set_breakpoint(self, has_breakpoint: bool):
+        self.has_breakpoint = has_breakpoint
+        if has_breakpoint:
+            self.setBrush(QBrush(QColor("#8a2d2d")))
+            self.setPen(QPen(QColor("#d94a4a"), 3))
+        else:
+            self.setBrush(QBrush(QColor("#2d5a8a")))
+            self.setPen(QPen(QColor("#4a90d9"), 2))
+    
+    def set_highlight(self, highlighted: bool):
+        if highlighted:
+            self.setPen(QPen(QColor("#00ff00"), 3))
+        else:
+            self.setPen(QPen(QColor("#4a90d9"), 2))
+
+
+class WorkflowArrow(QGraphicsLineItem):
+    """Arrow connection between nodes"""
+    
+    def __init__(self, start_node: WorkflowCanvasNode, end_node: WorkflowCanvasNode):
+        super().__init__()
+        self.start_node = start_node
+        self.end_node = end_node
+        self.setFlag(QGraphicsItem.ItemIsMovable, False)
+        self.update_line()
+    
+    def update_line(self):
+        start = self.start_node.scenePos() + QPointF(160, 30)
+        end = self.end_node.scenePos() + QPointF(0, 30)
+        self.setLine(start.x(), start.y(), end.x(), end.y())
+        self.setPen(QPen(QColor("#888888"), 2))
+
+
+class WorkflowCanvas(QGraphicsView):
+    """Visual workflow editor canvas with drag-drop support"""
+    
+    node_selected = pyqtSignal(int)
+    node_moved = pyqtSignal(int, float, float)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.scene = QGraphicsScene(self)
+        self.setScene(self.scene)
+        self.setAcceptDrops(True)
+        self.setRenderHint(QPainter.Antialiasing)
+        self.setDragMode(QGraphicsView.RubberBandDrag)
+        
+        self.nodes = {}
+        self.arrows = []
+        self.node_positions = {}
+        
+        self.scene.setSceneRect(-500, -500, 2000, 2000)
+        self.setBackgroundBrush(QBrush(QColor("#2b2b2b")))
+        
+        # Grid
+        self._draw_grid()
+    
+    def _draw_grid(self):
+        """Draw grid background"""
+        grid_pen = QPen(QColor("#3a3a3a"), 0.5)
+        for x in range(-500, 1500, 50):
+            self.scene.addLine(x, -500, x, 1500, grid_pen)
+        for y in range(-500, 1500, 50):
+            self.scene.addLine(-500, y, 1500, y, grid_pen)
+    
+    def add_node(self, step_id: int, action_type: str, display_name: str, x: float = None, y: float = None):
+        if x is None:
+            x = (len(self.nodes) % 5) * 200 + 100
+        if y is None:
+            y = (len(self.nodes) // 5) * 100 + 100
+        
+        node = WorkflowCanvasNode(step_id, action_type, display_name, x, y)
+        self.scene.addItem(node)
+        self.nodes[step_id] = node
+        self.node_positions[step_id] = (x, y)
+        
+        # Add connections to previous nodes
+        if len(self.nodes) > 1:
+            prev_node = list(self.nodes.values())[-2]
+            arrow = WorkflowArrow(prev_node, node)
+            self.scene.addItem(arrow)
+            self.arrows.append(arrow)
+        
+        return node
+    
+    def update_connections(self):
+        """Update all arrow connections"""
+        for arrow in self.arrows:
+            arrow.update_line()
+    
+    def set_breakpoint(self, step_id: int, has_breakpoint: bool):
+        if step_id in self.nodes:
+            self.nodes[step_id].set_breakpoint(has_breakpoint)
+    
+    def highlight_node(self, step_id: int, highlighted: bool):
+        if step_id in self.nodes:
+            self.nodes[step_id].set_highlight(highlighted)
+    
+    def clear(self):
+        self.scene.clear()
+        self.nodes = {}
+        self.arrows = []
+        self._draw_grid()
+    
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+    
+    def dropEvent(self, event):
+        # Handle drop from action palette
+        if event.mimeData().hasText():
+            action_type = event.mimeData().text()
+            pos = self.mapToScene(event.pos())
+            # Emit signal to add step at position
+            self.window()._on_canvas_drop(action_type, pos.x(), pos.y())
+
+
+class ActionPaletteWidget(QWidget):
+    """Action palette with search functionality"""
+    
+    action_selected = pyqtSignal(str)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._init_ui()
+    
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Search box
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("搜索动作...")
+        self.search_box.textChanged.connect(self._filter_actions)
+        layout.addWidget(self.search_box)
+        
+        # Action list
+        self.action_list = QListWidget()
+        self.action_list.setDragEnabled(True)
+        self.action_list.setDragDropMode(QAbstractItemView.DragOnly)
+        self.action_list.doubleClicked.connect(lambda: self._on_double_click())
+        layout.addWidget(self.action_list)
+    
+    def set_actions(self, action_info: Dict[str, dict]):
+        self.action_info = action_info
+        self._populate_list()
+    
+    def _populate_list(self, filter_text: str = ""):
+        self.action_list.clear()
+        for action_type, info in self.action_info.items():
+            if not filter_text or filter_text.lower() in info.get('display_name', '').lower() or filter_text.lower() in action_type.lower():
+                item = QListWidgetItem(f"📦 {info.get('display_name', action_type)}")
+                item.setData(Qt.UserRole, action_type)
+                item.setToolTip(f"{info.get('description', '')}\n类型: {action_type}")
+                self.action_list.addItem(item)
+    
+    def _filter_actions(self, text: str):
+        self._populate_list(text)
+    
+    def _on_double_click(self):
+        current_item = self.action_list.currentItem()
+        if current_item:
+            action_type = current_item.data(Qt.UserRole)
+            self.action_selected.emit(action_type)
+
+
+class RecentWorkflowsMenu(QMenu):
+    """Recent workflows menu"""
+    
+    workflow_selected = pyqtSignal(str)
+    
+    def __init__(self, title: str = "最近工作流", parent=None):
+        super().__init__(title, parent)
+        self.recent_files = []
+        self.max_recent = 10
+        self._load_recent()
+        self._build_menu()
+    
+    def _load_recent(self):
+        """Load recent workflows from config"""
+        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.json')
+        try:
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    self.recent_files = config.get('recent_workflows', [])
+        except Exception:
+            self.recent_files = []
+    
+    def _save_recent(self):
+        """Save recent workflows to config"""
+        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.json')
+        try:
+            config = {}
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+            config['recent_workflows'] = self.recent_files[:self.max_recent]
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    
+    def add_recent(self, filepath: str):
+        """Add a workflow to recent list"""
+        if filepath in self.recent_files:
+            self.recent_files.remove(filepath)
+        self.recent_files.insert(0, filepath)
+        self.recent_files = self.recent_files[:self.max_recent]
+        self._save_recent()
+        self._build_menu()
+    
+    def _build_menu(self):
+        self.clear()
+        if not self.recent_files:
+            self.addAction("无最近工作流")
+        else:
+            for i, filepath in enumerate(self.recent_files):
+                basename = os.path.basename(filepath)
+                action = self.addAction(f"{i+1}. {basename}")
+                action.setData(filepath)
+                action.triggered.connect(lambda checked, fp=filepath: self.workflow_selected.emit(fp))
+            self.addSeparator()
+            self.addAction("清除记录").triggered.connect(self._clear_recent)
+    
+    def _clear_recent(self):
+        self.recent_files = []
+        self._save_recent()
+        self._build_menu()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RabAI AutoClick - 桌面自动化工具 v1.2")
-        self.setGeometry(100, 100, 1300, 850)
+        self.setWindowTitle("RabAI AutoClick - 桌面自动化工具 v1.3")
+        self.setGeometry(100, 100, 1400, 900)
         
         self.engine = FlowEngine()
         self.current_workflow = {'variables': {}, 'steps': []}
         self.next_step_id = 1
         self.step_configs = {}
+        self.breakpoints = set()
         
         self.config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.json')
         self.hotkey_manager = HotkeyManager()
@@ -783,12 +1186,38 @@ class MainWindow(QMainWindow):
         self._current_loop = 0
         self._is_looping = False
         
+        # Theme
+        self.current_theme = "dark"
+        self.themes = {
+            "dark": {
+                "bg": "#1e1e1e", "panel": "#252526", "text": "#d4d4d4",
+                "accent": "#0078d4", "border": "#3a3a3a", "highlight": "#264f78"
+            },
+            "light": {
+                "bg": "#ffffff", "panel": "#f3f3f3", "text": "#000000",
+                "accent": "#0078d4", "border": "#cccccc", "highlight": "#e5f3ff"
+            },
+            "high-contrast": {
+                "bg": "#000000", "panel": "#000000", "text": "#ffffff",
+                "accent": "#ffff00", "border": "#ffffff", "highlight": "#ffff00"
+            }
+        }
+        
+        # Execution tracking
+        self._execution_start_time = None
+        self._current_step_index = -1
+        self._total_actions = 0
+        
         message_manager.set_parent(self)
         
         self._init_ui()
+        self._setup_toolbar()
+        self._setup_statusbar()
+        self._setup_keyboard_shortcuts()
         self._setup_hotkeys()
         self._connect_signals()
         self._update_button_texts()
+        self._apply_theme(self.current_theme)
         
         app_logger.info("程序启动", "Main")
     
@@ -799,71 +1228,25 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
         main_layout.setSpacing(5)
         
-        toolbar = QHBoxLayout()
-        
-        self.new_btn = QPushButton("📄 新建")
-        self.open_btn = QPushButton("📂 打开")
-        self.save_btn = QPushButton("💾 保存")
-        self.history_btn = QPushButton("📚 记录")
-        
-        self.run_btn = QPushButton("▶ 运行")
-        self.run_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 8px 16px;")
-        self.stop_btn = QPushButton("⏹ 停止")
-        self.stop_btn.setStyleSheet("background-color: #f44336; color: white; padding: 8px 16px;")
-        self.pause_btn = QPushButton("⏸ 暂停")
-        
-        self.on_top_btn = QPushButton("📌 置顶")
-        self.on_top_btn.setCheckable(True)
-        self.teaching_btn = QPushButton("🎓 教学")
-        self.teaching_btn.setCheckable(True)
-        self.hotkey_btn = QPushButton("⌨ 快捷键")
-        self.window_btn = QPushButton("🪟 窗口")
-        self.region_btn = QPushButton("📐 区域")
-        self.loop_btn = QPushButton("🔄 循环")
-        self.stats_btn = QPushButton("📊 统计")
-        self.memory_btn = QPushButton("💾 内存")
-        
-        self.stop_btn.setEnabled(False)
-        self.pause_btn.setEnabled(False)
-        
-        toolbar.addWidget(self.new_btn)
-        toolbar.addWidget(self.open_btn)
-        toolbar.addWidget(self.save_btn)
-        toolbar.addWidget(self.history_btn)
-        toolbar.addSpacing(20)
-        toolbar.addWidget(self.run_btn)
-        toolbar.addWidget(self.stop_btn)
-        toolbar.addWidget(self.pause_btn)
-        toolbar.addSpacing(20)
-        toolbar.addWidget(self.on_top_btn)
-        toolbar.addWidget(self.teaching_btn)
-        toolbar.addWidget(self.hotkey_btn)
-        toolbar.addWidget(self.window_btn)
-        toolbar.addWidget(self.region_btn)
-        toolbar.addWidget(self.loop_btn)
-        toolbar.addWidget(self.stats_btn)
-        toolbar.addWidget(self.memory_btn)
-        toolbar.addStretch()
-        
-        self.memory_label = QLabel()
-        toolbar.addWidget(self.memory_label)
-        
-        main_layout.addLayout(toolbar)
-        
+        # Create main splitter
         splitter = QSplitter(Qt.Horizontal)
         
+        # Left panel - Step list and canvas
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
         
+        # Step list with breakpoint support
         self.step_list = StepListWidget()
         left_layout.addWidget(QLabel("步骤列表:"))
         left_layout.addWidget(self.step_list)
         
         splitter.addWidget(left_panel)
         
+        # Right panel - Tabs
         right_panel = QTabWidget()
         
+        # Steps editor tab
         editor_widget = QWidget()
         editor_layout = QVBoxLayout(editor_widget)
         
@@ -878,17 +1261,25 @@ class MainWindow(QMainWindow):
         
         right_panel.addTab(editor_widget, "步骤编辑")
         
+        # Action palette tab
+        self.action_palette = ActionPaletteWidget()
+        self.action_palette.action_selected.connect(self._on_palette_action_selected)
+        right_panel.addTab(self.action_palette, "动作面板")
+        
+        # Variables tab
         self.variables_widget = VariablesWidget()
         right_panel.addTab(self.variables_widget, "变量")
         
+        # Recording tab
         self.recording_widget = RecordingWidget()
         right_panel.addTab(self.recording_widget, "录屏")
         
+        # Log tab
         self.log_widget = LogWidget()
         right_panel.addTab(self.log_widget, "日志")
         
         splitter.addWidget(right_panel)
-        splitter.setSizes([350, 950])
+        splitter.setSizes([350, 1050])
         
         main_layout.addWidget(splitter)
         
@@ -896,13 +1287,213 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         main_layout.addWidget(self.progress_bar)
         
-        self.statusBar().showMessage("就绪 | F6运行 | F7停止")
-        
         self._load_actions()
         
         self._memory_timer = QTimer()
         self._memory_timer.timeout.connect(self._update_memory_display)
         self._memory_timer.start(5000)
+    
+    def _setup_toolbar(self):
+        """Setup toolbar with quick actions"""
+        toolbar = QToolBar("主工具栏")
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+        
+        # File operations
+        self.new_action = QAction("📄 新建", self)
+        self.new_action.setToolTip("新建工作流 (Ctrl+N)")
+        toolbar.addAction(self.new_action)
+        
+        self.open_action = QAction("📂 打开", self)
+        self.open_action.setToolTip("打开工作流 (Ctrl+O)")
+        toolbar.addAction(self.open_action)
+        
+        self.save_action = QAction("💾 保存", self)
+        self.save_action.setToolTip("保存工作流 (Ctrl+S)")
+        toolbar.addAction(self.save_action)
+        
+        self.import_action = QAction("📥 导入", self)
+        self.import_action.setToolTip("导入工作流")
+        toolbar.addAction(self.import_action)
+        
+        self.export_action = QAction("📤 导出", self)
+        self.export_action.setToolTip("导出工作流")
+        toolbar.addAction(self.export_action)
+        
+        toolbar.addSeparator()
+        
+        # Execution controls
+        self.run_action = QAction("▶ 运行", self)
+        self.run_action.setToolTip("运行工作流 (Ctrl+R)")
+        self.run_action.setShortcut("Ctrl+R")
+        toolbar.addAction(self.run_action)
+        
+        self.stop_action = QAction("⏹ 停止", self)
+        self.stop_action.setToolTip("停止执行 (Ctrl+Shift+S)")
+        self.stop_action.setEnabled(False)
+        toolbar.addAction(self.stop_action)
+        
+        self.pause_action = QAction("⏸ 暂停", self)
+        self.pause_action.setToolTip("暂停/继续执行 (Ctrl+P)")
+        self.pause_action.setEnabled(False)
+        toolbar.addAction(self.pause_action)
+        
+        self.step_action = QAction("⏭ 单步", self)
+        self.step_action.setToolTip("单步执行 (F10)")
+        toolbar.addAction(self.step_action)
+        
+        toolbar.addSeparator()
+        
+        # View toggles
+        self.canvas_action = QAction("🎨 画布", self)
+        self.canvas_action.setToolTip("切换画布视图")
+        self.canvas_action.setCheckable(True)
+        toolbar.addAction(self.canvas_action)
+        
+        self.inspector_action = QAction("🔍 变量监控", self)
+        self.inspector_action.setToolTip("切换变量监控面板")
+        self.inspector_action.setCheckable(True)
+        toolbar.addAction(self.inspector_action)
+        
+        toolbar.addSeparator()
+        
+        # Theme switcher
+        theme_label = QLabel("主题:")
+        toolbar.addWidget(theme_label)
+        
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(["暗色", "亮色", "高对比度"])
+        self.theme_combo.setCurrentIndex(0)
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        toolbar.addWidget(self.theme_combo)
+        
+        toolbar.addWidget(QLabel())  # Spacer
+        
+        # Memory display
+        self.memory_label = QLabel()
+        toolbar.addWidget(self.memory_label)
+    
+    def _setup_statusbar(self):
+        """Setup enhanced status bar"""
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        
+        # Current step
+        self.status_step_label = QLabel("步骤: -")
+        self.status_bar.addPermanentWidget(self.status_step_label)
+        
+        # Progress
+        self.status_progress_label = QLabel("进度: 0/0")
+        self.status_bar.addPermanentWidget(self.status_progress_label)
+        
+        # Elapsed time
+        self.status_time_label = QLabel("耗时: 0.0s")
+        self.status_bar.addPermanentWidget(self.status_time_label)
+        
+        # Action count
+        self.status_action_label = QLabel("动作: 0")
+        self.status_bar.addPermanentWidget(self.status_action_label)
+        
+        # Status message
+        self.status_bar.showMessage("就绪 | Ctrl+R运行 | Ctrl+S保存")
+    
+    def _setup_keyboard_shortcuts(self):
+        """Setup keyboard shortcuts"""
+        shortcuts = [
+            ("Ctrl+N", self._on_new),
+            ("Ctrl+O", self._on_open),
+            ("Ctrl+S", self._on_save),
+            ("Ctrl+R", self._on_run),
+            ("Ctrl+Shift+S", self._on_stop),
+            ("Ctrl+P", self._on_pause),
+            ("F5", self._on_run),
+            ("F6", self._on_stop),
+            ("F10", self._on_step),
+        ]
+        
+        for key_seq, handler in shortcuts:
+            shortcut = QShortcut(QKeySequence(key_seq), self)
+            shortcut.activated.connect(handler)
+    
+    def _apply_theme(self, theme_name: str):
+        """Apply theme to the application"""
+        if theme_name not in self.themes:
+            return
+        
+        theme = self.themes[theme_name]
+        self.current_theme = theme_name
+        
+        stylesheet = f"""
+            QMainWindow, QWidget {{
+                background-color: {theme['bg']};
+                color: {theme['text']};
+            }}
+            QGroupBox {{
+                border: 1px solid {theme['border']};
+                margin-top: 8px;
+                padding-top: 8px;
+            }}
+            QPushButton {{
+                background-color: {theme['panel']};
+                border: 1px solid {theme['border']};
+                padding: 5px 10px;
+            }}
+            QPushButton:hover {{
+                background-color: {theme['highlight']};
+            }}
+            QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
+                background-color: {theme['panel']};
+                border: 1px solid {theme['border']};
+            }}
+            QTabWidget::pane {{
+                border: 1px solid {theme['border']};
+            }}
+            QTabBar::tab {{
+                background-color: {theme['panel']};
+                padding: 5px 10px;
+            }}
+            QTabBar::tab:selected {{
+                background-color: {theme['highlight']};
+            }}
+            QListWidget, QTableWidget {{
+                background-color: {theme['panel']};
+                border: 1px solid {theme['border']};
+            }}
+            QToolBar {{
+                background-color: {theme['panel']};
+                border: none;
+                spacing: 3px;
+            }}
+            QStatusBar {{
+                background-color: {theme['panel']};
+            }}
+            QLabel {{
+                color: {theme['text']};
+            }}
+        """
+        self.setStyleSheet(stylesheet)
+    
+    def _on_theme_changed(self, index):
+        themes = ["dark", "light", "high-contrast"]
+        if index < len(themes):
+            self._apply_theme(themes[index])
+    
+    def _update_statusbar(self):
+        """Update status bar information"""
+        total_steps = self.step_list.get_step_count()
+        
+        if self._current_step_index >= 0 and self._current_step_index < total_steps:
+            self.status_step_label.setText(f"步骤: {self._current_step_index + 1}/{total_steps}")
+        else:
+            self.status_step_label.setText("步骤: -")
+        
+        self.status_progress_label.setText(f"进度: {self._current_step_index}/{total_steps}")
+        
+        if self._execution_start_time:
+            elapsed = time.time() - self._execution_start_time
+            self.status_time_label.setText(f"耗时: {elapsed:.1f}s")
+        
+        self.status_action_label.setText(f"动作: {self._total_actions}")
     
     def _update_memory_display(self):
         try:
@@ -921,6 +1512,9 @@ class MainWindow(QMainWindow):
             item.setData(Qt.UserRole, action_type)
             item.setToolTip(f"{info['description']}\n类型: {action_type}")
             self.action_list.addItem(item)
+        
+        # Setup action palette
+        self.action_palette.set_actions(action_info)
         
         self.config_widgets = {}
         for action_type, info in action_info.items():
@@ -948,38 +1542,38 @@ class MainWindow(QMainWindow):
         stop_key = self.current_hotkeys.get('stop', 'f7').upper()
         pause_key = self.current_hotkeys.get('pause', 'f8').upper()
         
-        self.run_btn.setText(f"▶ 运行 ({start_key})")
-        self.stop_btn.setText(f"⏹ 停止 ({stop_key})")
-        self.pause_btn.setText(f"⏸ 暂停 ({pause_key})")
+        self.run_action.setText(f"▶ 运行 ({start_key})")
+        self.stop_action.setText(f"⏹ 停止 ({stop_key})")
+        self.pause_action.setText(f"⏸ 暂停 ({pause_key})")
     
     def _connect_signals(self):
-        self.new_btn.clicked.connect(self._on_new)
-        self.open_btn.clicked.connect(self._on_open)
-        self.save_btn.clicked.connect(self._on_save)
-        self.history_btn.clicked.connect(self._on_history)
-        self.run_btn.clicked.connect(self._on_run)
-        self.stop_btn.clicked.connect(self._on_stop)
-        self.pause_btn.clicked.connect(self._on_pause)
-        self.on_top_btn.clicked.connect(self._toggle_always_on_top)
-        self.teaching_btn.clicked.connect(self._toggle_teaching_mode)
-        self.hotkey_btn.clicked.connect(self._on_hotkey_settings)
-        self.window_btn.clicked.connect(self._on_select_window)
-        self.region_btn.clicked.connect(self._on_select_region)
-        self.loop_btn.clicked.connect(self._on_loop_settings)
-        self.stats_btn.clicked.connect(self._on_show_stats)
-        self.memory_btn.clicked.connect(self._on_memory_optimize)
+        # Toolbar actions
+        self.new_action.triggered.connect(self._on_new)
+        self.open_action.triggered.connect(self._on_open)
+        self.save_action.triggered.connect(self._on_save)
+        self.import_action.triggered.connect(self._on_import)
+        self.export_action.triggered.connect(self._on_export)
+        self.run_action.triggered.connect(self._on_run)
+        self.stop_action.triggered.connect(self._on_stop)
+        self.pause_action.triggered.connect(self._on_pause)
+        self.step_action.triggered.connect(self._on_step)
         
-        self.action_list.currentRowChanged.connect(self._on_action_selected)
-        
+        # Step list signals
         self.step_list.add_btn.clicked.connect(self._on_add_step)
         self.step_list.remove_btn.clicked.connect(self._on_remove_step)
         self.step_list.up_btn.clicked.connect(self._on_move_up)
         self.step_list.down_btn.clicked.connect(self._on_move_down)
         self.step_list.step_selected.connect(self._on_step_selected)
+        self.step_list.breakpoint_toggled.connect(self._on_breakpoint_toggled)
         
+        # Action list
+        self.action_list.currentRowChanged.connect(self._on_action_selected)
+        
+        # Config widgets
         for widget in self.config_widgets.values():
             widget.config_changed.connect(self._on_config_changed)
         
+        # Engine signals
         self.engine_signals = EngineSignals()
         self.engine_signals.step_start.connect(self._on_engine_step_start)
         self.engine_signals.step_end.connect(self._on_engine_step_end)
@@ -993,6 +1587,123 @@ class MainWindow(QMainWindow):
             on_error=lambda step, msg: self.engine_signals.error.emit(step, msg)
         )
     
+    def _on_palette_action_selected(self, action_type: str):
+        """Handle action selected from palette"""
+        # Find and select in action list
+        for i in range(self.action_list.count()):
+            item = self.action_list.item(i)
+            if item.data(Qt.UserRole) == action_type:
+                self.action_list.setCurrentRow(i)
+                break
+    
+    def _on_breakpoint_toggled(self, step_id: int, has_breakpoint: bool):
+        """Toggle breakpoint on a step"""
+        if has_breakpoint:
+            self.breakpoints.add(step_id)
+        else:
+            self.breakpoints.discard(step_id)
+        
+        self.step_list.set_breakpoint(step_id, has_breakpoint)
+        
+        step_name = f"步骤 #{step_id}"
+        if has_breakpoint:
+            app_logger.info(f"已设置断点: {step_name}", "Breakpoint")
+        else:
+            app_logger.info(f"已取消断点: {step_name}", "Breakpoint")
+    
+    def _on_import(self):
+        """Import workflow from JSON or YAML"""
+        file_path, selected_filter = QFileDialog.getOpenFileName(
+            self, "导入工作流", "",
+            "所有支持格式 (*.json *.yaml *.yml);;JSON文件 (*.json);;YAML文件 (*.yaml *.yml)"
+        )
+        
+        if not file_path:
+            return
+        
+        if not os.path.exists(file_path):
+            show_error("导入失败", "文件不存在")
+            return
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                if file_path.endswith(('.yaml', '.yml')):
+                    if not YAML_AVAILABLE:
+                        show_error("导入失败", "PyYAML未安装，无法导入YAML文件")
+                        return
+                    workflow = yaml.safe_load(f)
+                else:
+                    workflow = json.load(f)
+            
+            self._load_workflow_data(workflow)
+            app_logger.info(f"成功导入: {file_path}", "Workflow")
+            show_toast(f"已导入: {os.path.basename(file_path)}", 'success')
+            
+        except Exception as e:
+            show_error("导入失败", f"无法导入文件: {str(e)}")
+    
+    def _on_export(self):
+        """Export workflow to JSON or YAML"""
+        self._build_workflow()
+        
+        if not self.current_workflow.get('steps'):
+            show_warning("提示", "工作流中没有步骤")
+            return
+        
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            self, "导出工作流", "",
+            "JSON文件 (*.json);;YAML文件 (*.yaml)"
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            # Determine format
+            is_yaml = file_path.endswith(('.yaml', '.yml'))
+            
+            if is_yaml:
+                if not YAML_AVAILABLE:
+                    show_error("导出失败", "PyYAML未安装，无法导出YAML文件")
+                    return
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    yaml.safe_dump(self.current_workflow, f, allow_unicode=True, default_flow_style=False)
+            else:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(self.current_workflow, f, ensure_ascii=False, indent=2)
+            
+            app_logger.info(f"成功导出: {file_path}", "Workflow")
+            show_toast(f"已导出: {os.path.basename(file_path)}", 'success')
+            
+        except Exception as e:
+            show_error("导出失败", f"无法导出文件: {str(e)}")
+    
+    def _load_workflow_data(self, workflow: Dict[str, Any]):
+        """Load workflow data into the editor"""
+        self.current_workflow = workflow
+        self.step_list.clear()
+        self.step_configs = {}
+        self.breakpoints = {}
+        self.next_step_id = 1
+        
+        for step in self.current_workflow.get('steps', []):
+            step_id = step.get('id', self.next_step_id)
+            action_type = step.get('type', '')
+            has_breakpoint = step.get('breakpoint', False)
+            
+            action_info = self.engine.get_action_info().get(action_type, {})
+            display_name = action_info.get('display_name', action_type)
+            
+            self.step_list.add_step(step_id, action_type, display_name, has_breakpoint)
+            self.step_configs[step_id] = step.copy()
+            
+            if has_breakpoint:
+                self.breakpoints[step_id] = True
+            
+            self.next_step_id = max(self.next_step_id, step_id + 1)
+        
+        self.variables_widget.set_variables(self.current_workflow.get('variables', {}))
+    
     def _on_new(self):
         if self.step_list.get_step_count() > 0:
             if not show_question("确认", "是否新建工作流？当前未保存的内容将丢失。"):
@@ -1000,47 +1711,72 @@ class MainWindow(QMainWindow):
         
         self.current_workflow = {'variables': {}, 'steps': []}
         self.step_configs = {}
+        self.breakpoints = {}
         self.next_step_id = 1
         self.step_list.clear()
         self.variables_widget.set_variables({})
-        self.log_widget.clear()
+        self._reset_execution_state()
         app_logger.info("新建工作流", "Workflow")
         show_toast("新建工作流", 'info')
     
     def _on_open(self):
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "打开工作流", "", "JSON文件 (*.json)"
+            self, "打开工作流", "", "所有支持格式 (*.json *.yaml *.yml);;JSON文件 (*.json);;YAML文件 (*.yaml *.yml)"
         )
         if file_path:
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
+            self._open_workflow_file(file_path)
+    
+    def _open_workflow_file(self, file_path: str):
+        """Open a workflow file"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                if file_path.endswith(('.yaml', '.yml')):
+                    if not YAML_AVAILABLE:
+                        show_error("打开失败", "PyYAML未安装，无法打开YAML文件")
+                        return
+                    self.current_workflow = yaml.safe_load(f)
+                else:
                     self.current_workflow = json.load(f)
+            
+            self.step_list.clear()
+            self.step_configs = {}
+            self.breakpoints = {}
+            self.next_step_id = 1
+            
+            for step in self.current_workflow.get('steps', []):
+                step_id = step.get('id', self.next_step_id)
+                action_type = step.get('type', '')
+                has_breakpoint = step.get('breakpoint', False)
                 
-                self.step_list.clear()
-                self.step_configs = {}
-                self.next_step_id = 1
+                action_info = self.engine.get_action_info().get(action_type, {})
+                display_name = action_info.get('display_name', action_type)
                 
-                for step in self.current_workflow.get('steps', []):
-                    step_id = step.get('id', self.next_step_id)
-                    action_type = step.get('type', '')
-                    
-                    action_info = self.engine.get_action_info().get(action_type, {})
-                    display_name = action_info.get('display_name', action_type)
-                    
-                    self.step_list.add_step(step_id, action_type, display_name)
-                    self.step_configs[step_id] = step.copy()
-                    
-                    self.next_step_id = max(self.next_step_id, step_id + 1)
+                self.step_list.add_step(step_id, action_type, display_name, has_breakpoint)
+                self.step_configs[step_id] = step.copy()
                 
-                self.variables_widget.set_variables(self.current_workflow.get('variables', {}))
-                app_logger.info(f"打开工作流: {file_path}", "Workflow")
-                show_toast(f"已打开: {os.path.basename(file_path)}", 'success')
-            except Exception as e:
-                show_error("打开失败", f"无法打开文件: {str(e)}")
+                if has_breakpoint:
+                    self.breakpoints[step_id] = True
+                
+                self.next_step_id = max(self.next_step_id, step_id + 1)
+            
+            self.variables_widget.set_variables(self.current_workflow.get('variables', {}))
+            app_logger.info(f"打开工作流: {file_path}", "Workflow")
+            show_toast(f"已打开: {os.path.basename(file_path)}", 'success')
+            
+            # Add to recent
+            self._add_to_recent(file_path)
+            
+        except Exception as e:
+            show_error("打开失败", f"无法打开文件: {str(e)}")
+    
+    def _add_to_recent(self, filepath: str):
+        """Add file to recent workflows"""
+        if hasattr(self, 'recent_menu'):
+            self.recent_menu.add_recent(filepath)
     
     def _on_save(self):
         menu = QMenu(self)
-        save_file_action = menu.addAction("💾 保存到文件...")
+        save_file_action = menu.addAction("💾 保存到文件... (Ctrl+S)")
         quick_save_action = menu.addAction("⚡ 快速保存到记录")
         
         action = menu.exec_(QCursor.pos())
@@ -1055,14 +1791,22 @@ class MainWindow(QMainWindow):
             self, "保存工作流", "", "JSON文件 (*.json)"
         )
         if file_path:
-            try:
-                self._build_workflow()
-                with open(file_path, 'w', encoding='utf-8') as f:
+            self._do_save_to_file(file_path)
+    
+    def _do_save_to_file(self, file_path: str, is_yaml: bool = False):
+        """Save workflow to file"""
+        try:
+            self._build_workflow()
+            with open(file_path, 'w', encoding='utf-8') as f:
+                if is_yaml:
+                    yaml.safe_dump(self.current_workflow, f, allow_unicode=True, default_flow_style=False)
+                else:
                     json.dump(self.current_workflow, f, ensure_ascii=False, indent=2)
-                app_logger.info(f"保存工作流: {file_path}", "Workflow")
-                show_toast(f"已保存: {os.path.basename(file_path)}", 'success')
-            except Exception as e:
-                show_error("保存失败", f"无法保存文件: {str(e)}")
+            app_logger.info(f"保存工作流: {file_path}", "Workflow")
+            show_toast(f"已保存: {os.path.basename(file_path)}", 'success')
+            self._add_to_recent(file_path)
+        except Exception as e:
+            show_error("保存失败", f"无法保存文件: {str(e)}")
     
     def _quick_save(self):
         self._build_workflow()
@@ -1088,10 +1832,18 @@ class MainWindow(QMainWindow):
             if step_id in self.step_configs:
                 step = self.step_configs[step_id].copy()
                 step['id'] = step_id
+                step['breakpoint'] = data.get('breakpoint', False)
                 steps.append(step)
         
         self.current_workflow['steps'] = steps
         self.current_workflow['variables'] = self.variables_widget.get_variables()
+    
+    def _reset_execution_state(self):
+        """Reset execution tracking state"""
+        self._execution_start_time = None
+        self._current_step_index = -1
+        self._total_actions = 0
+        self._update_statusbar()
     
     def _on_run(self):
         if self.engine.is_running():
@@ -1111,6 +1863,8 @@ class MainWindow(QMainWindow):
         
         self._current_loop = 0
         self._is_looping = True
+        self._execution_start_time = time.time()
+        self._total_actions = 0
         
         workflow_name = "未命名工作流"
         execution_stats.start_session(workflow_name, self._loop_count)
@@ -1125,13 +1879,10 @@ class MainWindow(QMainWindow):
             return
         
         self._current_loop += 1
-        self._loop_start_time = time.time()
         
         app_logger.info(f"执行第 {self._current_loop}/{self._loop_count} 次循环", "Workflow")
         
-        self.run_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.pause_btn.setEnabled(True)
+        self._update_execution_buttons(running=True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, len(self.current_workflow['steps']))
         self.progress_bar.setValue(0)
@@ -1142,15 +1893,18 @@ class MainWindow(QMainWindow):
         self.engine.load_workflow_from_dict(self.current_workflow)
         self.engine.run_async()
     
+    def _update_execution_buttons(self, running: bool):
+        """Update button states during execution"""
+        self.run_action.setEnabled(not running)
+        self.stop_action.setEnabled(running)
+        self.pause_action.setEnabled(running)
+    
     def _on_stop(self):
         self._is_looping = False
         self._current_loop = 0
         self.engine.stop()
-        self.run_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.pause_btn.setEnabled(False)
-        self.pause_btn.setText("⏸ 暂停")
-        self.progress_bar.setVisible(False)
+        self._update_execution_buttons(running=False)
+        self._reset_execution_state()
         self.showNormal()
         self.activateWindow()
         app_logger.warning("停止工作流", "Workflow")
@@ -1159,71 +1913,114 @@ class MainWindow(QMainWindow):
     def _on_pause(self):
         if self.engine.is_paused():
             self.engine.resume()
-            self.pause_btn.setText("⏸ 暂停")
+            self.pause_action.setText("⏸ 暂停")
             app_logger.info("继续运行", "Workflow")
         else:
             self.engine.pause()
-            self.pause_btn.setText("▶ 继续")
+            self.pause_action.setText("▶ 继续")
             app_logger.info("已暂停", "Workflow")
     
-    def _toggle_always_on_top(self):
-        self._always_on_top = not self._always_on_top
-        
-        if self._always_on_top:
-            self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
-            self.on_top_btn.setChecked(True)
-            self.on_top_btn.setStyleSheet("background-color: #2196F3; color: white;")
-            show_toast("窗口已置顶", 'info')
-        else:
-            self.setWindowFlags(self.windowFlags() & ~Qt.WindowStaysOnTopHint)
-            self.on_top_btn.setChecked(False)
-            self.on_top_btn.setStyleSheet("")
-            show_toast("窗口取消置顶", 'info')
-        
-        self.show()
-        app_logger.info(f"窗口置顶: {self._always_on_top}", "UI")
+    def _on_step(self):
+        """Execute single step"""
+        show_toast("单步执行功能开发中", 'info')
     
-    def _toggle_teaching_mode(self):
-        self._teaching_mode = key_display_window.toggle()
-        
-        if self._teaching_mode:
-            self.teaching_btn.setChecked(True)
-            self.teaching_btn.setStyleSheet("background-color: #9C27B0; color: white;")
-            show_toast("教学模式已开启 - 按键和鼠标点击将显示在屏幕上", 'success')
-        else:
-            self.teaching_btn.setChecked(False)
-            self.teaching_btn.setStyleSheet("")
-            show_toast("教学模式已关闭", 'info')
-        
-        app_logger.info(f"教学模式: {self._teaching_mode}", "UI")
+    def _on_engine_step_start(self, step):
+        try:
+            step_id = step.get('id')
+            step_type = step.get('type')
+            
+            # Check for breakpoint
+            if step_id in self.breakpoints:
+                self.engine.pause()
+                app_logger.warning(f"断点命中: 步骤 [{step_id}] {step_type}", "Breakpoint")
+                show_toast(f"断点命中: 步骤 #{step_id}", 'warning')
+                return
+            
+            app_logger.info(f"执行步骤 [{step_id}]: {step_type}", "Engine")
+            
+            # Update progress
+            current = self.progress_bar.value()
+            self.progress_bar.setValue(current + 1)
+            
+            # Track step index
+            self._current_step_index = current
+            self._total_actions += 1
+            
+            self._update_statusbar()
+            
+        except Exception as e:
+            logger.error(f"Step start error: {e}")
     
-    def _on_history(self):
-        dialog = HistoryDialog(self.history_manager, self)
-        dialog.workflow_selected.connect(self._load_workflow_from_history)
-        dialog.exec_()
+    def _on_engine_step_end(self, step, result):
+        try:
+            step_duration = getattr(result, 'duration', 0) or 0
+            execution_stats.record_step(
+                step.get('type', 'unknown'),
+                step_duration,
+                result.success,
+                result.message
+            )
+            
+            if result.success:
+                app_logger.success(f"步骤 [{step.get('id')}] 完成: {result.message} ({step_duration:.2f}秒)", "Engine")
+            else:
+                app_logger.error(f"步骤 [{step.get('id')}] 失败: {result.message}", "Engine")
+                execution_stats.record_error(step.get('type', 'unknown'), result.message)
+            
+            self._update_statusbar()
+            
+        except Exception as e:
+            logger.error(f"Step end error: {e}")
     
-    def _load_workflow_from_history(self, workflow: Dict[str, Any]):
-        self.current_workflow = workflow
-        self.step_configs = {}
-        self.next_step_id = 1
-        
-        self.step_list.clear()
-        
-        for step in self.current_workflow.get('steps', []):
-            step_id = step.get('id', self.next_step_id)
-            action_type = step.get('type', '')
+    def _on_engine_workflow_end(self, success):
+        try:
+            if not self._is_looping:
+                return
             
-            action_info = self.engine.get_action_info().get(action_type, {})
-            display_name = action_info.get('display_name', action_type)
+            loop_duration = 0
+            if hasattr(self, '_loop_start_time') and self._loop_start_time:
+                loop_duration = time.time() - self._loop_start_time
             
-            self.step_list.add_step(step_id, action_type, display_name)
-            self.step_configs[step_id] = step.copy()
+            execution_stats.record_loop(self._current_loop, loop_duration, success, 
+                                        len(self.current_workflow.get('steps', [])))
             
-            self.next_step_id = max(self.next_step_id, step_id + 1)
-        
-        self.variables_widget.set_variables(self.current_workflow.get('variables', {}))
-        show_toast("已加载历史记录", 'success')
-        app_logger.info("从历史记录加载工作流", "Workflow")
+            if not success:
+                self._is_looping = False
+            
+            if self._is_looping and self._current_loop < self._loop_count:
+                app_logger.info(f"循环 {self._current_loop} 完成，等待 {self._loop_interval} 秒后继续...", "Workflow")
+                QTimer.singleShot(int(self._loop_interval * 1000), self._run_single_loop)
+                return
+            
+            session_result = execution_stats.end_session(success)
+            total_duration = session_result.get('total_duration', 0) if session_result else 0
+            avg_duration = session_result.get('avg_loop_duration', 0) if session_result else 0
+            
+            self._update_execution_buttons(running=False)
+            self._reset_execution_state()
+            
+            self.showNormal()
+            self.activateWindow()
+            
+            loop_info = f" (共{self._loop_count}次循环)" if self._loop_count > 1 else ""
+            time_info = f" | 总耗时: {total_duration:.1f}秒"
+            if avg_duration > 0 and self._loop_count > 1:
+                time_info += f" | 平均每循环: {avg_duration:.1f}秒"
+            
+            if success:
+                app_logger.success(f"工作流执行完成{loop_info}{time_info}", "Workflow")
+                show_toast(f"执行完成{loop_info} ({total_duration:.1f}秒)", 'success')
+            else:
+                app_logger.warning("工作流已停止", "Workflow")
+        except Exception as e:
+            logger.error(f"Workflow end error: {e}")
+    
+    def _on_engine_error(self, step, message: str):
+        try:
+            app_logger.error(f"步骤 [{step.get('id')}] 错误: {message}", "Engine")
+            execution_stats.record_error(step.get('type', 'unknown'), message)
+        except Exception as e:
+            logger.error(f"Engine error: {e}")
     
     def _on_action_selected(self, index):
         if index >= 0:
@@ -1271,6 +2068,9 @@ class MainWindow(QMainWindow):
             if step_id in self.step_configs:
                 del self.step_configs[step_id]
             
+            if step_id in self.breakpoints:
+                del self.breakpoints[step_id]
+            
             self.step_list.remove_step(index)
             app_logger.info(f"删除步骤 [{step_id}]", "Editor")
     
@@ -1315,85 +2115,6 @@ class MainWindow(QMainWindow):
                 config['id'] = step_id
                 config['type'] = action_type
                 self.step_configs[step_id] = config
-    
-    def _on_engine_step_start(self, step):
-        try:
-            app_logger.info(f"执行步骤 [{step.get('id')}]: {step.get('type')}", "Engine")
-            current = self.progress_bar.value()
-            self.progress_bar.setValue(current + 1)
-        except Exception as e:
-            logger.error(f"Step start error: {e}")
-    
-    def _on_engine_step_end(self, step, result):
-        try:
-            step_duration = getattr(result, 'duration', 0) or 0
-            execution_stats.record_step(
-                step.get('type', 'unknown'),
-                step_duration,
-                result.success,
-                result.message
-            )
-            
-            if result.success:
-                app_logger.success(f"步骤 [{step.get('id')}] 完成: {result.message} ({step_duration:.2f}秒)", "Engine")
-            else:
-                app_logger.error(f"步骤 [{step.get('id')}] 失败: {result.message}", "Engine")
-                execution_stats.record_error(step.get('type', 'unknown'), result.message)
-        except Exception as e:
-            logger.error(f"Step end error: {e}")
-    
-    def _on_engine_workflow_end(self, success):
-        try:
-            if not self._is_looping:
-                return
-            
-            loop_duration = 0
-            if hasattr(self, '_loop_start_time'):
-                loop_duration = time.time() - self._loop_start_time
-            
-            execution_stats.record_loop(self._current_loop, loop_duration, success, 
-                                        len(self.current_workflow.get('steps', [])))
-            
-            if not success:
-                self._is_looping = False
-            
-            if self._is_looping and self._current_loop < self._loop_count:
-                app_logger.info(f"循环 {self._current_loop} 完成，等待 {self._loop_interval} 秒后继续...", "Workflow")
-                QTimer.singleShot(int(self._loop_interval * 1000), self._run_single_loop)
-                return
-            
-            session_result = execution_stats.end_session(success)
-            total_duration = session_result.get('total_duration', 0) if session_result else 0
-            avg_duration = session_result.get('avg_loop_duration', 0) if session_result else 0
-            
-            self.run_btn.setEnabled(True)
-            self.stop_btn.setEnabled(False)
-            self.pause_btn.setEnabled(False)
-            self.pause_btn.setText("⏸ 暂停")
-            self.progress_bar.setVisible(False)
-            
-            self.showNormal()
-            self.activateWindow()
-            
-            loop_info = f" (共{self._loop_count}次循环)" if self._loop_count > 1 else ""
-            time_info = f" | 总耗时: {total_duration:.1f}秒"
-            if avg_duration > 0 and self._loop_count > 1:
-                time_info += f" | 平均每循环: {avg_duration:.1f}秒"
-            
-            if success:
-                app_logger.success(f"工作流执行完成{loop_info}{time_info}", "Workflow")
-                show_toast(f"执行完成{loop_info} ({total_duration:.1f}秒)", 'success')
-            else:
-                app_logger.warning("工作流已停止", "Workflow")
-        except Exception as e:
-            logger.error(f"Workflow end error: {e}")
-    
-    def _on_engine_error(self, step, message: str):
-        try:
-            app_logger.error(f"步骤 [{step.get('id')}] 错误: {message}", "Engine")
-            execution_stats.record_error(step.get('type', 'unknown'), message)
-        except Exception as e:
-            logger.error(f"Engine error: {e}")
     
     def _on_hotkey_settings(self):
         dialog = HotkeySettingsDialog(self.current_hotkeys, self)
@@ -1445,20 +2166,12 @@ class MainWindow(QMainWindow):
         """设置目标窗口"""
         self._target_region = window.region
         self._window_mode = True
-        self.window_btn.setText(f"🪟 {window.title[:10]}...")
-        self.window_btn.setStyleSheet("background-color: #2196F3; color: white;")
-        self.region_btn.setText("📐 区域")
-        self.region_btn.setStyleSheet("")
-        show_toast(f"已选择窗口: {window.title}", 'success')
         app_logger.info(f"设置目标窗口: {window.title}", "UI")
     
     def _clear_target_window(self):
         """清除目标窗口"""
         self._target_region = None
         self._window_mode = False
-        self.window_btn.setText("🪟 窗口")
-        self.window_btn.setStyleSheet("")
-        show_toast("已清除窗口选择", 'info')
     
     def _on_select_region(self):
         """选择识别区域"""
@@ -1501,10 +2214,6 @@ class MainWindow(QMainWindow):
         """区域选择完成"""
         self._target_region = (x, y, w, h)
         self._window_mode = False
-        self.region_btn.setText(f"📐 ({x},{y},{w}x{h})")
-        self.region_btn.setStyleSheet("background-color: #4CAF50; color: white;")
-        self.window_btn.setText("🪟 窗口")
-        self.window_btn.setStyleSheet("")
         self.showNormal()
         self.activateWindow()
         show_toast(f"已选择区域: ({x}, {y}, {w}x{h})", 'success')
@@ -1518,14 +2227,10 @@ class MainWindow(QMainWindow):
     def _clear_region(self):
         """清除区域"""
         self._target_region = None
-        self.region_btn.setText("📐 区域")
-        self.region_btn.setStyleSheet("")
         show_toast("已清除识别区域", 'info')
     
     def _on_loop_settings(self):
         """循环执行设置"""
-        from PyQt5.QtWidgets import QSpinBox, QDoubleSpinBox, QFormLayout
-        
         dialog = QDialog(self)
         dialog.setWindowTitle("循环执行设置")
         dialog.setMinimumWidth(300)
@@ -1559,13 +2264,6 @@ class MainWindow(QMainWindow):
             self._loop_count = loop_spin.value()
             self._loop_interval = interval_spin.value()
             
-            if self._loop_count > 1:
-                self.loop_btn.setText(f"🔄 x{self._loop_count}")
-                self.loop_btn.setStyleSheet("background-color: #FF9800; color: white;")
-            else:
-                self.loop_btn.setText("🔄 循环")
-                self.loop_btn.setStyleSheet("")
-            
             show_toast(f"循环设置: {self._loop_count}次, 间隔{self._loop_interval}秒", 'success')
             app_logger.info(f"循环设置: {self._loop_count}次, 间隔{self._loop_interval}秒", "UI")
     
@@ -1596,7 +2294,6 @@ class MainWindow(QMainWindow):
             self._update_memory_display()
         elif action == status_action:
             usage = memory_manager.get_memory_usage()
-            from PyQt5.QtWidgets import QMessageBox
             QMessageBox.information(self, "内存状态", 
                 f"物理内存 (RSS): {usage['rss']} MB\n"
                 f"虚拟内存 (VMS): {usage['vms']} MB\n"
@@ -1628,7 +2325,7 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     app.setApplicationName('RabAI AutoClick')
-    app.setApplicationVersion('1.1.0')
+    app.setApplicationVersion('1.3.0')
     
     window = MainWindow()
     window.show()
