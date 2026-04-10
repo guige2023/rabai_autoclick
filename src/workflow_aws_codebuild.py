@@ -305,8 +305,8 @@ class ProjectInfo:
     vpc_config: Optional[Dict[str, Any]] = None
     timeout_in_minutes: int = 60
     queued_timeout_in_minutes: int = 480
-    created: str
-    last_modified: str
+    created: str = ""
+    last_modified: str = ""
     tags: Dict[str, str] = field(default_factory=dict)
     project_visibility: Optional[str] = None
     badge: Optional[Dict[str, Any]] = None
