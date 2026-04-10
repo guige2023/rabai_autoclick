@@ -240,7 +240,7 @@ class VolumeConfig:
     tiering_policy: Optional[Dict[str, Any]] = None
     qos_policy_group_id: Optional[str] = None
     snapshot_policy: Optional[str] = None
-   韧_root_volume: bool = False
+    root_volume: bool = False
 
 
 @dataclass
