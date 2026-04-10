@@ -287,10 +287,11 @@ class BaseAction(ABC, Generic[T]):
         return True, ""
     
     def validate_type(
-        self, 
-        value: Any, 
-        expected_type: Union[type, Tuple[type, ...]], 
-        param_name: str
+        self,
+        value: Any,
+        expected_type: Union[type, Tuple[type, ...]],
+        param_name: str,
+        required: bool = True
     ) -> Tuple[bool, str]:
         """Validate a parameter's type.
         
@@ -298,10 +299,13 @@ class BaseAction(ABC, Generic[T]):
             value: The value to validate.
             expected_type: Expected type or tuple of types.
             param_name: Name of the parameter for error messages.
+            required: If False, None values are considered valid.
             
         Returns:
             Tuple of (is_valid, error_message).
         """
+        if value is None and not required:
+            return True, ""
         if not isinstance(value, expected_type):
             type_names = (
                 expected_type.__name__ 

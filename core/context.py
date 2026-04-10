@@ -149,7 +149,11 @@ class ContextManager:
         if match:
             # Pure expression: return result with original type preserved
             expr = match.group(1).strip()
-            return self._evaluate_expression(expr)
+            result = self._evaluate_expression(expr)
+            # Recursively resolve if result is a string with {{...}} patterns
+            if isinstance(result, str) and '{{' in result:
+                return self._resolve_string(result)
+            return result
         
         # Mixed text with variables: resolve and return string
         def replace_var(match) -> str:
@@ -185,6 +189,9 @@ class ContextManager:
         if expr in self._variables:
             result = self._variables[expr]
             self._expression_cache[expr] = result
+            # Recursively resolve if result is a string with {{...}} patterns
+            if isinstance(result, str) and '{{' in result:
+                return self._resolve_string(result)
             return result
         
         # Bracket notation for dict access (e.g., obj['key'] or obj["key"])

@@ -41,6 +41,7 @@ DANGEROUS_ATTRS: frozenset[str] = frozenset({
 # Builtin names that are dangerous when called
 DANGEROUS_BUILTINS: frozenset[str] = frozenset({
     'exec', 'eval', 'compile', 'open', 'input', '__import__',
+    'getattr', 'setattr', 'delattr', 'hasattr', 'breakpoint',
 })
 
 # Valid value types for SetVariableAction
