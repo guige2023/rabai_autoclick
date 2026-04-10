@@ -1,0 +1,41 @@
+{
+    "name": "webhook_trigger_plugin",
+    "version": "1.0.0",
+    "description": "Plugin that triggers workflows via incoming webhooks, enabling external integrations",
+    "author": "RabAI Team",
+    "license": "MIT",
+    "tags": ["webhook", "integration", "trigger", "http"],
+    "entry_point": "webhook_trigger_plugin",
+    "min_rabai_version": "22.0.0",
+    "dependencies": [],
+    "triggers": [
+        {
+            "type": "webhook",
+            "description": "Receives HTTP webhook requests and triggers workflows"
+        }
+    ],
+    "actions": [
+        {
+            "type": "register_webhook_handler",
+            "description": "Register a custom webhook endpoint"
+        },
+        {
+            "type": "send_webhook",
+            "description": "Send an outgoing webhook request"
+        }
+    ],
+    "config_schema": {
+        "default_route": {
+            "type": "string",
+            "default": "/webhook/rabai"
+        },
+        "allowed_methods": {
+            "type": "array",
+            "default": ["POST", "GET"]
+        },
+        "require_auth": {
+            "type": "boolean",
+            "default": false
+        }
+    }
+}

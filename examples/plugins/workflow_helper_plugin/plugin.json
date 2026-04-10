@@ -1,0 +1,41 @@
+{
+    "name": "workflow_helper_plugin",
+    "version": "1.0.0",
+    "description": "Plugin that provides utility actions for workflow manipulation, data transformation, and logging",
+    "author": "RabAI Team",
+    "license": "MIT",
+    "tags": ["utility", "workflow", "helper", "transformation"],
+    "entry_point": "workflow_helper_plugin",
+    "min_rabai_version": "22.0.0",
+    "dependencies": [],
+    "actions": [
+        {
+            "type": "transform_data",
+            "description": "Transform data using various operations"
+        },
+        {
+            "type": "log_message",
+            "description": "Log a message with custom formatting"
+        },
+        {
+            "type": "merge_context",
+            "description": "Merge data into the workflow context"
+        },
+        {
+            "type": "condition_check",
+            "description": "Evaluate a condition and return result"
+        }
+    ],
+    "triggers": [],
+    "config_schema": {
+        "default_log_level": {
+            "type": "string",
+            "default": "INFO",
+            "enum": ["DEBUG", "INFO", "WARNING", "ERROR"]
+        },
+        "enable_context_logging": {
+            "type": "boolean",
+            "default": false
+        }
+    }
+}

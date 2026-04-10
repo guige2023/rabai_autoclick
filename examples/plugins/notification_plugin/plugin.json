@@ -1,0 +1,39 @@
+{
+    "name": "notification_plugin",
+    "version": "1.0.0",
+    "description": "Plugin that sends system notifications when workflows complete or encounter errors",
+    "author": "RabAI Team",
+    "license": "MIT",
+    "tags": ["notification", "alerting", "workflow"],
+    "entry_point": "notification_plugin",
+    "min_rabai_version": "22.0.0",
+    "dependencies": [],
+    "triggers": [
+        {
+            "type": "workflow_event",
+            "events": ["workflow_complete", "workflow_error", "workflow_start"]
+        }
+    ],
+    "actions": [
+        {
+            "type": "send_notification",
+            "description": "Send a system notification",
+            "schema": {
+                "title": "string",
+                "message": "string",
+                "urgency": "string"
+            }
+        }
+    ],
+    "config_schema": {
+        "enabled": {
+            "type": "boolean",
+            "default": true
+        },
+        "urgency_default": {
+            "type": "string",
+            "default": "normal",
+            "enum": ["low", "normal", "critical"]
+        }
+    }
+}
