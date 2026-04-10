@@ -913,7 +913,8 @@ class TestStatistics(unittest.TestCase):
         self.edge = EdgeComputing(node_id="test_edge", node_name="main")
         self.edge.stop_orchestration()
 
-    def tearDown(self        self.edge.stop_orchestration()
+    def tearDown(self):
+        self.edge.stop_orchestration()
 
     def test_get_statistics(self):
         """Test getting comprehensive statistics."""
