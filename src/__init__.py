@@ -53,7 +53,29 @@ __all__ = [
     "create_screen_recorder",
     "WorkflowAnalytics",
     "create_workflow_analytics",
-    
+
+    # Security module
+    "WorkflowSecurityModule",
+    "create_security_module",
+    "SecurityLevel",
+    "Permission",
+    "SecurityPolicy",
+    "AuditEvent",
+    "AuditEventType",
+    "WorkflowSignature",
+    "SecureVariable",
+    "EncryptionManager",
+    "AuditLogger",
+    "RateLimiter",
+    "IPAllowlistChecker",
+    "ContentFilter",
+    "IntrusionDetectionSystem",
+    "SandboxExecutor",
+    "WorkflowSignatureManager",
+    "SecureVariableStore",
+    "SecurityUtils",
+    "IntrusionPattern",
+
     # Hotkey Manager
     "WorkflowHotkeyManager",
     "create_hotkey_manager",
