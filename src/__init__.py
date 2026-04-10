@@ -16,6 +16,16 @@ from .workflow_share import WorkflowShareSystem, create_share_system, ShareType
 from .pipeline_mode import PipelineRunner, create_pipeline_runner, PipeCLI, PipeMode
 from .screen_recorder import ScreenRecorderConverter, create_screen_recorder
 from .workflow_analytics import WorkflowAnalytics, create_workflow_analytics
+from .workflow_security import (
+    WorkflowSecurityModule, create_security_module,
+    SecurityLevel, Permission, SecurityPolicy,
+    AuditEvent, AuditEventType, WorkflowSignature, SecureVariable,
+    EncryptionManager, AuditLogger, RateLimiter, IPAllowlistChecker,
+    ContentFilter, IntrusionDetectionSystem, SandboxExecutor,
+    WorkflowSignatureManager, SecureVariableStore, SecurityUtils,
+    IntrusionPattern
+)
+from .workflow_hotkeys import WorkflowHotkeyManager, create_hotkey_manager, HotkeyActionType, HotkeyBinding, HotkeyProfile, HotkeyConflict, ConflictType
 
 __version__ = "22.0.0"
 __author__ = "RabAI Team"
@@ -43,4 +53,13 @@ __all__ = [
     "create_screen_recorder",
     "WorkflowAnalytics",
     "create_workflow_analytics",
+    
+    # Hotkey Manager
+    "WorkflowHotkeyManager",
+    "create_hotkey_manager",
+    "HotkeyActionType",
+    "HotkeyBinding",
+    "HotkeyProfile",
+    "HotkeyConflict",
+    "ConflictType",
 ]
