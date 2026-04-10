@@ -26,6 +26,13 @@ from .workflow_security import (
     IntrusionPattern
 )
 from .workflow_hotkeys import WorkflowHotkeyManager, create_hotkey_manager, HotkeyActionType, HotkeyBinding, HotkeyProfile, HotkeyConflict, ConflictType
+from .workflow_macro import (
+    WorkflowMacro, create_macro_system,
+    MacroAction, MacroActionType, MacroCondition, MacroConditionType,
+    MacroVariable, Macro, MacroRecorder, MacroPlayer, MacroEditor,
+    MacroLibrary, MacroScheduler, MacroToWorkflowConverter,
+    MacroPosition, MouseButton, PlaybackResult
+)
 
 __version__ = "22.0.0"
 __author__ = "RabAI Team"
