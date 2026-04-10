@@ -490,7 +490,7 @@ class MQIntegration:
     # Reboot Operations
     # ========================================================================
     
-    def reboot_broker(self, broker_name: str, reboot_ standby: bool = True) -> Dict[str, Any]:
+    def reboot_broker(self, broker_name: str, reboot_standby: bool = True) -> Dict[str, Any]:
         """
         Reboot a broker.
         
