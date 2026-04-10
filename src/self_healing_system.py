@@ -315,17 +315,20 @@ class StructuredLogger:
             parts.append(f"{key}={value}")
         return " | ".join(parts)
 
-    def debug(self, message: str, **kwargs):
-        self.logger.debug(self._format_structured(message, **kwargs))
+    def debug(self, msg: str, **kwargs):
+        self.logger.debug(self._format_structured(msg, **kwargs))
 
     def info(self, msg: str, **kwargs):
-        self.logger.info(self._format_structured(msg, **kwargs))
+        formatted = self._format_structured(msg, **kwargs)
+        self.logger.info(formatted)
 
     def warning(self, msg: str, **kwargs):
-        self.logger.warning(self._format_structured(msg, **kwargs))
+        formatted = self._format_structured(msg, **kwargs)
+        self.logger.warning(formatted)
 
     def error(self, msg: str, **kwargs):
-        self.logger.error(self._format_structured(msg, **kwargs))
+        formatted = self._format_structured(msg, **kwargs)
+        self.logger.error(formatted)
 
     def healing(self, event: str, workflow: str, step: str,
                 error_type: str = "", strategy: str = "",

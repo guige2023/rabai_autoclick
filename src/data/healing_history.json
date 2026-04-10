@@ -9,6 +9,27 @@
     "strategy_used": "relocate",
     "success": true,
     "recovery_time": 1.1920928955078125e-06,
-    "details": "已重新定位元素"
+    "details": "已重新定位元素",
+    "healing_action_id": "",
+    "rollback_available": false,
+    "original_state": null
+  },
+  {
+    "timestamp": 1775780678.4890199,
+    "workflow_name": "user_login",
+    "step_name": "click_submit",
+    "step_index": 3,
+    "error_type": "element_not_found",
+    "error_message": "Element not found: submit_button",
+    "strategy_used": "retry",
+    "success": true,
+    "recovery_time": 2.9325485229492188e-05,
+    "details": "重试成功 (尝试 1/3)",
+    "healing_action_id": "heal_user_login_3_1775780678",
+    "rollback_available": true,
+    "original_state": {
+      "active_app": "Chrome",
+      "url": "https://example.com"
+    }
   }
 ]
