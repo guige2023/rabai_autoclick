@@ -15,6 +15,7 @@ from .workflow_diagnostics import WorkflowDiagnosticsV2, create_diagnostics
 from .workflow_share import WorkflowShareSystem, create_share_system, ShareType
 from .pipeline_mode import PipelineRunner, create_pipeline_runner, PipeCLI, PipeMode
 from .screen_recorder import ScreenRecorderConverter, create_screen_recorder
+from .workflow_analytics import WorkflowAnalytics, create_workflow_analytics
 
 __version__ = "22.0.0"
 __author__ = "RabAI Team"
@@ -40,4 +41,6 @@ __all__ = [
     "PipeMode",
     "ScreenRecorderConverter",
     "create_screen_recorder",
+    "WorkflowAnalytics",
+    "create_workflow_analytics",
 ]
