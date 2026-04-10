@@ -266,7 +266,6 @@ class TestAPIGatewayIntegration(unittest.TestCase):
 
     def test_init_without_boto3(self):
         """Test initialization when boto3 is not available"""
-        # Temporarily set BOTO3_AVAILABLE to False
         import src.workflow_aws_api_gateway as api_gateway_module
         original_boto3_available = api_gateway_module.BOTO3_AVAILABLE
         api_gateway_module.BOTO3_AVAILABLE = False
@@ -468,7 +467,23 @@ class TestAPIGatewayIntegrationHTTPAPI(unittest.TestCase):
             config = HTTPAPIConfig(name="test-http-api")
             result = integration.create_http_api(config)
 
-            self.assertIn("id", result)
+            self.assertIn("apiId", result)
+            self.assertEqual(result["name"], "test-http-api")
+        finally:
+            api_gateway_module.BOTO3_AVAILABLE = original_boto3_available
+
+    def test_get_http_api_without_boto3(self):
+        """Test get_http_api when boto3 is not available"""
+        import src.workflow_aws_api_gateway as api_gateway_module
+        original_boto3_available = api_gateway_module.BOTO3_AVAILABLE
+        api_gateway_module.BOTO3_AVAILABLE = False
+
+        try:
+            integration = APIGatewayIntegration()
+            config = HTTPAPIConfig(name="test-http-api")
+            created = integration.create_http_api(config)
+            
+            result = integration.get_http_api(created["apiId"])
             self.assertEqual(result["name"], "test-http-api")
         finally:
             api_gateway_module.BOTO3_AVAILABLE = original_boto3_available
@@ -476,6 +491,13 @@ class TestAPIGatewayIntegrationHTTPAPI(unittest.TestCase):
 
 class TestAPIGatewayIntegrationWebSocket(unittest.TestCase):
     """Test APIGatewayIntegration WebSocket API methods"""
+
+    def setUp(self):
+        """Set up test fixtures"""
+        self.mock_session = MagicMock()
+        self.mock_client = MagicMock()
+        mock_boto3.Session.return_value = self.mock_session
+        self.mock_session.client.return_value = self.mock_client
 
     def test_create_websocket_api_without_boto3(self):
         """Test create_websocket_api when boto3 is not available"""
@@ -488,14 +510,41 @@ class TestAPIGatewayIntegrationWebSocket(unittest.TestCase):
             config = WebSocketAPIConfig(name="test-ws-api")
             result = integration.create_websocket_api(config)
 
-            self.assertIn("id", result)
+            self.assertIn("apiId", result)
             self.assertEqual(result["name"], "test-ws-api")
+        finally:
+            api_gateway_module.BOTO3_AVAILABLE = original_boto3_available
+
+    def test_add_websocket_route_without_boto3(self):
+        """Test add_websocket_route when boto3 is not available"""
+        import src.workflow_aws_api_gateway as api_gateway_module
+        original_boto3_available = api_gateway_module.BOTO3_AVAILABLE
+        api_gateway_module.BOTO3_AVAILABLE = False
+
+        try:
+            integration = APIGatewayIntegration()
+            config = WebSocketAPIConfig(name="test-ws-api")
+            api = integration.create_websocket_api(config)
+            
+            result = integration.add_websocket_route(
+                api["apiId"],
+                route_key="$connect",
+                integration_uri="arn:aws:lambda:us-east-1:123456789012:function:my-function"
+            )
+            self.assertIn("routeKey", result)
         finally:
             api_gateway_module.BOTO3_AVAILABLE = original_boto3_available
 
 
 class TestAPIGatewayIntegrationResources(unittest.TestCase):
     """Test APIGatewayIntegration resource methods"""
+
+    def setUp(self):
+        """Set up test fixtures"""
+        self.mock_session = MagicMock()
+        self.mock_client = MagicMock()
+        mock_boto3.Session.return_value = self.mock_session
+        self.mock_session.client.return_value = self.mock_client
 
     def test_create_resource_without_boto3(self):
         """Test create_resource when boto3 is not available"""
@@ -507,7 +556,7 @@ class TestAPIGatewayIntegrationResources(unittest.TestCase):
             integration = APIGatewayIntegration()
             integration._apis["test-api"] = {"id": "test-api"}
 
-            result = integration.create_resource("test-api", "/users")
+            result = integration.create_resource("test-api", "users")
             self.assertIn("id", result)
             self.assertEqual(result["path"], "/users")
         finally:
@@ -516,6 +565,13 @@ class TestAPIGatewayIntegrationResources(unittest.TestCase):
 
 class TestAPIGatewayIntegrationStages(unittest.TestCase):
     """Test APIGatewayIntegration stage methods"""
+
+    def setUp(self):
+        """Set up test fixtures"""
+        self.mock_session = MagicMock()
+        self.mock_client = MagicMock()
+        mock_boto3.Session.return_value = self.mock_session
+        self.mock_session.client.return_value = self.mock_client
 
     def test_create_stage_without_boto3(self):
         """Test create_stage when boto3 is not available"""
@@ -538,6 +594,13 @@ class TestAPIGatewayIntegrationStages(unittest.TestCase):
 
 class TestAPIGatewayIntegrationCustomDomains(unittest.TestCase):
     """Test APIGatewayIntegration custom domain methods"""
+
+    def setUp(self):
+        """Set up test fixtures"""
+        self.mock_session = MagicMock()
+        self.mock_client = MagicMock()
+        mock_boto3.Session.return_value = self.mock_session
+        self.mock_session.client.return_value = self.mock_client
 
     def test_create_custom_domain_without_boto3(self):
         """Test create_custom_domain when boto3 is not available"""
@@ -562,6 +625,13 @@ class TestAPIGatewayIntegrationCustomDomains(unittest.TestCase):
 class TestAPIGatewayIntegrationAPIKeys(unittest.TestCase):
     """Test APIGatewayIntegration API key methods"""
 
+    def setUp(self):
+        """Set up test fixtures"""
+        self.mock_session = MagicMock()
+        self.mock_client = MagicMock()
+        mock_boto3.Session.return_value = self.mock_session
+        self.mock_session.client.return_value = self.mock_client
+
     def test_create_api_key_without_boto3(self):
         """Test create_api_key when boto3 is not available"""
         import src.workflow_aws_api_gateway as api_gateway_module
@@ -581,6 +651,13 @@ class TestAPIGatewayIntegrationAPIKeys(unittest.TestCase):
 
 class TestAPIGatewayIntegrationUsagePlans(unittest.TestCase):
     """Test APIGatewayIntegration usage plan methods"""
+
+    def setUp(self):
+        """Set up test fixtures"""
+        self.mock_session = MagicMock()
+        self.mock_client = MagicMock()
+        mock_boto3.Session.return_value = self.mock_session
+        self.mock_session.client.return_value = self.mock_client
 
     def test_create_usage_plan_without_boto3(self):
         """Test create_usage_plan when boto3 is not available"""
