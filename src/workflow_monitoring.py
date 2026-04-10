@@ -261,9 +261,9 @@ class SLACompliance:
     resolution_time_minutes: float
     response_met: bool
     resolution_met: bool
+    created_at: float
     response_at: Optional[float] = None
     resolved_at: Optional[float] = None
-    created_at: float
 
 
 @dataclass
@@ -284,9 +284,9 @@ class HealthCheckResult:
     name: str
     status: HealthCheckStatus
     response_time_ms: float
+    timestamp: float
     status_code: Optional[int] = None
     error_message: Optional[str] = None
-    timestamp: float
 
 
 # =============================================================================
@@ -1888,7 +1888,7 @@ This is an automated alert from RAbAI AutoClick Monitoring System.
         """Get health check metrics for monitoring."""
         all_results = {}
         
-        for name, results deque in self._health_check_results.items():
+        for name, results in self._health_check_results.items():
             if not results:
                 continue
             
