@@ -270,13 +270,13 @@ class PolicyInfo:
     policy_name: str
     policy_id: str
     arn: str
+    create_date: datetime
+    update_date: datetime
     path: Optional[str] = None
     default_version_id: str = "v1"
     attachment_count: int = 0
     permissions_boundary_usage_count: int = 0
     description: Optional[str] = None
-    create_date: datetime
-    update_date: datetime
     tags: Dict[str, str] = field(default_factory=dict)
 
 
