@@ -224,7 +224,7 @@ class DomainMappingSpec:
     """Domain mapping specification"""
     name: str
     namespace: str = "default"
-    ref_service: str
+    ref_service: str = ""
     ref_service_port: int = 80
     tls_enabled: bool = True
     tls_secret: str = ""
