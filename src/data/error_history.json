@@ -11,5 +11,37 @@
     "recovery_attempted": true,
     "recovery_result": "success",
     "recovery_details": "已重新定位元素"
+  },
+  {
+    "timestamp": 1775780632.737791,
+    "error_type": "element_not_found",
+    "error_message": "Element not found: submit_button",
+    "workflow_name": "user_login",
+    "step_name": "click_submit",
+    "step_index": 3,
+    "context": {
+      "active_app": "Chrome",
+      "url": "https://example.com"
+    },
+    "stack_trace": "Traceback (most recent call last):\n  File \"/Users/guige/my_project/rabai_autoclick/src/self_healing_system.py\", line 1521, in <module>\n    raise Exception(\"Element not found: submit_button\")\nException: Element not found: submit_button\n",
+    "recovery_attempted": false,
+    "recovery_result": "none",
+    "recovery_details": ""
+  },
+  {
+    "timestamp": 1775780643.507636,
+    "error_type": "element_not_found",
+    "error_message": "Element not found: submit_button",
+    "workflow_name": "user_login",
+    "step_name": "click_submit",
+    "step_index": 3,
+    "context": {
+      "active_app": "Chrome",
+      "url": "https://example.com"
+    },
+    "stack_trace": "Traceback (most recent call last):\n  File \"/Users/guige/my_project/rabai_autoclick/src/self_healing_system.py\", line 1521, in <module>\n    raise Exception(\"Element not found: submit_button\")\nException: Element not found: submit_button\n",
+    "recovery_attempted": false,
+    "recovery_result": "none",
+    "recovery_details": ""
   }
 ]
