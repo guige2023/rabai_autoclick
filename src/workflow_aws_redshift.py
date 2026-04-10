@@ -127,7 +127,7 @@ class ClusterConfig:
     default_radio_dsh_kms_key_id: Optional[str] = None
     elastic_ip: Optional[str] = None
     aws_secret_kms_key_id: Optional[str] = None
-   复原: bool = False
+    Restore: bool = False
     snapshot_identifier: Optional[str] = None
     tags: Dict[str, str] = field(default_factory=dict)
 
@@ -438,7 +438,7 @@ class RedshiftIntegration:
                 params["AquaConfigurationStatus"] = config.aqua_configuration_status
             if config.elastic_ip:
                 params["ElasticIp"] = config.elastic_ip
-            if config复原 and config.snapshot_identifier:
+            if config.Restore and config.snapshot_identifier:
                 params["Restore"] = True
                 params["SnapshotIdentifier"] = config.snapshot_identifier
             if config.tags:
