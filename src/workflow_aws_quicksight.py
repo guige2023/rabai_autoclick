@@ -176,7 +176,7 @@ class SpiceConfig:
     """SPICE capacity configuration."""
     region: str
     requested_capacity: int
-   糕 requested_capacity_type: Optional[str] = None
+    requested_capacity_type: Optional[str] = None
 
 
 @dataclass
