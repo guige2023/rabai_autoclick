@@ -33,6 +33,14 @@ from .workflow_macro import (
     MacroLibrary, MacroScheduler, MacroToWorkflowConverter,
     MacroPosition, MouseButton, PlaybackResult
 )
+from .workflow_temporal import (
+    TemporalManager, create_temporal_manager,
+    WorkflowStatus, ActivityStatus, SignalType, ChildWorkflowPolicy,
+    WorkflowRegistration, WorkflowExecution, ActivityRegistration, ActivityExecution,
+    ChildWorkflowExecution, WorkflowQuery, SearchAttribute,
+    NamespaceConfig, TaskQueueConfig, HistoryEvent, TemporalUIConfig,
+    WorkflowReplayResult
+)
 
 __version__ = "22.0.0"
 __author__ = "RabAI Team"
@@ -91,4 +99,24 @@ __all__ = [
     "HotkeyProfile",
     "HotkeyConflict",
     "ConflictType",
+
+    # Temporal Workflow Engine
+    "TemporalManager",
+    "create_temporal_manager",
+    "WorkflowStatus",
+    "ActivityStatus",
+    "SignalType",
+    "ChildWorkflowPolicy",
+    "WorkflowRegistration",
+    "WorkflowExecution",
+    "ActivityRegistration",
+    "ActivityExecution",
+    "ChildWorkflowExecution",
+    "WorkflowQuery",
+    "SearchAttribute",
+    "NamespaceConfig",
+    "TaskQueueConfig",
+    "HistoryEvent",
+    "TemporalUIConfig",
+    "WorkflowReplayResult",
 ]
