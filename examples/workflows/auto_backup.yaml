@@ -1,0 +1,141 @@
+# Auto Backup Workflow - Automated file backup to external drive or backup location
+# This workflow copies important files/folders with verification
+name: "Auto Backup Workflow"
+description: "Backup critical files to a designated backup location with verification"
+version: "1.0"
+variables:
+  source_folder: "/Users/guige/Documents/Important"
+  backup_folder: "/Volumes/BackupDrive/Documents_Backup"
+  timestamp: "{{CURRENT_DATE}}"
+
+steps:
+  # Step 1: Open Finder to navigate to source
+  - id: 1
+    type: click
+    x: 80
+    y: 120
+    button: left
+    clicks: 1
+    pre_delay: 0.5
+    comment: "Open Finder from dock"
+
+  # Step 2: Wait for Finder window
+  - id: 2
+    type: delay
+    seconds: 1.0
+    pre_delay: 0.3
+    comment: "Allow Finder to load"
+
+  # Step 3: Click Go menu
+  - id: 3
+    type: click
+    x: 500
+    y: 25
+    button: left
+    clicks: 1
+    pre_delay: 0.2
+    comment: "Open Go menu"
+
+  # Step 4: Select Go to Folder option
+  - id: 4
+    type: type_text
+    text: "{{source_folder}}"
+    interval: 0.01
+    pre_delay: 0.3
+    comment: "Navigate to source folder"
+
+  # Step 5: Press Enter
+  - id: 5
+    type: key_press
+    key: enter
+    pre_delay: 0.5
+    comment: "Confirm folder navigation"
+
+  # Step 6: Wait for folder contents
+  - id: 6
+    type: delay
+    seconds: 1.5
+    pre_delay: 0.3
+    comment: "Wait for file list to load"
+
+  # Step 7: Select all items with Cmd+A
+  - id: 7
+    type: key_press
+    key: cmd+a
+    pre_delay: 0.2
+    comment: "Select all files"
+
+  # Step 8: Copy items with Cmd+C
+  - id: 8
+    type: key_press
+    key: cmd+c
+    pre_delay: 0.3
+    comment: "Copy selected files"
+
+  # Step 9: Open backup destination
+  - id: 9
+    type: click
+    x: 500
+    y: 25
+    button: left
+    clicks: 1
+    pre_delay: 0.3
+    comment: "Open Go menu again"
+
+  # Step 10: Navigate to backup folder
+  - id: 10
+    type: type_text
+    text: "{{backup_folder}}"
+    interval: 0.01
+    pre_delay: 0.3
+    comment: "Navigate to backup location"
+
+  # Step 11: Confirm destination
+  - id: 11
+    type: key_press
+    key: enter
+    pre_delay: 0.5
+    comment: "Open backup folder"
+
+  # Step 12: Create date-stamped subfolder
+  - id: 12
+    type: key_press
+    key: shift+cmd+n
+    pre_delay: 0.3
+    comment: "New folder for this backup"
+
+  # Step 13: Enter backup folder name with timestamp
+  - id: 13
+    type: type_text
+    text: "backup_{{timestamp}}"
+    interval: 0.05
+    pre_delay: 0.3
+    comment: "Name backup folder with date"
+
+  # Step 14: Create folder
+  - id: 14
+    type: key_press
+    key: enter
+    pre_delay: 0.5
+    comment: "Create the folder"
+
+  # Step 15: Paste copied files
+  - id: 15
+    type: key_press
+    key: cmd+v
+    pre_delay: 1.0
+    comment: "Paste files to backup"
+
+  # Step 16: Wait for copy to complete
+  - id: 16
+    type: delay
+    seconds: 5.0
+    pre_delay: 2.0
+    comment: "Allow large file copy to finish"
+
+  # Step 17: Verify backup with screenshot
+  - id: 17
+    type: screenshot
+    save_path: "backup_verification.png"
+    pre_delay: 0.5
+    comment: "Capture backup confirmation"

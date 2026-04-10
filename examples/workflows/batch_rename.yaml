@@ -1,0 +1,211 @@
+# Batch Rename Workflow - Rename multiple files using consistent patterns
+# This workflow opens a folder, selects files, and renames them with patterns
+name: "Batch Rename Workflow"
+description: "Rename a batch of files with sequential numbering and prefixes"
+version: "1.0"
+variables:
+  source_folder: "/Users/guige/Documents/RenameMe"
+  prefix: "document_"
+  start_number: 1
+  padding: 3  # Number of digits for sequence (e.g., 001, 002)
+
+steps:
+  # Step 1: Open Finder
+  - id: 1
+    type: click
+    x: 80
+    y: 120
+    button: left
+    clicks: 1
+    pre_delay: 0.5
+    comment: "Open Finder from dock"
+
+  # Step 2: Wait for Finder
+  - id: 2
+    type: delay
+    seconds: 1.0
+    pre_delay: 0.3
+    comment: "Finder load time"
+
+  # Step 3: Open Go menu
+  - id: 3
+    type: click
+    x: 500
+    y: 25
+    button: left
+    clicks: 1
+    pre_delay: 0.2
+    comment: "Open Go menu"
+
+  # Step 4: Navigate to source folder
+  - id: 4
+    type: type_text
+    text: "{{source_folder}}"
+    interval: 0.01
+    pre_delay: 0.3
+    comment: "Enter folder path"
+
+  # Step 5: Confirm navigation
+  - id: 5
+    type: key_press
+    key: enter
+    pre_delay: 1.0
+    comment: "Open folder"
+
+  # Step 6: Wait for files to appear
+  - id: 6
+    type: delay
+    seconds: 1.5
+    pre_delay: 0.5
+    comment: "Load folder contents"
+
+  # Step 7: Select all files
+  - id: 7
+    type: key_press
+    key: cmd+a
+    pre_delay: 0.3
+    comment: "Select all files"
+
+  # Step 8: Right-click to get context menu
+  - id: 8
+    type: click
+    x: 400
+    y: 300
+    button: right
+    clicks: 1
+    pre_delay: 0.3
+    comment: "Open context menu"
+
+  # Step 9: Click "Rename X items"
+  - id: 9
+    type: click
+    x: 500
+    y: 420
+    button: left
+    clicks: 1
+    pre_delay: 0.3
+    comment: "Select rename option"
+
+  # Step 10: Wait for rename dialog
+  - id: 10
+    type: delay
+    seconds: 1.0
+    pre_delay: 0.5
+    comment: "Dialog to appear"
+
+  # Step 11: Click format dropdown
+  - id: 11
+    type: click
+    x: 300
+    y: 120
+    button: left
+    clicks: 1
+    pre_delay: 0.2
+    comment: "Open format options"
+
+  # Step 12: Select "Name with Format"
+  - id: 12
+    type: click
+    x: 300
+    y: 180
+    button: left
+    clicks: 1
+    pre_delay: 0.2
+    comment: "Choose sequential naming"
+
+  # Step 13: Wait for format options
+  - id: 13
+    type: delay
+    seconds: 0.5
+    pre_delay: 0.2
+    comment: "Options to load"
+
+  # Step 14: Enter custom format
+  - id: 14
+    type: click
+    x: 300
+    y: 150
+    button: left
+    clicks: 1
+    pre_delay: 0.2
+    comment: "Focus format input"
+
+  # Step 15: Type the custom format pattern
+  - id: 15
+    type: type_text
+    text: "{{prefix}}"
+    interval: 0.05
+    pre_delay: 0.3
+    comment: "Enter name prefix"
+
+  # Step 16: Move to number format
+  - id: 16
+    type: click
+    x: 350
+    y: 200
+    button: left
+    clicks: 1
+    pre_delay: 0.2
+    comment: "Click number format"
+
+  # Step 17: Select padding option (001, 002, etc)
+  - id: 17
+    type: click
+    x: 350
+    y: 250
+    button: left
+    clicks: 1
+    pre_delay: 0.2
+    comment: "Select padded numbers"
+
+  # Step 18: Set starting number
+  - id: 18
+    type: click
+    x: 350
+    y: 280
+    button: left
+    clicks: 1
+    pre_delay: 0.2
+    comment: "Click start number field"
+
+  # Step 19: Enter start number
+  - id: 19
+    type: type_text
+    text: "{{start_number}}"
+    interval: 0.02
+    pre_delay: 0.2
+    comment: "Set sequence start"
+
+  # Step 20: Preview rename
+  - id: 20
+    type: click
+    x: 400
+    y: 350
+    button: left
+    clicks: 1
+    pre_delay: 0.5
+    comment: "Preview new names"
+
+  # Step 21: Confirm rename
+  - id: 21
+    type: click
+    x: 450
+    y: 400
+    button: left
+    clicks: 1
+    pre_delay: 1.0
+    comment: "Apply rename"
+
+  # Step 22: Wait for rename to complete
+  - id: 22
+    type: delay
+    seconds: 2.0
+    pre_delay: 0.5
+    comment: "Processing files"
+
+  # Step 23: Capture result screenshot
+  - id: 23
+    type: screenshot
+    save_path: "batch_rename_result.png"
+    pre_delay: 0.5
+    comment: "Verify renamed files"

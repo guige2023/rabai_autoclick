@@ -1,0 +1,126 @@
+# Web Scraper Workflow - Multi-step web scraping automation
+# This workflow demonstrates scraping data from a website using click, wait, screenshot, and OCR actions
+name: "Web Scraper Workflow"
+description: "Navigate to a website, extract data using OCR, and save results"
+version: "1.0"
+variables:
+  target_url: "https://example.com/data"
+  output_file: "scraped_data.txt"
+
+steps:
+  # Step 1: Open browser by clicking browser icon at known coordinates
+  - id: 1
+    type: click
+    x: 80
+    y: 40
+    button: left
+    clicks: 1
+    pre_delay: 1.0
+    comment: "Open web browser from taskbar"
+
+  # Step 2: Wait for browser to launch
+  - id: 2
+    type: delay
+    seconds: 2.0
+    pre_delay: 0.5
+    comment: "Wait for browser to fully load"
+
+  # Step 3: Click on address bar
+  - id: 3
+    type: click
+    x: 400
+    y: 80
+    button: left
+    clicks: 1
+    pre_delay: 0.3
+    comment: "Focus address bar"
+
+  # Step 4: Type the target URL
+  - id: 4
+    type: type_text
+    text: "{{target_url}}"
+    interval: 0.02
+    pre_delay: 0.2
+    comment: "Enter target URL"
+
+  # Step 5: Press Enter to navigate
+  - id: 5
+    type: key_press
+    key: enter
+    pre_delay: 0.5
+    comment: "Navigate to URL"
+
+  # Step 6: Wait for page to load
+  - id: 6
+    type: delay
+    seconds: 3.0
+    pre_delay: 1.0
+    comment: "Wait for web page to fully render"
+
+  # Step 7: Scroll down to reveal more content
+  - id: 7
+    type: key_press
+    key: page_down
+    pre_delay: 0.3
+    comment: "Scroll to load more data"
+
+  # Step 8: Take screenshot of the data section
+  - id: 8
+    type: screenshot
+    save_path: "webpage_capture.png"
+    pre_delay: 0.5
+    comment: "Capture visible data"
+
+  # Step 9: Extract text from screenshot using OCR
+  - id: 9
+    type: ocr
+    image_path: "webpage_capture.png"
+    output_var: "extracted_text"
+    pre_delay: 0.3
+    comment: "Extract text from captured image"
+
+  # Step 10: Press Ctrl+A to select all, then Ctrl+C to copy
+  - id: 10
+    type: key_press
+    key: ctrl+a
+    pre_delay: 0.2
+    comment: "Select all text on page"
+
+  # Step 11: Copy selected content
+  - id: 11
+    type: key_press
+    key: ctrl+c
+    pre_delay: 0.2
+    comment: "Copy to clipboard"
+
+  # Step 12: Open text editor
+  - id: 12
+    type: click
+    x: 150
+    y: 700
+    button: left
+    clicks: 1
+    pre_delay: 1.0
+    comment: "Open text editor"
+
+  # Step 13: Paste the copied content
+  - id: 13
+    type: key_press
+    key: ctrl+v
+    pre_delay: 0.3
+    comment: "Paste scraped content"
+
+  # Step 14: Save the file
+  - id: 14
+    type: key_press
+    key: ctrl+s
+    pre_delay: 0.3
+    comment: "Open save dialog"
+
+  # Step 15: Type filename and save
+  - id: 15
+    type: type_text
+    text: "{{output_file}}"
+    interval: 0.02
+    pre_delay: 0.3
+    comment: "Enter output filename"

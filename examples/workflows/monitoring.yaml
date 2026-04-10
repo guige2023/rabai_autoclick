@@ -1,0 +1,192 @@
+# System Monitoring Workflow - Monitor system resources and send alerts
+# This workflow checks CPU, memory, disk usage and captures screenshots for review
+name: "System Monitoring Workflow"
+description: "Monitor system resources and capture evidence of issues"
+version: "1.0"
+variables:
+  cpu_threshold: 80
+  memory_threshold: 85
+  disk_threshold: 90
+  log_file: "monitoring_report.txt"
+
+steps:
+  # Step 1: Open Activity Monitor (macOS)
+  - id: 1
+    type: click
+    x: 80
+    y: 120
+    button: left
+    clicks: 1
+    pre_delay: 0.5
+    comment: "Open Finder"
+
+  # Step 2: Use Spotlight to open Activity Monitor
+  - id: 2
+    type: key_press
+    key: cmd+space
+    pre_delay: 0.5
+    comment: "Open Spotlight search"
+
+  # Step 3: Type Activity Monitor
+  - id: 3
+    type: type_text
+    text: "Activity Monitor"
+    interval: 0.05
+    pre_delay: 0.3
+    comment: "Search for Activity Monitor"
+
+  # Step 4: Launch Activity Monitor
+  - id: 4
+    type: key_press
+    key: enter
+    pre_delay: 2.0
+    comment: "Open Activity Monitor"
+
+  # Step 5: Wait for Activity Monitor to load
+  - id: 5
+    type: delay
+    seconds: 2.0
+    pre_delay: 0.5
+    comment: "Allow app to load"
+
+  # Step 6: Take screenshot of current state
+  - id: 6
+    type: screenshot
+    save_path: "system_state_initial.png"
+    pre_delay: 0.3
+    comment: "Capture initial system state"
+
+  # Step 7: Click CPU tab
+  - id: 7
+    type: click
+    x: 150
+    y: 50
+    button: left
+    clicks: 1
+    pre_delay: 0.2
+    comment: "View CPU usage"
+
+  # Step 8: Wait for CPU data
+  - id: 8
+    type: delay
+    seconds: 1.0
+    pre_delay: 0.3
+    comment: "CPU metrics to load"
+
+  # Step 9: Capture CPU usage
+  - id: 9
+    type: screenshot
+    save_path: "cpu_usage.png"
+    pre_delay: 0.3
+    comment: "Document CPU usage"
+
+  # Step 10: Click Memory tab
+  - id: 10
+    type: click
+    x: 220
+    y: 50
+    button: left
+    clicks: 1
+    pre_delay: 0.2
+    comment: "View memory usage"
+
+  # Step 11: Wait for memory data
+  - id: 11
+    type: delay
+    seconds: 1.0
+    pre_delay: 0.3
+    comment: "Memory metrics to load"
+
+  # Step 12: Capture memory usage
+  - id: 12
+    type: screenshot
+    save_path: "memory_usage.png"
+    pre_delay: 0.3
+    comment: "Document memory usage"
+
+  # Step 13: Open Terminal for disk check
+  - id: 13
+    type: key_press
+    key: cmd+space
+    pre_delay: 0.5
+    comment: "Open Spotlight again"
+
+  # Step 14: Search for Terminal
+  - id: 14
+    type: type_text
+    text: "Terminal"
+    interval: 0.05
+    pre_delay: 0.3
+    comment: "Search Terminal app"
+
+  # Step 15: Open Terminal
+  - id: 15
+    type: key_press
+    key: enter
+    pre_delay: 1.5
+    comment: "Launch Terminal"
+
+  # Step 16: Wait for Terminal
+  - id: 16
+    type: delay
+    seconds: 1.0
+    pre_delay: 0.3
+    comment: "Terminal to load"
+
+  # Step 17: Type disk usage command
+  - id: 17
+    type: type_text
+    text: "df -h"
+    interval: 0.01
+    pre_delay: 0.2
+    comment: "Check disk usage"
+
+  # Step 18: Execute command
+  - id: 18
+    type: key_press
+    key: enter
+    pre_delay: 1.0
+    comment: "Run disk check"
+
+  # Step 19: Capture disk usage
+  - id: 19
+    type: screenshot
+    save_path: "disk_usage.png"
+    pre_delay: 0.3
+    comment: "Document disk space"
+
+  # Step 20: Check memory pressure command
+  - id: 20
+    type: type_text
+    text: "top -l 1 | head -n 10"
+    interval: 0.01
+    pre_delay: 0.2
+    comment: "Get top processes"
+
+  # Step 21: Execute memory check
+  - id: 21
+    type: key_press
+    key: enter
+    pre_delay: 1.0
+    comment: "Run memory check"
+
+  # Step 22: Capture process list
+  - id: 22
+    type: screenshot
+    save_path: "top_processes.png"
+    pre_delay: 0.3
+    comment: "Document running processes"
+
+  # Step 23: Generate summary report
+  - id: 23
+    type: delay
+    seconds: 0.5
+    pre_delay: 0.2
+    comment: "Prepare summary"
+
+  # Step 24: Final monitoring screenshot
+  - id: 24
+    type: screenshot
+    save_path: "monitoring_complete.png"
+    pre_delay: 0.5
+    comment: "Final state capture"

@@ -1,0 +1,214 @@
+# Screenshot Archive Workflow - Periodic screenshot capture for documentation
+# This workflow captures screenshots at intervals for building a visual archive
+name: "Screenshot Archive Workflow"
+description: "Capture periodic screenshots and save with timestamps for documentation"
+version: "1.0"
+variables:
+  archive_folder: "/Users/guige/Documents/ScreenshotArchive"
+  project_name: "project_alpha"
+  interval_seconds: 5
+
+steps:
+  # Step 1: Open Finder
+  - id: 1
+    type: click
+    x: 80
+    y: 120
+    button: left
+    clicks: 1
+    pre_delay: 0.5
+    comment: "Open Finder"
+
+  # Step 2: Wait for Finder
+  - id: 2
+    type: delay
+    seconds: 1.0
+    pre_delay: 0.3
+    comment: "Finder load"
+
+  # Step 3: Navigate to archive folder
+  - id: 3
+    type: click
+    x: 500
+    y: 25
+    button: left
+    clicks: 1
+    pre_delay: 0.2
+    comment: "Open Go menu"
+
+  # Step 4: Enter archive folder path
+  - id: 4
+    type: type_text
+    text: "{{archive_folder}}"
+    interval: 0.01
+    pre_delay: 0.3
+    comment: "Navigate to archive"
+
+  # Step 5: Open archive folder
+  - id: 5
+    type: key_press
+    key: enter
+    pre_delay: 1.0
+    comment: "Confirm folder"
+
+  # Step 6: Create project subfolder
+  - id: 6
+    type: key_press
+    key: shift+cmd+n
+    pre_delay: 0.3
+    comment: "New project folder"
+
+  # Step 7: Name project folder
+  - id: 7
+    type: type_text
+    text: "{{project_name}}"
+    interval: 0.05
+    pre_delay: 0.3
+    comment: "Name project folder"
+
+  # Step 8: Create folder
+  - id: 8
+    type: key_press
+    key: enter
+    pre_delay: 0.5
+    comment: "Create it"
+
+  # Step 9: Open the project folder
+  - id: 9
+    type: key_press
+    key: enter
+    pre_delay: 0.5
+    comment: "Enter project folder"
+
+  # Step 10: Minimize Finder (move to background)
+  - id: 10
+    type: key_press
+    key: cmd+m
+    pre_delay: 0.3
+    comment: "Minimize Finder"
+
+  # Step 11: First screenshot - Initial state
+  - id: 11
+    type: delay
+    seconds: 1.0
+    pre_delay: 0.5
+    comment: "Brief pause before first capture"
+
+  # Step 12: Capture screenshot 1
+  - id: 12
+    type: screenshot
+    save_path: "{{archive_folder}}/{{project_name}}/capture_001.png"
+    pre_delay: 0.3
+    comment: "First screenshot - Initial"
+
+  # Step 13: Wait interval
+  - id: 13
+    type: delay
+    seconds: "{{interval_seconds}}"
+    pre_delay: 0.5
+    comment: "Wait before second capture"
+
+  # Step 14: Second screenshot
+  - id: 14
+    type: screenshot
+    save_path: "{{archive_folder}}/{{project_name}}/capture_002.png"
+    pre_delay: 0.3
+    comment: "Second screenshot"
+
+  # Step 15: Wait interval
+  - id: 15
+    type: delay
+    seconds: "{{interval_seconds}}"
+    pre_delay: 0.5
+    comment: "Wait before third capture"
+
+  # Step 16: Third screenshot
+  - id: 16
+    type: screenshot
+    save_path: "{{archive_folder}}/{{project_name}}/capture_003.png"
+    pre_delay: 0.3
+    comment: "Third screenshot"
+
+  # Step 17: Wait interval
+  - id: 17
+    type: delay
+    seconds: "{{interval_seconds}}"
+    pre_delay: 0.5
+    comment: "Wait before fourth capture"
+
+  # Step 18: Fourth screenshot
+  - id: 18
+    type: screenshot
+    save_path: "{{archive_folder}}/{{project_name}}/capture_004.png"
+    pre_delay: 0.3
+    comment: "Fourth screenshot"
+
+  # Step 19: Wait interval
+  - id: 19
+    type: delay
+    seconds: "{{interval_seconds}}"
+    pre_delay: 0.5
+    comment: "Wait before fifth capture"
+
+  # Step 20: Fifth screenshot
+  - id: 20
+    type: screenshot
+    save_path: "{{archive_folder}}/{{project_name}}/capture_005.png"
+    pre_delay: 0.3
+    comment: "Fifth screenshot"
+
+  # Step 21: Final wait before completion
+  - id: 21
+    type: delay
+    seconds: 2.0
+    pre_delay: 0.5
+    comment: "Final pause"
+
+  # Step 22: Open Finder to show results
+  - id: 22
+    type: click
+    x: 80
+    y: 120
+    button: left
+    clicks: 1
+    pre_delay: 0.3
+    comment: "Reopen Finder"
+
+  # Step 23: Navigate to archive
+  - id: 23
+    type: delay
+    seconds: 1.0
+    pre_delay: 0.3
+    comment: "Finder to load"
+
+  # Step 24: Go to archive folder
+  - id: 24
+    type: click
+    x: 500
+    y: 25
+    button: left
+    clicks: 1
+    pre_delay: 0.2
+    comment: "Go menu"
+
+  # Step 25: Enter archive path
+  - id: 25
+    type: type_text
+    text: "{{archive_folder}}/{{project_name}}"
+    interval: 0.01
+    pre_delay: 0.3
+    comment: "Navigate to captures"
+
+  # Step 26: Open folder
+  - id: 26
+    type: key_press
+    key: enter
+    pre_delay: 1.0
+    comment: "View results"
+
+  # Step 27: Capture archive view
+  - id: 27
+    type: screenshot
+    save_path: "{{archive_folder}}/{{project_name}}/archive_complete.png"
+    pre_delay: 0.5
+    comment: "Final archive view"

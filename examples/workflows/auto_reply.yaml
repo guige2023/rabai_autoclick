@@ -1,0 +1,195 @@
+# Auto Reply Workflow - Automated email/message responses
+# This workflow monitors an inbox and sends templated responses
+name: "Auto Reply Workflow"
+description: "Check inbox, identify messages, and send automated replies"
+version: "1.0"
+variables:
+  inbox_url: "https://mail.google.com/mail/u/0/#inbox"
+  template_response: "Thank you for your message. We have received your inquiry and will respond within 24 hours. Best regards"
+  sender_to_exclude: "noreply@example.com"
+
+steps:
+  # Step 1: Open browser
+  - id: 1
+    type: click
+    x: 80
+    y: 40
+    button: left
+    clicks: 1
+    pre_delay: 1.0
+    comment: "Launch browser"
+
+  # Step 2: Wait for browser
+  - id: 2
+    type: delay
+    seconds: 2.0
+    pre_delay: 0.5
+    comment: "Browser startup"
+
+  # Step 3: Navigate to email
+  - id: 3
+    type: click
+    x: 400
+    y: 80
+    button: left
+    clicks: 1
+    pre_delay: 0.2
+    comment: "Focus address bar"
+
+  # Step 4: Enter email URL
+  - id: 4
+    type: type_text
+    text: "{{inbox_url}}"
+    interval: 0.02
+    pre_delay: 0.3
+    comment: "Navigate to inbox"
+
+  # Step 5: Load inbox
+  - id: 5
+    type: key_press
+    key: enter
+    pre_delay: 3.0
+    comment: "Go to inbox"
+
+  # Step 6: Wait for emails to load
+  - id: 7
+    type: delay
+    seconds: 3.0
+    pre_delay: 1.0
+    comment: "Inbox to fully load"
+
+  # Step 7: Capture inbox screenshot
+  - id: 8
+    type: screenshot
+    save_path: "inbox_initial.png"
+    pre_delay: 0.5
+    comment: "Document initial inbox"
+
+  # Step 8: Click on first unread email
+  - id: 9
+    type: click
+    x: 200
+    y: 180
+    button: left
+    clicks: 1
+    pre_delay: 0.3
+    comment: "Open first unread message"
+
+  # Step 9: Wait for email to open
+  - id: 10
+    type: delay
+    seconds: 2.0
+    pre_delay: 0.5
+    comment: "Email content load"
+
+  # Step 10: Capture email content
+  - id: 11
+    type: screenshot
+    save_path: "email_opened.png"
+    pre_delay: 0.3
+    comment: "Document email"
+
+  # Step 11: Click Reply button
+  - id: 12
+    type: click
+    x: 800
+    y: 150
+    button: left
+    clicks: 1
+    pre_delay: 0.3
+    comment: "Open reply"
+
+  # Step 12: Wait for reply box
+  - id: 13
+    type: delay
+    seconds: 1.0
+    pre_delay: 0.3
+    comment: "Reply field to appear"
+
+  # Step 13: Type reply template
+  - id: 14
+    type: type_text
+    text: "{{template_response}}"
+    interval: 0.03
+    pre_delay: 0.3
+    comment: "Enter automated response"
+
+  # Step 14: Send reply
+  - id: 15
+    type: key_press
+    key: ctrl+enter
+    pre_delay: 1.0
+    comment: "Send reply email"
+
+  # Step 15: Wait and go back to inbox
+  - id: 16
+    type: delay
+    seconds: 2.0
+    pre_delay: 0.5
+    comment: "Send confirmation"
+
+  # Step 16: Click back to inbox
+  - id: 17
+    type: click
+    x: 100
+    y: 80
+    button: left
+    clicks: 1
+    pre_delay: 0.3
+    comment: "Return to inbox"
+
+  # Step 17: Select next unread
+  - id: 18
+    type: click
+    x: 200
+    y: 250
+    button: left
+    clicks: 1
+    pre_delay: 0.3
+    comment: "Open second unread"
+
+  # Step 18: Wait for second email
+  - id: 19
+    type: delay
+    seconds: 2.0
+    pre_delay: 0.5
+    comment: "Second email load"
+
+  # Step 19: Reply to second email
+  - id: 20
+    type: click
+    x: 800
+    y: 150
+    button: left
+    clicks: 1
+    pre_delay: 0.3
+    comment: "Reply button"
+
+  # Step 20: Wait for reply
+  - id: 21
+    type: delay
+    seconds: 1.0
+    pre_delay: 0.3
+    comment: "Reply field"
+
+  # Step 21: Type response
+  - id: 22
+    type: type_text
+    text: "{{template_response}}"
+    interval: 0.03
+    pre_delay: 0.3
+    comment: "Auto reply text"
+
+  # Step 22: Send second reply
+  - id: 23
+    type: key_press
+    key: ctrl+enter
+    pre_delay: 1.0
+    comment: "Send second reply"
+
+  # Step 23: Final screenshot
+  - id: 24
+    type: screenshot
+    save_path: "auto_reply_complete.png"
+    pre_delay: 1.0
+    comment: "Capture completion"

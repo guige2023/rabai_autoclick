@@ -1,0 +1,156 @@
+# Social Media Poster Workflow - Post content to multiple social platforms
+# This workflow opens each platform, types the message, and publishes
+name: "Social Media Poster Workflow"
+description: "Automate posting the same message across Twitter, LinkedIn, and Facebook"
+version: "1.0"
+variables:
+  message: "Check out our new product launch! #excited"
+  twitter_url: "https://twitter.com/compose/tweet"
+  linkedin_url: "https://www.linkedin.com/feed/"
+  facebook_url: "https://www.facebook.com/"
+
+steps:
+  # Step 1: Open browser
+  - id: 1
+    type: click
+    x: 80
+    y: 40
+    button: left
+    clicks: 1
+    pre_delay: 1.0
+    comment: "Launch browser"
+
+  # Step 2: Wait for browser
+  - id: 2
+    type: delay
+    seconds: 2.0
+    pre_delay: 0.5
+    comment: "Browser load time"
+
+  # Step 3: Navigate to Twitter
+  - id: 3
+    type: click
+    x: 400
+    y: 80
+    button: left
+    clicks: 1
+    pre_delay: 0.2
+    comment: "Focus address bar"
+
+  # Step 4: Enter Twitter URL
+  - id: 4
+    type: type_text
+    text: "{{twitter_url}}"
+    interval: 0.02
+    pre_delay: 0.3
+    comment: "Type Twitter compose URL"
+
+  # Step 5: Go to Twitter
+  - id: 5
+    type: key_press
+    key: enter
+    pre_delay: 2.0
+    comment: "Navigate to Twitter"
+
+  # Step 6: Wait for Twitter to load
+  - id: 6
+    type: delay
+    seconds: 3.0
+    pre_delay: 1.0
+    comment: "Wait for Twitter UI"
+
+  # Step 7: Click tweet compose area
+  - id: 7
+    type: click
+    x: 300
+    y: 200
+    button: left
+    clicks: 1
+    pre_delay: 0.3
+    comment: "Click tweet box"
+
+  # Step 8: Type the message
+  - id: 8
+    type: type_text
+    text: "{{message}}"
+    interval: 0.03
+    pre_delay: 0.3
+    comment: "Enter social post content"
+
+  # Step 9: Post tweet
+  - id: 9
+    type: key_press
+    key: ctrl+enter
+    pre_delay: 1.0
+    comment: "Submit tweet"
+
+  # Step 10: Wait and move to LinkedIn
+  - id: 10
+    type: delay
+    seconds: 2.0
+    pre_delay: 0.5
+    comment: "Wait for post to submit"
+
+  # Step 11: Navigate to LinkedIn
+  - id: 11
+    type: click
+    x: 400
+    y: 80
+    button: left
+    clicks: 1
+    pre_delay: 0.2
+    comment: "Focus address bar"
+
+  # Step 12: Enter LinkedIn URL
+  - id: 12
+    type: type_text
+    text: "{{linkedin_url}}"
+    interval: 0.02
+    pre_delay: 0.3
+    comment: "Type LinkedIn URL"
+
+  # Step 13: Go to LinkedIn
+  - id: 13
+    type: key_press
+    key: enter
+    pre_delay: 2.5
+    comment: "Navigate to LinkedIn"
+
+  # Step 14: Wait for LinkedIn
+  - id: 14
+    type: delay
+    seconds: 3.0
+    pre_delay: 1.0
+    comment: "Wait for LinkedIn to load"
+
+  # Step 15: Click start a post button
+  - id: 15
+    type: click
+    x: 400
+    y: 300
+    button: left
+    clicks: 1
+    pre_delay: 0.3
+    comment: "Click 'Start a post' button"
+
+  # Step 16: Type LinkedIn post
+  - id: 16
+    type: type_text
+    text: "{{message}}"
+    interval: 0.03
+    pre_delay: 0.5
+    comment: "Enter LinkedIn post content"
+
+  # Step 17: Post on LinkedIn
+  - id: 17
+    type: key_press
+    key: ctrl+enter
+    pre_delay: 1.0
+    comment: "Submit LinkedIn post"
+
+  # Step 18: Success screenshot
+  - id: 18
+    type: screenshot
+    save_path: "social_post_complete.png"
+    pre_delay: 1.0
+    comment: "Capture confirmation"

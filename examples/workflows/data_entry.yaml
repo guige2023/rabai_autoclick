@@ -1,0 +1,210 @@
+# Data Entry Workflow - Automated form filling from CSV/spreadsheet data
+# This workflow demonstrates repetitive form filling with variable substitution
+name: "Data Entry Workflow"
+description: "Fill out a web form with data from a structured source"
+version: "1.0"
+variables:
+  form_url: "https://example.com/form"
+  # Example data fields - normally loaded from CSV or database
+  first_name: "John"
+  last_name: "Smith"
+  email: "john.smith@example.com"
+  phone: "555-123-4567"
+  address: "123 Main Street"
+  city: "Springfield"
+  state: "OR"
+  zip: "97477"
+
+steps:
+  # Step 1: Launch browser
+  - id: 1
+    type: click
+    x: 80
+    y: 40
+    button: left
+    clicks: 1
+    pre_delay: 1.0
+    comment: "Open web browser"
+
+  # Step 2: Navigate to form page
+  - id: 2
+    type: delay
+    seconds: 1.5
+    pre_delay: 0.5
+    comment: "Wait for browser"
+
+  # Step 3: Click address bar
+  - id: 3
+    type: click
+    x: 400
+    y: 80
+    button: left
+    clicks: 1
+    pre_delay: 0.2
+    comment: "Focus address bar"
+
+  # Step 4: Enter form URL
+  - id: 4
+    type: type_text
+    text: "{{form_url}}"
+    interval: 0.02
+    pre_delay: 0.3
+    comment: "Navigate to form"
+
+  # Step 5: Load form page
+  - id: 6
+    type: key_press
+    key: enter
+    pre_delay: 2.0
+    comment: "Submit URL"
+
+  # Step 6: Wait for form to load
+  - id: 7
+    type: delay
+    seconds: 2.5
+    pre_delay: 1.0
+    comment: "Form load time"
+
+  # Step 7: Click first name field
+  - id: 8
+    type: click
+    x: 250
+    y: 200
+    button: left
+    clicks: 1
+    pre_delay: 0.2
+    comment: "Focus first name input"
+
+  # Step 8: Enter first name
+  - id: 9
+    type: type_text
+    text: "{{first_name}}"
+    interval: 0.02
+    pre_delay: 0.1
+    comment: "Fill first name"
+
+  # Step 9: Tab to next field
+  - id: 10
+    type: key_press
+    key: tab
+    pre_delay: 0.1
+    comment: "Move to last name"
+
+  # Step 10: Enter last name
+  - id: 11
+    type: type_text
+    text: "{{last_name}}"
+    interval: 0.02
+    pre_delay: 0.1
+    comment: "Fill last name"
+
+  # Step 11: Tab to email
+  - id: 12
+    type: key_press
+    key: tab
+    pre_delay: 0.1
+    comment: "Move to email field"
+
+  # Step 12: Enter email
+  - id: 13
+    type: type_text
+    text: "{{email}}"
+    interval: 0.02
+    pre_delay: 0.1
+    comment: "Fill email"
+
+  # Step 13: Tab to phone
+  - id: 14
+    type: key_press
+    key: tab
+    pre_delay: 0.1
+    comment: "Move to phone"
+
+  # Step 14: Enter phone number
+  - id: 15
+    type: type_text
+    text: "{{phone}}"
+    interval: 0.02
+    pre_delay: 0.1
+    comment: "Fill phone"
+
+  # Step 15: Tab to address
+  - id: 16
+    type: key_press
+    key: tab
+    pre_delay: 0.1
+    comment: "Move to address"
+
+  # Step 16: Enter street address
+  - id: 17
+    type: type_text
+    text: "{{address}}"
+    interval: 0.02
+    pre_delay: 0.1
+    comment: "Fill address"
+
+  # Step 17: Tab to city
+  - id: 18
+    type: key_press
+    key: tab
+    pre_delay: 0.1
+    comment: "Move to city"
+
+  # Step 18: Enter city
+  - id: 19
+    type: type_text
+    text: "{{city}}"
+    interval: 0.02
+    pre_delay: 0.1
+    comment: "Fill city"
+
+  # Step 19: Tab to state
+  - id: 20
+    type: key_press
+    key: tab
+    pre_delay: 0.1
+    comment: "Move to state"
+
+  # Step 20: Enter state
+  - id: 21
+    type: type_text
+    text: "{{state}}"
+    interval: 0.02
+    pre_delay: 0.1
+    comment: "Fill state"
+
+  # Step 21: Tab to ZIP
+  - id: 22
+    type: key_press
+    key: tab
+    pre_delay: 0.1
+    comment: "Move to ZIP"
+
+  # Step 22: Enter ZIP code
+  - id: 23
+    type: type_text
+    text: "{{zip}}"
+    interval: 0.02
+    pre_delay: 0.2
+    comment: "Fill ZIP code"
+
+  # Step 23: Tab to submit button
+  - id: 24
+    type: key_press
+    key: tab
+    pre_delay: 0.2
+    comment: "Navigate to submit"
+
+  # Step 24: Submit form
+  - id: 25
+    type: key_press
+    key: enter
+    pre_delay: 1.0
+    comment: "Submit completed form"
+
+  # Step 25: Capture confirmation
+  - id: 26
+    type: screenshot
+    save_path: "form_submission_success.png"
+    pre_delay: 1.5
+    comment: "Verify submission"
