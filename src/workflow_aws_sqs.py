@@ -55,7 +55,7 @@ class MessageAttribute(Enum):
     """SQS message attribute types."""
     ALL = "All"
     SENT_TIMESTAMP = "SentTimestamp"
-    APPROXIMATE RECEIVE_COUNT = "ApproximateReceiveCount"
+    APPROXIMATE_RECEIVE_COUNT = "ApproximateReceiveCount"
     APPROXIMATE_FIRST_RECEIVE_TIMESTAMP = "ApproximateFirstReceiveTimestamp"
 
 
