@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Any, Callable, Tuple, Set
 from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict, Counter
-from threading import Lock
+from threading import Lock, RLock
 import threading
 import copy
 
@@ -987,7 +987,7 @@ class ErrorPatternDetector:
 
     def __init__(self):
         self._patterns: Dict[str, ErrorPattern] = {}
-        self._lock = Lock()
+        self._lock = RLock()  # Use RLock to allow reentrant acquisition
 
     def register_pattern(self, error_signature: str, threshold: int = 5,
                          time_window: float = 300.0) -> str:

@@ -65,7 +65,7 @@ class AuditLogger:
         enable_syslog: bool = False,
         syslog_host: Optional[str] = None,
         syslog_port: int = 514,
-        syslog_facility: int = socket.LOG_USER,
+        syslog_facility: int = getattr(socket, 'LOG_USER', 1),  # 1 = LOG_USER fallback
         sanitize: bool = True,
         json_lines: bool = True,
         rotation_lock_timeout: float = 5.0,

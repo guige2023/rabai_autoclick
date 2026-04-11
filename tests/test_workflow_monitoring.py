@@ -24,16 +24,16 @@ from src.workflow_monitoring import (
     MonitoringAlert,
     HealthCheckResult,
     WorkflowMonitoring,
-    AlertRule,
+    # These classes are now defined as stubs in the module
+    MetricCollector,
+    AlertManager,
+    HealthChecker,
+    SystemMonitor,
+    WorkflowMonitor,
+    MonitoringDashboard,
+    MonitoringEngine,
+    AlertRuleTestHelper as AlertRule,
 )
-
-# These classes are mocked in tests or don't exist in the module yet
-AlertManager = None
-HealthChecker = None
-SystemMonitor = None
-WorkflowMonitor = None
-MonitoringDashboard = None
-MonitoringEngine = None
 
 
 class TestMonitoringStatusEnum(unittest.TestCase):

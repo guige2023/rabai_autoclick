@@ -62,6 +62,12 @@ class MockPrometheusClient:
     def generate_latest(registry):
         return b'# HELP test_metric Test metric\n'
 
+    # MetricFamily classes - imported by workflow_prometheus but not used
+    GaugeMetricFamily = type('GaugeMetricFamily', (), {})
+    CounterMetricFamily = type('CounterMetricFamily', (), {})
+    HistogramMetricFamily = type('HistogramMetricFamily', (), {})
+    SummaryMetricFamily = type('SummaryMetricFamily', (), {})
+
 
 class MockCounter:
     def __init__(self, name, description, labelnames=(), registry=None, **kwargs):
@@ -88,22 +94,36 @@ class MockMetricValue:
     def __init__(self, values_dict, key):
         self._values_dict = values_dict
         self._key = key
+        # Ensure the key exists
+        if self._key not in self._values_dict:
+            self._values_dict[self._key] = {'value': 0}
+        # Create a mock value container with .get() method
+        self._value = _MockValueContainer(self._values_dict, self._key)
 
     def inc(self, value=1):
         if self._key in self._values_dict:
-            self._values_dict[self._key]['count'] += value
+            self._values_dict[self._key]['value'] = self._values_dict[self._key].get('value', 0) + value
         else:
-            self._values_dict[self._key] = {'count': value}
+            self._values_dict[self._key] = {'value': value}
 
     def set(self, value):
         self._values_dict[self._key] = {'value': value}
 
     def dec(self, value=1):
         if self._key in self._values_dict:
-            self._values_dict[self._key]['value'] -= value
+            self._values_dict[self._key]['value'] = self._values_dict[self._key].get('value', 0) - value
+        else:
+            self._values_dict[self._key] = {'value': -value}
 
-    def _get_value(self):
-        return self._values_dict.get(self._key, {}).get('count', 0)
+
+class _MockValueContainer:
+    """Mock value container that mimics prometheus_client's MutexValue."""
+    def __init__(self, values_dict, key):
+        self._values_dict = values_dict
+        self._key = key
+
+    def get(self):
+        return self._values_dict.get(self._key, {}).get('value', 0)
 
 
 class MockGauge:
@@ -208,6 +228,10 @@ _mock_prometheus_client.REGISTRY = MockREGISTRY
 _mock_prometheus_client.PushGateway = MockPrometheusClient.PushGateway
 _mock_prometheus_client.CONTENT_TYPE_LATEST = MockPrometheusClient.CONTENT_TYPE_LATEST
 _mock_prometheus_client.generate_latest = MockPrometheusClient.generate_latest
+_mock_prometheus_client.GaugeMetricFamily = MockPrometheusClient.GaugeMetricFamily
+_mock_prometheus_client.CounterMetricFamily = MockPrometheusClient.CounterMetricFamily
+_mock_prometheus_client.HistogramMetricFamily = MockPrometheusClient.HistogramMetricFamily
+_mock_prometheus_client.SummaryMetricFamily = MockPrometheusClient.SummaryMetricFamily
 
 _mock_registry = types.ModuleType('prometheus_client.registry')
 _mock_registry.REGISTRY = MockREGISTRY
@@ -342,7 +366,9 @@ class TestPrometheusMetrics(unittest.TestCase):
 
     def test_register_counter_no_prometheus(self):
         """Test counter registration returns None when prometheus not available."""
-        with patch.object(sys.modules['prometheus_client'], 'Counter', None):
+        import workflow_prometheus
+        with patch.object(workflow_prometheus, 'Counter', None), \
+             patch.object(workflow_prometheus, 'PROMETHEUS_AVAILABLE', False):
             counter = self.metrics.register_counter(
                 "test_counter",
                 "A test counter"

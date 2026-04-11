@@ -514,7 +514,8 @@ class TestScriptAction(unittest.TestCase):
 class TestDelayAction(unittest.TestCase):
     """Tests for DelayAction."""
 
-    def test_delay_with_seconds_string(self):
+    @patch('time.sleep')
+    def test_delay_with_seconds_string(self, mock_sleep):
         """Test delay with 'Ns' format."""
         from actions.script import DelayAction
         
@@ -526,7 +527,8 @@ class TestDelayAction(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.data['delay'], 30.0)
 
-    def test_delay_with_minutes_string(self):
+    @patch('time.sleep')
+    def test_delay_with_minutes_string(self, mock_sleep):
         """Test delay with 'Nm' format."""
         from actions.script import DelayAction
         
@@ -538,7 +540,8 @@ class TestDelayAction(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.data['delay'], 120.0)
 
-    def test_delay_with_hours_string(self):
+    @patch('time.sleep')
+    def test_delay_with_hours_string(self, mock_sleep):
         """Test delay with 'Nh' format."""
         from actions.script import DelayAction
         
@@ -574,7 +577,8 @@ class TestDelayAction(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn('must be >= 0', result.message)
 
-    def test_delay_zero_duration(self):
+    @patch('time.sleep')
+    def test_delay_zero_duration(self, mock_sleep):
         """Test zero duration is allowed."""
         from actions.script import DelayAction
         
