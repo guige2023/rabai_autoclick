@@ -18,6 +18,9 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from urllib.parse import urlparse
 import io
+import yaml
+import urllib.request
+urlopen = urllib.request.urlopen
 
 
 class ExportFormat(Enum):
@@ -222,15 +225,7 @@ class WorkflowImportExport:
 
     def export_to_yaml(self, workflow: Workflow, yaml_path: str) -> None:
         """导出工作流到YAML文件"""
-        try:
-            import yaml
-        except ImportError:
-            # 如果没有pyyaml，使用JSON作为后备
-            json_str = self.export_to_json(workflow)
-            with open(yaml_path.replace('.yaml', '.json'), 'w', encoding='utf-8') as f:
-                f.write(json_str)
-            return
-
+        # yaml is imported at module level, use it directly
         data = workflow.to_dict()
         data["_metadata"] = {
             "exported_at": time.time(),
@@ -242,11 +237,7 @@ class WorkflowImportExport:
 
     def import_from_yaml(self, yaml_path: str, validate: bool = True) -> Workflow:
         """从YAML文件导入工作流"""
-        try:
-            import yaml
-        except ImportError:
-            raise ImportError("PyYAML not installed. Install with: pip install pyyaml")
-
+        # yaml is imported at module level, use it directly
         with open(yaml_path, 'r', encoding='utf-8') as f:
             data = yaml.safe_load(f)
 
@@ -377,10 +368,9 @@ class WorkflowImportExport:
 
     def _import_from_http(self, http_url: str, timeout: int) -> Workflow:
         """从HTTP导入"""
-        import urllib.request
-
+        # urllib.request is imported at module level
         req = urllib.request.Request(http_url, headers={'User-Agent': 'Rabai/24.0'})
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        with urlopen(req, timeout=timeout) as response:
             content = response.read()
 
         return self._import_from_bytes(content, http_url)
@@ -393,8 +383,8 @@ class WorkflowImportExport:
         elif content[:1] == b'{':
             return self._migrate_and_create_workflow(json.loads(content.decode('utf-8')))
         else:
+            # yaml is imported at module level
             try:
-                import yaml
                 data = yaml.safe_load(content)
                 return self._migrate_and_create_workflow(data)
             except:
@@ -607,7 +597,7 @@ class WorkflowImportExport:
 
     def _migrate_v21_to_v22(self, data: Dict) -> Dict:
         """迁移 v21 -> v22"""
-        if "triggers" not in data:
+        if "triggers" not in data or data["triggers"] is None:
             data["triggers"] = []
         return data
 

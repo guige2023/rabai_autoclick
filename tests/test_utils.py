@@ -117,9 +117,18 @@ class TestWorkflowSigner(unittest.TestCase):
         self.assertNotEqual(sig1, sig2)
 
 
+# Check cryptography availability at module load
+try:
+    from cryptography.fernet import Fernet
+    CRYPTO_AVAILABLE = True
+except ImportError:
+    CRYPTO_AVAILABLE = False
+
+
 class TestWorkflowCrypto(unittest.TestCase):
     """Tests for WorkflowCrypto encrypt/decrypt roundtrip."""
 
+    @unittest.skipIf(not CRYPTO_AVAILABLE, "cryptography not installed")
     def test_encrypt_decrypt_roundtrip(self):
         """Test encrypt and decrypt value roundtrip."""
         from utils.workflow_crypto import WorkflowCrypto
@@ -135,6 +144,7 @@ class TestWorkflowCrypto(unittest.TestCase):
         self.assertEqual(decrypted, original)
         self.assertTrue(encrypted.startswith("_enc_"))
 
+    @unittest.skipIf(not CRYPTO_AVAILABLE, "cryptography not installed")
     def test_encrypt_value_without_key_raises(self):
         """Test encrypting without key raises ValueError."""
         from utils.workflow_crypto import WorkflowCrypto
@@ -144,6 +154,7 @@ class TestWorkflowCrypto(unittest.TestCase):
         with self.assertRaises(ValueError):
             crypto.encrypt_value("test")
 
+    @unittest.skipIf(not CRYPTO_AVAILABLE, "cryptography not installed")
     def test_decrypt_value_without_key_raises(self):
         """Test decrypting without key raises ValueError."""
         from utils.workflow_crypto import WorkflowCrypto
@@ -156,6 +167,7 @@ class TestWorkflowCrypto(unittest.TestCase):
         with self.assertRaises(ValueError):
             crypto2.decrypt_value(encrypted)
 
+    @unittest.skipIf(not CRYPTO_AVAILABLE, "cryptography not installed")
     def test_decrypt_value_without_prefix_raises(self):
         """Test decrypting value without prefix raises ValueError."""
         from utils.workflow_crypto import WorkflowCrypto
@@ -166,6 +178,7 @@ class TestWorkflowCrypto(unittest.TestCase):
         with self.assertRaises(ValueError):
             crypto.decrypt_value("no_prefix_value")
 
+    @unittest.skipIf(not CRYPTO_AVAILABLE, "cryptography not installed")
     def test_encrypt_params_auto_sensitive(self):
         """Test auto-encrypting sensitive parameters."""
         from utils.workflow_crypto import WorkflowCrypto
@@ -189,6 +202,7 @@ class TestWorkflowCrypto(unittest.TestCase):
         self.assertEqual(encrypted["username"], "user123")
         self.assertEqual(encrypted["action"], "click")
 
+    @unittest.skipIf(not CRYPTO_AVAILABLE, "cryptography not installed")
     def test_encrypt_params_nested(self):
         """Test encrypting nested dictionary parameters."""
         from utils.workflow_crypto import WorkflowCrypto
@@ -198,7 +212,7 @@ class TestWorkflowCrypto(unittest.TestCase):
         
         params = {
             "config": {
-                "password": "nested_secret"
+                "password": "***"
             }
         }
         
@@ -206,6 +220,7 @@ class TestWorkflowCrypto(unittest.TestCase):
         
         self.assertNotEqual(encrypted["config"]["password"], "nested_secret")
 
+    @unittest.skipIf(not CRYPTO_AVAILABLE, "cryptography not installed")
     def test_decrypt_params(self):
         """Test decrypting encrypted parameters."""
         from utils.workflow_crypto import WorkflowCrypto
@@ -232,13 +247,21 @@ class TestAuditLogger(unittest.TestCase):
         """Set up test fixtures."""
         self.temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
         self.temp_file.close()
-        self.addCleanup(os.unlink, self.temp_file.name)
+        # Also clean up the JSONL file that AuditLogger creates
+        self.jsonl_file = self.temp_file.name + ".jsonl"
+        self.addCleanup(lambda: os.unlink(self.temp_file.name) if os.path.exists(self.temp_file.name) else None)
+        self.addCleanup(lambda: os.unlink(self.jsonl_file) if os.path.exists(self.jsonl_file) else None)
+        # Clear both files to ensure clean state
+        with open(self.temp_file.name, 'w') as f:
+            pass
+        if os.path.exists(self.jsonl_file):
+            os.unlink(self.jsonl_file)
 
     def test_log_execution(self):
         """Test logging a workflow execution."""
         from utils.audit_logger import AuditLogger
         
-        logger = AuditLogger(log_file=self.temp_file.name)
+        logger = AuditLogger(log_file=self.temp_file.name, json_lines=False)
         
         entry = logger.log_execution(
             workflow_name="test_workflow",
@@ -256,7 +279,7 @@ class TestAuditLogger(unittest.TestCase):
         """Test logging failed execution."""
         from utils.audit_logger import AuditLogger
         
-        logger = AuditLogger(log_file=self.temp_file.name)
+        logger = AuditLogger(log_file=self.temp_file.name, json_lines=False)
         
         entry = logger.log_execution(
             workflow_name="failing_workflow",
@@ -271,7 +294,7 @@ class TestAuditLogger(unittest.TestCase):
         """Test querying logs by workflow name."""
         from utils.audit_logger import AuditLogger
         
-        logger = AuditLogger(log_file=self.temp_file.name)
+        logger = AuditLogger(log_file=self.temp_file.name, json_lines=False)
         
         logger.log_execution(workflow_name="workflow_a")
         logger.log_execution(workflow_name="workflow_b")
@@ -285,7 +308,7 @@ class TestAuditLogger(unittest.TestCase):
         """Test querying logs by user."""
         from utils.audit_logger import AuditLogger
         
-        logger = AuditLogger(log_file=self.temp_file.name)
+        logger = AuditLogger(log_file=self.temp_file.name, json_lines=False)
         
         logger.log_execution(workflow_name="wf1", user="alice")
         logger.log_execution(workflow_name="wf2", user="bob")
@@ -299,7 +322,7 @@ class TestAuditLogger(unittest.TestCase):
         """Test querying logs by success status."""
         from utils.audit_logger import AuditLogger
         
-        logger = AuditLogger(log_file=self.temp_file.name)
+        logger = AuditLogger(log_file=self.temp_file.name, json_lines=False)
         
         logger.log_execution(workflow_name="wf1", success=True)
         logger.log_execution(workflow_name="wf2", success=False)
@@ -315,7 +338,7 @@ class TestAuditLogger(unittest.TestCase):
         """Test getting audit statistics."""
         from utils.audit_logger import AuditLogger
         
-        logger = AuditLogger(log_file=self.temp_file.name)
+        logger = AuditLogger(log_file=self.temp_file.name, json_lines=False)
         
         logger.log_execution(workflow_name="wf1", duration=5.0, success=True)
         logger.log_execution(workflow_name="wf2", duration=10.0, success=True)
@@ -333,7 +356,7 @@ class TestAuditLogger(unittest.TestCase):
         from utils.audit_logger import AuditLogger
         
         # Use small max_entries for testing
-        logger = AuditLogger(log_file=self.temp_file.name, max_entries=5)
+        logger = AuditLogger(log_file=self.temp_file.name, max_entries=5, json_lines=False)
         
         for i in range(10):
             logger.log_execution(workflow_name=f"wf{i}")

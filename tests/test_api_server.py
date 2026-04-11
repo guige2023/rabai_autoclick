@@ -46,7 +46,8 @@ from src.api_server import (
 @pytest.fixture
 def client():
     """Create a test client."""
-    return TestClient(app)
+    with TestClient(app) as c:
+        yield c
 
 
 @pytest.fixture
@@ -497,21 +498,11 @@ class TestVariableManagement:
 
     def test_set_and_get_variable(self, client, auth_headers):
         """Test setting and getting a variable."""
-        # Set variable
+        # Set variable - value is a query parameter
         response = client.put(
             "/variables/test_var",
             headers=auth_headers,
-            json={"value": "test_value"}
-        )
-        # FastAPI's put expects the body as the value directly for primitives
-        # But since we model it as JSON body...
-        # Let me check the actual implementation...
-
-        # Actually looking at the API, PUT /variables/{name} expects a body with 'value'
-        response = client.put(
-            "/variables/test_var",
-            headers=auth_headers,
-            json={"value": "test_value"}
+            params={"value": "test_value"}
         )
         assert response.status_code == 200
 
@@ -618,9 +609,8 @@ class TestErrorHandling:
         """Test that invalid JSON returns 422."""
         response = client.post(
             "/workflows",
-            headers=auth_headers,
-            content="not valid json",
-            media_type="application/json"
+            headers={**auth_headers, "Content-Type": "application/json"},
+            content=b"not valid json"
         )
         assert response.status_code == 422
 

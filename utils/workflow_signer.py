@@ -37,6 +37,28 @@ class WorkflowSigner:
         """
         self._secret_key = secret_key
     
+    def _filter_signature_fields(self, obj: Any) -> Any:
+        """Recursively filter out _rabai_signature fields from objects.
+        
+        Args:
+            obj: Object to filter (dict, list, or other).
+            
+        Returns:
+            Object with _rabai_signature fields removed.
+        """
+        if isinstance(obj, dict):
+            filtered = {
+                k: self._filter_signature_fields(v)
+                for k, v in obj.items()
+                if k != self.METADATA_FIELD
+            }
+            # Remove keys with empty values to match original structure
+            return {k: v for k, v in filtered.items() 
+                    if v != {} and v != [] and v != ""}
+        elif isinstance(obj, list):
+            return [self._filter_signature_fields(item) for item in obj]
+        return obj
+
     def _compute_signature(self, workflow_json: Dict[str, Any]) -> str:
         """Compute HMAC-SHA256 signature for workflow JSON.
         
@@ -47,10 +69,8 @@ class WorkflowSigner:
             Hex-encoded HMAC-SHA256 signature.
         """
         # Create canonical representation (sorted keys, no signature field)
-        workflow_copy = {
-            k: v for k, v in workflow_json.items()
-            if k != self.METADATA_FIELD
-        }
+        # Recursively filter to handle nested signatures
+        workflow_copy = self._filter_signature_fields(workflow_json)
         canonical = json.dumps(workflow_copy, sort_keys=True, default=str)
         
         signature = hmac.new(
