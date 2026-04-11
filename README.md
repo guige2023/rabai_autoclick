@@ -6,27 +6,13 @@
 ![Python](https://img.shields.io/badge/Python-3.8+-green.svg)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-lightgrey.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
-[![GitHub stars](https://img.shields.io/github/stars/guige2023/rabai_autoclick)](https://github.com/guige2023/rabai_autoclick/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/guige2023/rabai_autoclick)](https://github.com/guige2023/rabai_autoclick/network)
-[![GitHub issues](https://img.shields.io/github/issues/guige2023/rabai_autoclick)](https://github.com/guige2023/rabai_autoclick/issues)
-[![Last commit](https://img.shields.io/github/last-commit/guige2023/rabai_autoclick)](https://github.com/guige2023/rabai_autoclick/commits)
+[![Tests](https://img.shields.io/badge/Tests-3421%20passed-brightgreen.svg)](https://github.com/guige2023/rabai_autoclick/actions)
 
-**智能桌面自动化工具 | 操作录制 | OCR文字识别 | 可视化编辑器 | 跨平台支持**
+**智能桌面自动化工具 | 操作录制 | OCR文字识别 | 自愈系统 | 预测引擎 | 工作流分享**
 
-[功能特性](#功能特性) • [快速开始](#快速开始) • [架构设计](#架构设计) • [动作类型](#动作类型参考) • [开发指南](#开发指南) • [更新日志](../CHANGELOG.md)
+[功能特性](#功能特性) • [快速开始](#快速开始) • [架构设计](#架构设计) • [动作类型](#动作类型参考) • [高级功能](#高级功能) • [开发指南](#开发指南)
 
 </div>
-
----
-
-## 📖 目录
-
-- [功能特性](#功能特性)
-- [快速开始](#快速开始)
-- [架构设计](#架构设计)
-- [动作类型参考](#动作类型参考)
-- [开发指南](#开发指南)
-- [常见问题](#常见问题)
 
 ---
 
@@ -42,7 +28,7 @@
 | **🖼️ 图像匹配** | 模板匹配定位，支持置信度配置 |
 | **🔄 循环执行** | 支持设置循环次数和间隔时间 |
 | **⌨️ 全局快捷键** | 运行/停止/录制快捷键，窗口最小化也能响应 |
-| **🔧 自愈系统** | 动作失败时自动尝试恢复策略 |
+| **🔧 自愈系统** | 动作失败时自动尝试恢复策略，断路器保护 |
 | **📊 预测引擎** | 智能预测下一个动作，优化执行效率 |
 | **💊 流程诊断** | 实时监控和诊断工作流执行状态 |
 
@@ -61,7 +47,7 @@
 | 动作类型 | 功能描述 | 参数说明 |
 |---------|---------|---------|
 | **文本输入** | 模拟键盘输入文本 | `text`: 输入内容<br>`enter_after`: 输入后按回车 |
-| **按键操作** | 按下特定按键或组合键 | `keys`: 组合键如 ['ctrl', 'c'] |
+| **按键操作** | 按下特定按键或组合键 | `keys`: 组合键如 `['ctrl', 'c']` |
 
 ### 🔍 图像识别
 
@@ -75,7 +61,10 @@
 | 动作类型 | 功能描述 |
 |---------|---------|
 | **循环** | 设置循环次数执行动作 |
+| **条件循环** | 满足条件时循环 |
+| **遍历循环** | 遍历列表元素 |
 | **条件判断** | 根据条件分支执行 |
+| **异常捕获** | 捕获并处理异常 |
 | **标签/跳转** | 流程标签和跳转 |
 | **等待/延时** | 延时执行 |
 
@@ -83,9 +72,93 @@
 
 | 功能 | 描述 |
 |------|------|
-| **自愈系统** | 动作失败时自动重试和恢复 |
-| **预测引擎** | 预判下一个动作减少延迟 |
-| **流程诊断** | 实时监控执行状态 |
+| **自愈系统** | 15种恢复策略，动作失败时自动重试和恢复，断路器保护 |
+| **预测引擎** | 预判下一个动作减少延迟，异常行为检测 |
+| **流程诊断** | 实时监控执行状态，性能分析 |
+
+---
+
+## 高级功能
+
+### 🔧 自愈系统 (`src/self_healing_system.py`)
+- **15种恢复策略**: 重试、降级、切换输入源、回滚、热备切换等
+- **断路器模式**: 连续失败时自动熔断，防止系统雪崩
+- **恢复计划**: 生成结构化恢复步骤，可视化呈现
+
+### 📊 预测引擎 (`src/predictive_engine.py`)
+- **动作序列预测**: 基于历史模式预测下一步操作
+- **OCR质量预测**: 预估OCR识别准确率，智能选择策略
+- **异常检测**: 检测偏离正常模式的异常行为
+
+### 🔀 管道模式 (`src/pipeline_mode.py`)
+- **工作流链式编排**: 将多个工作流串联执行
+- **数据流处理**: 支持在步骤间传递数据
+- **CLI集成**: `rabai pipe` 命令行管道
+
+### 🐛 错误处理器 (`src/error_handler.py`)
+- **错误模式检测**: 自动识别重复出现的错误模式
+- **错误聚合**: 将相似错误归类统计
+- **错误仪表盘**: 可视化展示错误趋势
+
+### 🔔 通知系统 (`src/notification_system.py`)
+- **多渠道通知**: 支持桌面通知、邮件、飞书、Webhook等
+- **事件触发**: 工作流状态变更、异常告警等
+
+### 📋 审计日志 (`utils/audit_logger.py`)
+- **合规日志**: 记录所有操作，支持JSON/JSONL格式
+- **日志查询**: 支持时间范围、级别、操作类型过滤
+
+### ✍️ 工作流签名 (`utils/workflow_signer.py`)
+- **完整性验证**: SHA256签名确保工作流未被篡改
+- **元数据签名**: 对工作流元数据进行签名验证
+
+### ✅ 工作流验证器 (`utils/workflow_validator.py`)
+- **Schema验证**: 检查工作流定义是否符合规范
+- **循环检测**: 检测工作流中的死循环
+- **变量引用检查**: 确保变量在使用前已定义
+
+### 🔌 插件系统 (`src/plugin_system.py`)
+- **沙箱执行**: 插件在隔离环境中运行
+- **生命周期管理**: 插件的加载、初始化、卸载
+
+### 📦 工作流打包与分享 (`src/workflow_share.py`, `src/workflow_import_export.py`)
+- **多种格式导出**: YAML、JSON、二进制加密格式
+- **版本迁移**: 支持 v2.1 → v2.2 工作流格式转换
+- **无代码分享**: 生成可分享的工作流链接
+- **模板库**: 预设常用工作流模板
+
+### 🌐 API服务 (`src/api_server.py`)
+- **RESTful API**: 管理、执行为工作流提供HTTP接口
+- **变量管理**: 运行时常量存储
+- **执行监控**: 查看工作流执行状态
+
+### 🎬 屏幕录制 (`src/screen_recorder.py`)
+- **录制转工作流**: 将屏幕操作录制动作为工作流
+
+### ⏰ 调度器 (`src/workflow_scheduler.py`)
+- **Cron调度**: 基于Cron表达式的定时执行
+- **日历调度**: 基于日历的复杂调度
+
+### 📈 监控集成
+- **Prometheus**: 指标暴露和查询
+- **Grafana**: 监控仪表盘集成
+- **CloudWatch**: AWS云监控
+
+### ☁️ IaC与GitOps
+- **Terraform/Pulumi**: 基础设施即代码集成
+- **ArgoCD/Helm/Kustomize**: GitOps工作流编排
+
+### 📱 消息与中间件
+- **Kafka/NATS/RabbitMQ/ActiveMQ**: 消息队列集成
+- **SQS/SNS**: AWS消息服务集成
+
+### 🔍 数据与AI
+- **Elasticsearch/OpenSearch**: 全文搜索和分析
+- **ML Pipeline**: 机器学习工作流编排
+- **Vector DB/RAG**: 知识库和检索增强生成
+
+### AWS 服务集成 (60+)
+覆盖 AWS 全服务：Lambda、S3、EC2、ECS、EKS、RDS、DynamoDB、API Gateway、SQS、SNS、Secrets Manager、CloudWatch、Step Functions、Timestream、IoT、Transcribe、Polly、Rekognition、SageMaker、Athena、Kinesis、EventBridge 等。
 
 ---
 
@@ -104,13 +177,20 @@ git clone https://github.com/guige2023/rabai_autoclick.git
 cd rabai_autoclick
 
 # 安装依赖
-pip install -r requirements.txt
+pip install -e .
 ```
 
 ### 启动程序
 
 ```bash
+# GUI 模式
 python main.py
+
+# CLI 模式
+rabai --help
+
+# 管道模式
+rabai pipe run workflow.yaml
 ```
 
 ### 基本使用流程
@@ -129,38 +209,49 @@ python main.py
 
 ```
 rabai_autoclick/
-├── actions/          # 动作实现模块 (34+ 动作类型)
-│   ├── click.py       # 基础点击动作
-│   ├── mouse.py       # 鼠标相关动作
-│   ├── keyboard.py    # 键盘相关动作
-│   ├── ocr.py         # OCR识别动作
-│   ├── image_match.py # 图像匹配动作
-│   ├── script.py      # 脚本和流程控制
-│   ├── loop_while.py  # 循环控制
-│   ├── try_catch.py   # 异常处理
-│   ├── wait_for.py    # 等待元素/图像/文字
-│   ├── system.py      # 系统操作
-│   └── comment.py     # 注释和标签
-├── cli/               # 命令行接口
-├── core/              # 核心引擎
-│   ├── engine.py      # 执行引擎
-│   ├── context.py     # 执行上下文
-│   └── action_loader.py # 动作加载器
-├── gui/               # GUI组件
-├── src/               # 高级功能
-│   ├── self_healing_system.py # 自愈系统
-│   ├── predictive_engine.py    # 预测引擎
-│   ├── workflow_diagnostics.py # 流程诊断
-│   ├── pipeline_mode.py        # 管道模式
-│   └── screen_recorder.py      # 屏幕录制
-├── tests/             # 测试套件
-├── ui/                # PyQt5 UI组件
-├── utils/             # 工具模块
-├── main.py            # 主入口
-└── pyproject.toml     # 项目配置
+├── actions/              # 动作实现模块 (15个动作类型)
+│   ├── click.py          # 基础点击动作
+│   ├── mouse.py          # 鼠标相关动作
+│   ├── keyboard.py        # 键盘相关动作
+│   ├── ocr.py            # OCR识别动作
+│   ├── image_match.py     # 图像匹配动作
+│   ├── loop_while.py      # 循环控制
+│   ├── try_catch.py       # 异常处理
+│   ├── wait_for.py       # 等待元素/图像/文字
+│   ├── system.py          # 系统操作
+│   ├── network.py         # 网络操作
+│   ├── notify.py          # 通知动作
+│   ├── filesystem.py       # 文件系统操作
+│   └── script.py          # 脚本执行
+├── cli/                   # 命令行接口
+├── core/                  # 核心引擎
+│   ├── engine.py         # 执行引擎
+│   ├── context.py         # 执行上下文
+│   └── action_loader.py   # 动作加载器
+├── gui/                   # GUI组件
+├── src/                   # 高级功能 (120+ 模块)
+│   ├── self_healing_system.py  # 自愈系统
+│   ├── predictive_engine.py     # 预测引擎
+│   ├── error_handler.py         # 错误处理器
+│   ├── pipeline_mode.py         # 管道模式
+│   ├── workflow_share.py        # 工作流分享
+│   ├── workflow_import_export.py # 导入导出
+│   ├── audit_logger.py          # 审计日志
+│   ├── api_server.py           # API服务
+│   ├── notification_system.py   # 通知系统
+│   ├── plugin_system.py        # 插件系统
+│   ├── screen_recorder.py      # 屏幕录制
+│   ├── workflow_aws_*.py       # AWS集成 (60+)
+│   ├── workflow_kubernetes.py  # K8s集成
+│   ├── workflow_monitoring.py  # 监控集成
+│   ├── workflow_messaging.py   # 消息队列
+│   └── workflow_ml*.py         # ML工作流
+├── tests/                # 测试套件 (3421 passed)
+├── ui/                   # PyQt5 UI组件
+├── utils/                # 工具模块
+├── main.py               # GUI主入口
+└── pyproject.toml        # 项目配置
 ```
-
-详细架构设计请参阅 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
 ---
 
@@ -238,12 +329,12 @@ RabAI AutoClick 支持 **34+ 动作类型**，分为以下类别：
 
 ```
 rabai_autoclick/
-├── actions/          # Action implementations (34+ action types)
+├── actions/          # Action implementations (15 action modules)
 ├── cli/              # CLI command-line interface
 ├── core/             # Core engine, context, and action loader
 ├── gui/              # GUI components
-├── src/              # Advanced features (pipeline, diagnostics, etc.)
-├── tests/            # Test suite
+├── src/              # Advanced features (120+ modules)
+├── tests/            # Test suite (3421 tests)
 ├── ui/               # PyQt5 UI components
 ├── utils/            # Utility modules (hotkey, logging, etc.)
 ├── main.py           # Main entry point
@@ -259,23 +350,16 @@ cd rabai_autoclick
 
 # 创建虚拟环境 (推荐)
 python3 -m venv .venv
-source .venv/bin/activate  # macOS/Linux
-# .\.venv\\Scripts\\activate  # Windows
+source .venv/bin/activate
 
 # 安装依赖
-pip install -r requirements.txt
-
-# 安装开发依赖
-pip install pytest pytest-cov black ruff
+pip install -e .
 
 # 运行测试
-pytest tests/test_core.py -v
+pytest tests/ -v
 
-# 代码格式化
-black .
-
-# 代码检查
-ruff check .
+# 运行核心测试
+pytest tests/test_core.py tests/test_error_handler.py tests/test_src.py -v
 ```
 
 ### 添加新动作
@@ -311,22 +395,14 @@ class MyAction(BaseAction):
 # 运行所有测试
 pytest tests/ -v
 
+# 运行核心测试套件
+pytest tests/test_core.py tests/test_error_handler.py tests/test_src.py \
+       tests/test_utils.py tests/test_actions.py tests/test_workflow_prometheus.py \
+       tests/test_workflow_monitoring.py tests/test_api_server.py -v
+
 # 运行带覆盖率的测试
 pytest tests/ --cov=. --cov-report=html
-
-# 运行特定测试文件
-pytest tests/test_core.py -v
 ```
-
-### 代码规范
-
-- 遵循 PEP 8 规范
-- 使用 type hints 标注函数签名
-- 所有公开方法需要 docstring
-- 使用 black 格式化代码 (line-length: 100)
-- 使用 ruff 进行代码检查
-
-详细贡献指南请参阅 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ---
 
@@ -350,12 +426,6 @@ A: 尝试以下方法：
 - 确保文字清晰、对比度高
 - 不勾选 `exact_match` 进行模糊匹配
 
-### Q: 如何在 macOS 上使用？
-
-A: macOS 需要授权辅助功能权限：
-- 系统偏好设置 → 安全性与隐私 → 辅助功能
-- 添加 Python 或终端到允许列表
-
 ---
 
 ## 许可证
@@ -369,15 +439,3 @@ A: macOS 需要授权辅助功能权限：
 **Made with ❤️ by RabAI Team**
 
 </div>
-
----
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-详细贡献指南请参阅 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
----
-
-**Made with ❤️ by RabAI Team**
