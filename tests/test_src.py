@@ -82,6 +82,7 @@ class TestSelfHealingSystem(unittest.TestCase):
         record.error_type = ErrorType.ELEMENT_NOT_FOUND
         record.workflow_name = "test"
         record.step_name = "step1"
+        record.error_message = "Element not found at position"
         
         suggestions = system.get_fix_suggestions(record)
         
@@ -401,6 +402,17 @@ class TestWorkflowDiagnostics(unittest.TestCase):
 
 class TestPipelineMode(unittest.TestCase):
     """Tests for PipelineMode validation."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.data_dir = os.path.join(self.temp_dir, "data")
+        os.makedirs(self.data_dir)
+
+    def tearDown(self):
+        """Clean up."""
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_pipe_mode_enum_values(self):
         """Test PipeMode enum has expected values."""

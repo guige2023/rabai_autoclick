@@ -92,6 +92,7 @@ class PipelineValidationError(Exception):
     """管道验证错误"""
     def __init__(self, message: str, errors: List[str] = None):
         super().__init__(message)
+        self.message = message
         self.errors = errors or [message]
 
 
@@ -99,6 +100,7 @@ class PipelineExecuteError(Exception):
     """管道执行错误"""
     def __init__(self, message: str, step_id: str = None, context: Dict = None):
         super().__init__(message)
+        self.message = message
         self.step_id = step_id
         self.context = context or {}
 

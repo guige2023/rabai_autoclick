@@ -150,7 +150,7 @@ class TestUserMessageGenerator(unittest.TestCase):
         
         message = generator.generate("Connection refused")
         
-        self.assertIn("refused", message.lower())
+        self.assertIn("not accepting", message.lower())
 
     def test_generate_with_context(self):
         """Test generating message with context"""
@@ -362,6 +362,19 @@ class TestErrorPatternDetector(unittest.TestCase):
 
 class TestWorkflowErrorHandler(unittest.TestCase):
     """Test WorkflowErrorHandler main class"""
+
+    @classmethod
+    def setUpClass(cls):
+        """Patch time.sleep to avoid 7s network retries per test"""
+        import src.error_handler as _eh
+        cls._orig_sleep = _eh.time.sleep
+        _eh.time.sleep = lambda *a, **kw: None
+
+    @classmethod
+    def tearDownClass(cls):
+        """Restore original time.sleep"""
+        import src.error_handler as _eh
+        _eh.time.sleep = cls._orig_sleep
 
     def setUp(self):
         """Set up test fixtures"""

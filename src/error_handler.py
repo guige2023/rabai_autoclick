@@ -20,6 +20,7 @@ from collections import defaultdict, Counter
 from threading import Lock, RLock
 import threading
 import copy
+from string import Template
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +163,7 @@ class ErrorPattern:
     last_detected: float
     alerted: bool
     alert_count: int
+    recent_timestamps: List[float] = field(default_factory=list)
 
 
 @dataclass
@@ -1068,9 +1070,9 @@ class ErrorDashboardGenerator:
     def __init__(self):
         self._template = self._load_template()
 
-    def _load_template(self) -> str:
+    def _load_template(self) -> Template:
         """Load the HTML template."""
-        return """<!DOCTYPE html>
+        return Template("""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -1340,7 +1342,7 @@ class ErrorDashboardGenerator:
         });
     </script>
 </body>
-</html>"""
+</html>""")
 
     def generate(self, error_records: List[ErrorRecord],
                   aggregated_errors: List[AggregatedError],
@@ -1390,7 +1392,7 @@ class ErrorDashboardGenerator:
                 </tr>
             """)
 
-        html = self._template.format(
+        html = self._template.safe_substitute(
             total_errors=stats.total_errors,
             critical_count=severity_counts['critical'],
             high_count=severity_counts['high'],
