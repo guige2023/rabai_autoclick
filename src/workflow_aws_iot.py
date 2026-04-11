@@ -2345,7 +2345,7 @@ class IoTIntegration:
             Connectivity status
         """
         try:
-            response = self.iot_client.describe_thing_ connectivity(thingName=thing_name)
+            response = self.iot_client.describe_thing_connectivity(thingName=thing_name)
             return {
                 "connected": response.get("connected"),
                 "disconnect_time": response.get("disconnectTime"),

@@ -1866,7 +1866,7 @@ class WorkflowReporting:
             margin-bottom: 16px;
         }}
         @media (max-width: 380px) {{
-            .stats-grid {{ grid-template-columns: 1fr; }
+            .stats-grid {{ grid-template-columns: 1fr; }}
         }}
     </style>
 </head>

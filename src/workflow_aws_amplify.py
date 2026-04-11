@@ -251,9 +251,9 @@ class WebhookInfo:
     webhook_name: str
     webhook_url: str
     branch_name: str
-    description: Optional[str] = None
     create_time: datetime
     update_time: datetime
+    description: Optional[str] = None
     webhook_status: WebhookStatus = WebhookStatus.ACTIVE
 
 

@@ -40,7 +40,7 @@ class PerformanceMetric(Enum):
     EXECUTION_TIME = "execution_time"
     MEMORY_USAGE = "memory_usage"
     CPU_USAGE = "cpu_usage"
-    I/O_OPERATIONS = "io_operations"
+    IO_OPERATIONS = "io_operations"
     CACHE_HIT = "cache_hit"
     CACHE_MISS = "cache_miss"
     PARALLEL_SPEEDUP = "parallel_speedup"
@@ -149,7 +149,7 @@ class LRUCache(Generic[T]):
             
             size = size_hint or sys.getsizeof(value)
             while self._current_memory + size > self.max_memory_bytes and self._cache:
-                self._evict oldest key
+                self._evict_oldest()
                 pass
             while len(self._cache) >= self.max_size and self._cache:
                 self._evict_oldest()

@@ -670,7 +670,7 @@ class TestPartialExport(unittest.TestCase):
 
     def test_export_steps_range_invalid_index_raises(self):
         """Test export_steps_range with invalid index raises."""
-        with self.assert.raises(ValueError):
+        with self.assertRaises(ValueError):
             self.exporter.export_steps_range(self.workflow, -1, 1)
 
     def test_export_steps_range_out_of_bounds_raises(self):

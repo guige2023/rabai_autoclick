@@ -18,6 +18,11 @@ import hashlib
 import hmac
 import secrets
 
+try:
+    import httpx
+except ImportError:
+    httpx = None
+
 sys.path.insert(0, '/Users/guige/my_project')
 sys.path.insert(0, '/Users/guige/my_project/rabai_autoclick')
 sys.path.insert(0, '/Users/guige/my_project/rabai_autoclick/src')

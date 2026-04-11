@@ -245,8 +245,8 @@ class InsightInfo:
     name: str
     insight_type: InsightType
     filters: Dict[str, Any]
-    grouping_attributes: List[str] = field(default_factory=list)
     created_at: datetime
+    grouping_attributes: List[str] = field(default_factory=list)
     updated_at: Optional[datetime] = None
     result_finding_count: int = 0
 

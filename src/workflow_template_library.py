@@ -420,7 +420,7 @@ class TemplateLibrary:
                 {"id": "detect_formats", "type": "file_detect_format", "params": {"files": "${input_files}"}},
                 {"id": "validate_conversion", "type": "format_validate", "params": {"source": "${source_format}", "target": "${target_format}"}},
                 {"id": "create_output", "type": "folder_create", "params": {"path": "${output_folder}", "exists_ok": True}},
-                {"id": "convert_batch", "type": "file_convert_batch", "params": {"files": "${input_files}", "target": "${target_format}", "output": "${output_folder}", "quality": "${quality}", "metadata": "${preserve_metadata}", "parallel": "${parallel}", "workers": "${max_workers}"}}},
+                {"id": "convert_batch", "type": "file_convert_batch", "params": {"files": "${input_files}", "target": "${target_format}", "output": "${output_folder}", "quality": "${quality}", "metadata": "${preserve_metadata}", "parallel": "${parallel}", "workers": "${max_workers}"}},
                 {"id": "verify_output", "type": "file_verify_batch", "params": {"files": "${convert_batch.outputs}"}},
                 {"id": "report", "type": "log", "params": {"message": "Converted ${convert_batch.success_count} of ${convert_batch.total} files", "level": "info"}}
             ],
@@ -574,7 +574,7 @@ class TemplateLibrary:
             },
             steps=[
                 {"id": "init_sources", "type": "variable_set", "params": {"var": "current_source", "value": "${sources}[0]"}},
-                {"id": "harvest_source", "type": "social_harvest", "params": {"source": "${current_source}", "keywords": "${keywords}", "max": "${max_per_source}"}}},
+                {"id": "harvest_source", "type": "social_harvest", "params": {"source": "${current_source}", "keywords": "${keywords}", "max": "${max_per_source}"}},
                 {"id": "filter_content", "type": "social_filter", "params": {"items": "${harvest_source}", "criteria": "${filter_by}"}},
                 {"id": "analyze_sentiment", "type": "sentiment_analyze_batch", "params": {"items": "${filter_content}"}},
                 {"id": "filter_sentiment", "type": "list_filter", "params": {"list": "${analyze_sentiment}", "by": "sentiment", "value": "${sentiment_filter}"}},
@@ -650,10 +650,11 @@ class TemplateLibrary:
                 "output_format": {"type": "string", "description": "Output: json, csv, report", "default": "json"}
             },
             steps=[
-                {"id": "fetch_metrics", "type": "social_hashtag_metrics", "params": {"hashtags": "${hashtags}", "platforms": "${platforms}", "period": "${time_range}"}}},
-                {"id": "analyze_performance", "type": "analytics_compute", "params": {"data": "${fetch_metrics}", "metrics": ["reach", "engagement", "posts", "growth"]}}},
+                {"id": "fetch_metrics", "type": "social_hashtag_metrics", "params": {"hashtags": "${hashtags}", "platforms": "${platforms}", "period": "${time_range}"}},
+                {"id": "analyze_performance", "type": "analytics_compute", "params": {"data": "${fetch_metrics}", "metrics": ["reach", "engagement", "posts", "growth"]}},
+
                 {"id": "compare_op", "type": "conditional", "params": {"if": "${compare_with}", "then": [
-                    {"id": "fetch_compare", "type": "social_hashtag_metrics", "params": {"hashtags": "${compare_with}", "platforms": "${platforms}", "period": "${time_range}"}}},
+                    {"id": "fetch_compare", "type": "social_hashtag_metrics", "params": {"hashtags": "${compare_with}", "platforms": "${platforms}", "period": "${time_range}"}},
                     {"id": "comparison_report", "type": "analytics_compare", "params": {"a": "${analyze_performance}", "b": "${fetch_compare}"}}
                 ]}},
                 {"id": "rank_hashtags", "type": "list_sort", "params": {"list": "${analyze_performance}", "by": "score", "order": "desc"}},
@@ -699,7 +700,7 @@ class TemplateLibrary:
                 "enable_out_of_office": {"type": "boolean", "description": "Enable OOO replies", "default": False}
             },
             steps=[
-                {"id": "fetch_emails", "type": "email_fetch", "params": {"account": "${email_account}", "filter": "unread", "limit": "${max_daily_replies}"}}},
+                {"id": "fetch_emails", "type": "email_fetch", "params": {"account": "${email_account}", "filter": "unread", "limit": "${max_daily_replies}"}},
                 {"id": "classify_emails", "type": "email_classify", "params": {"emails": "${fetch_emails}"}},
                 {"id": "check_priority", "type": "email_filter_vip", "params": {"emails": "${classify_emails}", "vip": "${priority_senders}"}},
                 {"id": "forward_emails", "type": "conditional", "params": {"if": "${forward_rules}", "then": [

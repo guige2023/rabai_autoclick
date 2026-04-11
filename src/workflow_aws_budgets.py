@@ -782,7 +782,7 @@ class BudgetsIntegration:
             "history": history
         }
     
-    def get_cost allocation_tags_report(self) -> List[Dict[str, Any]]:
+    def get_cost_allocation_tags_report(self) -> List[Dict[str, Any]]:
         """Get cost allocation tags report"""
         ce_client = boto3.Session().client("ce", region_name=self.region)
         

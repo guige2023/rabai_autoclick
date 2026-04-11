@@ -668,7 +668,7 @@ class TestWAFFirewallManager(unittest.TestCase):
     def test_associate_web_acl_with_firewall_manager(self):
         """Test associating Web ACL with Firewall Manager"""
         self.mock_fms_client.put_web_acl.return_value = {}
-        self.mock_fms_client associate_web_acl.return_value = {}
+        self.mock_fms_client.associate_web_acl.return_value = {}
 
         result = self.integration.put_web_acl_for_firewall_manager(
             web_acl_id="acl-123",

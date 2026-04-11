@@ -215,8 +215,8 @@ class ContactFlowInfo:
 class QuickConnectConfig:
     """Configuration for creating a quick connect."""
     name: str
-    description: str = ""
     quick_connect_type: Union[QuickConnectType, str]
+    description: str = ""
     destination: Optional[Dict[str, Any]] = None
 
 
@@ -262,10 +262,10 @@ class UserInfo:
 class RoutingProfileConfig:
     """Configuration for creating a routing profile."""
     name: str
-    description: str = ""
     instance_id: str
     default_outbound_queue_id: str
     media_concurrencies: List[Dict[str, Any]]
+    description: str = ""
     routing_profile_queue_configs: List[Dict[str, Any]] = field(default_factory=list)
 
 
@@ -310,9 +310,9 @@ class QueueInfo:
 class HoursOfOperationConfig:
     """Configuration for hours of operation."""
     name: str
-    description: str = ""
     time_zone: str
     hours_of_operation_config: List[Dict[str, Any]]
+    description: str = ""
 
 
 @dataclass

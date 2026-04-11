@@ -23,15 +23,17 @@ from src.workflow_monitoring import (
     MetricValue,
     MonitoringAlert,
     HealthCheckResult,
-    MetricCollector,
+    WorkflowMonitoring,
     AlertRule,
-    AlertManager,
-    HealthChecker,
-    SystemMonitor,
-    WorkflowMonitor,
-    MonitoringDashboard,
-    MonitoringEngine
 )
+
+# These classes are mocked in tests or don't exist in the module yet
+AlertManager = None
+HealthChecker = None
+SystemMonitor = None
+WorkflowMonitor = None
+MonitoringDashboard = None
+MonitoringEngine = None
 
 
 class TestMonitoringStatusEnum(unittest.TestCase):

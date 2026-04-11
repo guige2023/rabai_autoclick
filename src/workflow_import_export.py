@@ -546,11 +546,11 @@ class WorkflowImportExport:
     # ========== 8. 版本迁移 ==========
 
     VERSION_MIGRATIONS = {
-        "1.0.0": lambda d: d,  # 初始版本无需迁移
-        "2.0.0": self._migrate_v2_to_v3,
-        "20.0.0": self._migrate_v20_to_v21,
-        "21.0.0": self._migrate_v21_to_v22,
-        "23.0.0": self._migrate_v23_to_v24,
+        "1.0.0": None,  # 初始版本无需迁移
+        "2.0.0": "_migrate_v2_to_v3",
+        "20.0.0": "_migrate_v20_to_v21",
+        "21.0.0": "_migrate_v21_to_v22",
+        "23.0.0": "_migrate_v23_to_v24",
     }
 
     def _migrate_workflow_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -568,8 +568,9 @@ class WorkflowImportExport:
             if not next_version:
                 raise ValueError(f"Cannot migrate from version {current}")
 
-            migrator = self.VERSION_MIGRATIONS.get(current)
-            if migrator:
+            migrator_name = self.VERSION_MIGRATIONS.get(current)
+            if migrator_name:
+                migrator = getattr(self, migrator_name)
                 data = migrator(data)
                 migration_steps.append(f"{current} -> {next_version}")
             current = next_version

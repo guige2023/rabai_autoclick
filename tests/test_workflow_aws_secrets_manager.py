@@ -341,7 +341,7 @@ class TestSecretManagementOperations(unittest.TestCase):
         result = integration.create_secret(
             name="test-secret",
             secret_value="value",
-            tags={"Environment": "Production", " "Application": "Web"}
+            tags={"Environment": "Production", "Application": "Web"}
         )
 
         call_kwargs = self.mock_client.create_secret.call_args[1]

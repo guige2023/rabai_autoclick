@@ -87,7 +87,7 @@ class TrustState(Enum):
     CONNECTED = "Connected"
     DISCONNECTED = "Disconnected"
     VERIFYING = "Verifying"
-   VERIFY_FAILED = "Verify Failed"
+    VERIFY_FAILED = "Verify Failed"
 
 
 class ComputerState(Enum):

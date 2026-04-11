@@ -53,6 +53,10 @@ class MetricType(Enum):
     MEMORY_USAGE = "memory_usage"
     DISK_USAGE = "disk_usage"
     NETWORK_IO = "network_io"
+    GAUGE = "gauge"
+    COUNTER = "counter"
+    HISTOGRAM = "histogram"
+    SUMMARY = "summary"
     CUSTOM = "custom"
 
 
@@ -88,6 +92,15 @@ class OnCallScheduleType(Enum):
     PRIMARY = "primary"
     SECONDARY = "secondary"
     ESCALATION = "escalation"
+
+
+class MonitoringStatus(Enum):
+    """General monitoring status values."""
+    HEALTHY = "healthy"
+    WARNING = "warning"
+    CRITICAL = "critical"
+    UNKNOWN = "unknown"
+    STOPPED = "stopped"
 
 
 class HealthCheckStatus(Enum):
@@ -188,6 +201,30 @@ class AlertGroup:
     representative_alert: Alert
     alerts: List[Alert] = field(default_factory=list)
     suppressed: bool = False
+
+
+@dataclass
+class MonitoringAlert:
+    """Represents a monitoring alert."""
+    alert_id: str
+    metric_name: str
+    status: MonitoringStatus
+    message: str
+    current_value: float
+    threshold: float
+    timestamp: float
+    resolved: bool = False
+
+
+@dataclass
+class MetricValue:
+    """A metric value with metadata."""
+    name: str
+    value: float
+    timestamp: float
+    metric_type: MetricType
+    tags: Dict[str, str] = field(default_factory=dict)
+    unit: str = ""
 
 
 @dataclass

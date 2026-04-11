@@ -196,9 +196,9 @@ class MaintenanceWindow:
     """Represents a maintenance window."""
     window_id: str
     name: str
-    description: str = ""
     start_time: datetime
     end_time: datetime
+    description: str = ""
     schedule: str = ""
     duration: int = 0
     cutoff: int = 0
