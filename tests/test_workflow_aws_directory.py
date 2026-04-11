@@ -383,14 +383,15 @@ class TestADConnectorOperations(unittest.TestCase):
             name="connector.example.com",
             vpc_id="vpc-12345678",
             subnet_ids=["subnet-12345678", "subnet-87654321"],
+            dns_addresses=["192.168.1.1", "192.168.1.2"],
             customer_username="admin"
         )
 
         self.assertEqual(result['directory_id'], 'd-1234567890abcdef0')
         self.assertEqual(result['directory_type'], 'ADConnector')
 
-    def test_list_ad_connectors(self):
-        """Test listing AD Connectors"""
+    def test_list_ad_connector(self):
+        """Test listing AD Connectors (singular method name)"""
         mock_response = {
             'DirectoryDescriptions': [
                 {'DirectoryId': 'd-1', 'Type': 'ADConnector', 'Stage': 'Active'},
@@ -399,9 +400,25 @@ class TestADConnectorOperations(unittest.TestCase):
         }
         self.mock_ds_client.describe_directories.return_value = mock_response
 
-        result = self.integration.list_ad_connectors()
+        result = self.integration.list_ad_connector()
 
         self.assertEqual(len(result), 1)
+
+    def test_get_ad_connector(self):
+        """Test getting AD Connector details"""
+        mock_response = {
+            'DirectoryDescriptions': [{
+                'DirectoryId': 'd-1234567890abcdef0',
+                'Name': 'connector.example.com',
+                'Type': 'ADConnector',
+                'Stage': 'Active'
+            }]
+        }
+        self.mock_ds_client.describe_directories.return_value = mock_response
+
+        result = self.integration.get_ad_connector('d-1234567890abcdef0')
+
+        self.assertEqual(result['DirectoryId'], 'd-1234567890abcdef0')
 
 
 class TestTrustRelationships(unittest.TestCase):
@@ -420,7 +437,7 @@ class TestTrustRelationships(unittest.TestCase):
 
     def test_create_trust_relationship(self):
         """Test creating a trust relationship"""
-        self.mock_ds_client.create_trust.return_value = {}
+        self.mock_ds_client.create_trust.return_value = {'TrustId': 't-12345678'}
 
         config = TrustRelationshipConfig(
             trusted_domain="trust.example.com",
@@ -431,47 +448,66 @@ class TestTrustRelationships(unittest.TestCase):
 
         result = self.integration.create_trust_relationship('d-1234567890abcdef0', config)
 
-        self.assertTrue(result)
+        self.assertEqual(result['status'], 'creating')
+        self.assertEqual(result['directory_id'], 'd-1234567890abcdef0')
+        self.assertEqual(result['trusted_domain'], 'trust.example.com')
 
     def test_get_trust_relationship(self):
         """Test getting trust relationship details"""
         mock_response = {
             'TrustRelationships': [{
+                'TrustId': 't-12345678',
                 'TrustDirection': 'Two-Way',
                 'TrustedDomainName': 'trust.example.com',
                 'TrustState': 'Connected',
                 'TrustType': 'Forest'
             }]
         }
-        self.mock_ds_client.describe_trusts.return_value = mock_response
+        self.mock_ds_client.describe_trust_relationships.return_value = mock_response
 
-        result = self.integration.get_trust_relationship('d-1234567890abcdef0', 'trust.example.com')
+        # Method signature is (directory_id, trust_id)
+        result = self.integration.get_trust_relationship('d-1234567890abcdef0', 't-12345678')
 
-        self.assertEqual(result['TrustedDomainName'], 'trust.example.com')
+        self.assertEqual(result['TrustId'], 't-12345678')
         self.assertEqual(result['TrustState'], 'Connected')
+
+    def test_list_trust_relationships(self):
+        """Test listing trust relationships"""
+        mock_response = {
+            'TrustRelationships': [
+                {'TrustId': 't-1', 'TrustDirection': 'Two-Way', 'TrustedDomainName': 'trust1.example.com'},
+                {'TrustId': 't-2', 'TrustDirection': 'One-Way: Outbound', 'TrustedDomainName': 'trust2.example.com'}
+            ]
+        }
+        self.mock_ds_client.describe_trust_relationships.return_value = mock_response
+
+        result = self.integration.list_trust_relationships('d-1234567890abcdef0')
+
+        self.assertEqual(len(result), 2)
 
     def test_delete_trust_relationship(self):
         """Test deleting a trust relationship"""
         self.mock_ds_client.delete_trust.return_value = {}
 
-        result = self.integration.delete_trust_relationship('d-1234567890abcdef0', 'trust.example.com')
+        # Method signature is (directory_id, trust_id)
+        result = self.integration.delete_trust_relationship('d-1234567890abcdef0', 't-12345678')
 
-        self.assertTrue(result)
+        self.assertEqual(result['status'], 'deleted')
+        self.assertEqual(result['trust_id'], 't-12345678')
 
     def test_verify_trust_relationship(self):
         """Test verifying a trust relationship"""
         mock_response = {
-            'TrustRelationship': {
-                'TrustDirection': 'Two-Way',
-                'TrustedDomainName': 'trust.example.com',
-                'TrustState': 'Connected'
-            }
+            'TrustVerificationId': 'tv-12345678'
         }
         self.mock_ds_client.verify_trust.return_value = mock_response
 
-        result = self.integration.verify_trust_relationship('d-1234567890abcdef0', 'trust.example.com')
+        # Method signature is (directory_id, trust_id)
+        result = self.integration.verify_trust_relationship('d-1234567890abcdef0', 't-12345678')
 
-        self.assertEqual(result['TrustState'], 'Connected')
+        self.assertEqual(result['status'], 'verifying')
+        self.assertEqual(result['trust_id'], 't-12345678')
+        self.assertEqual(result['verification_id'], 'tv-12345678')
 
 
 class TestDNSManagement(unittest.TestCase):
@@ -480,34 +516,61 @@ class TestDNSManagement(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures"""
         self.mock_ds_client = MagicMock()
+        self.mock_ec2_client = MagicMock()
 
         with patch.object(DirectoryServiceIntegration, '__init__', lambda x, **kwargs: None):
             self.integration = DirectoryServiceIntegration()
             self.integration.region = "us-east-1"
             self.integration.ds_client = self.mock_ds_client
+            self.integration.ec2_client = self.mock_ec2_client
             self.integration._directory_cache = {}
 
-    def test_get_dns_info(self):
-        """Test getting DNS information"""
+    def test_get_dns_config(self):
+        """Test getting DNS configuration"""
         mock_response = {
             'DirectoryDescriptions': [{
                 'DirectoryId': 'd-1234567890abcdef0',
-                'DnsIpAddrs': ['192.168.1.1', '192.168.1.2']
+                'DnsIpAddrs': ['192.168.1.1', '192.168.1.2'],
+                'Name': 'test.example.com'
             }]
         }
         self.mock_ds_client.describe_directories.return_value = mock_response
 
-        result = self.integration.get_dns_info('d-1234567890abcdef0')
+        result = self.integration.get_dns_config('d-1234567890abcdef0')
 
-        self.assertEqual(len(result['DnsIpAddrs']), 2)
+        self.assertEqual(len(result.dns_servers), 2)
+        self.assertEqual(result.dns_zone_name, 'test.example.com')
 
-    def test_add_dns_ip_addresses(self):
-        """Test adding DNS IP addresses"""
-        self.mock_ds_client.add_dns_ip.return_value = {}
+    def test_add_dns_forwarder(self):
+        """Test adding DNS forwarder"""
+        result = self.integration.add_dns_forwarder(
+            'd-1234567890abcdef0',
+            'example.com',
+            ['192.168.1.1', '192.168.1.2']
+        )
 
-        result = self.integration.add_dns_ip_addresses('d-1234567890abcdef0', ['192.168.2.1', '192.168.2.2'])
+        self.assertEqual(result['status'], 'configured')
+        self.assertEqual(result['domain_name'], 'example.com')
 
-        self.assertTrue(result)
+    def test_update_dns_config(self):
+        """Test updating DNS configuration"""
+        mock_describe_response = {
+            'DirectoryDescriptions': [{
+                'DirectoryId': 'd-1234567890abcdef0',
+                'VpcSettings': {'VpcId': 'vpc-12345678'}
+            }]
+        }
+        self.mock_ds_client.describe_directories.return_value = mock_describe_response
+        self.mock_ec2_client.modify_vpc_attribute.return_value = {}
+
+        dns_config = DNSConfig(
+            dns_servers=['192.168.1.1', '192.168.1.2'],
+            dns_zone_name='test.example.com'
+        )
+
+        result = self.integration.update_dns_config('d-1234567890abcdef0', dns_config)
+
+        self.assertEqual(result['status'], 'updated')
 
 
 class TestComputerManagement(unittest.TestCase):
@@ -525,7 +588,7 @@ class TestComputerManagement(unittest.TestCase):
 
     def test_register_computer(self):
         """Test registering a computer"""
-        self.mock_ds_client.register_directory.return_value = {}
+        self.mock_ds_client.register_event_topic.return_value = {}
 
         config = ComputerConfig(
             computer_name="test-computer",
@@ -534,20 +597,13 @@ class TestComputerManagement(unittest.TestCase):
 
         result = self.integration.register_computer('d-1234567890abcdef0', config)
 
-        self.assertTrue(result)
-
-    def test_deregister_computer(self):
-        """Test deregistering a computer"""
-        self.mock_ds_client.deregister_directory.return_value = {}
-
-        result = self.integration.deregister_computer('d-1234567890abcdef0', 'test-computer')
-
-        self.assertTrue(result)
+        self.assertEqual(result['status'], 'registered')
+        self.assertEqual(result['computer_name'], 'test-computer')
 
     def test_list_computers(self):
         """Test listing directory computers"""
         mock_response = {
-            'ComputerEntries': [
+            'Computers': [
                 {'ComputerId': 'comp-1', 'ComputerName': 'computer1'},
                 {'ComputerId': 'comp-2', 'ComputerName': 'computer2'}
             ]
@@ -557,6 +613,42 @@ class TestComputerManagement(unittest.TestCase):
         result = self.integration.list_computers('d-1234567890abcdef0')
 
         self.assertEqual(len(result), 2)
+
+    def test_get_computer(self):
+        """Test getting computer details"""
+        mock_response = {
+            'Computers': [
+                {'ComputerId': 'comp-1', 'ComputerName': 'computer1'},
+                {'ComputerId': 'comp-2', 'ComputerName': 'computer2'}
+            ]
+        }
+        self.mock_ds_client.describe_computers.return_value = mock_response
+
+        result = self.integration.get_computer('d-1234567890abcdef0', 'computer1')
+
+        self.assertEqual(result['ComputerName'], 'computer1')
+
+    def test_get_computer_not_found(self):
+        """Test getting non-existent computer"""
+        mock_response = {
+            'Computers': [
+                {'ComputerId': 'comp-1', 'ComputerName': 'computer1'}
+            ]
+        }
+        self.mock_ds_client.describe_computers.return_value = mock_response
+
+        result = self.integration.get_computer('d-1234567890abcdef0', 'nonexistent')
+
+        self.assertEqual(result['status'], 'not_found')
+
+    def test_delete_computer(self):
+        """Test deleting a computer (delete_computer, not deregister_computer)"""
+        self.mock_ds_client.remove_computer_from_directory.return_value = {}
+
+        result = self.integration.delete_computer('d-1234567890abcdef0', 'test-computer')
+
+        self.assertEqual(result['status'], 'deleted')
+        self.assertEqual(result['computer_name'], 'test-computer')
 
 
 class TestDomainJoinOperations(unittest.TestCase):
@@ -576,30 +668,74 @@ class TestDomainJoinOperations(unittest.TestCase):
             self.integration.ec2_client = self.mock_ec2_client
             self.integration._directory_cache = {}
 
-    def test_join_directory(self):
-        """Test joining an instance to a directory"""
-        self.mock_ssm_client.create_association.return_value = {}
+    def test_domain_join_instance(self):
+        """Test joining an instance to a domain (domain_join_instance, not join_directory)"""
+        mock_describe = {
+            'DirectoryDescriptions': [{
+                'DirectoryId': 'd-1234567890abcdef0',
+                'Name': 'test.example.com'
+            }]
+        }
+        self.mock_ds_client.describe_directories.return_value = mock_describe
+        self.mock_ssm_client.send_command.return_value = {
+            'Command': {'CommandId': 'c-1234567890abcdef0'}
+        }
 
         config = DomainJoinConfig(
             instance_id="i-1234567890abcdef0",
             directory_id="d-1234567890abcdef0"
         )
 
-        result = self.integration.join_directory(config)
+        result = self.integration.domain_join_instance(config)
 
-        self.assertTrue(result)
+        self.assertEqual(result['status'], 'pending')
+        self.assertEqual(result['command_id'], 'c-1234567890abcdef0')
 
-    def test_leave_directory(self):
-        """Test removing an instance from a directory"""
-        self.mock_ssm_client.delete_association.return_value = {}
+    def test_domain_leave_instance(self):
+        """Test removing an instance from a domain (domain_leave_instance, not leave_directory)"""
+        self.mock_ssm_client.send_command.return_value = {
+            'Command': {'CommandId': 'c-1234567890abcdef0'}
+        }
 
-        result = self.integration.leave_directory("i-1234567890abcdef0", "d-1234567890abcdef0")
+        result = self.integration.domain_leave_instance("i-1234567890abcdef0", "d-1234567890abcdef0")
 
-        self.assertTrue(result)
+        self.assertEqual(result['status'], 'pending')
+        self.assertEqual(result['command_id'], 'c-1234567890abcdef0')
+
+    def test_domain_join_instance_simple(self):
+        """Test simple domain join"""
+        self.mock_ssm_client.send_command.return_value = {
+            'Command': {'CommandId': 'c-1234567890abcdef0'}
+        }
+
+        result = self.integration.domain_join_instance_simple(
+            instance_id="i-1234567890abcdef0",
+            directory_id="d-1234567890abcdef0",
+            directory_name="test.example.com",
+            dns_ip="192.168.1.1"
+        )
+
+        self.assertEqual(result['status'], 'pending')
+
+    def test_get_domain_join_status(self):
+        """Test getting domain join status"""
+        mock_response = {
+            'Commands': [{
+                'CommandId': 'c-1234567890abcdef0',
+                'Status': 'Success',
+                'InstanceIds': ['i-1234567890abcdef0']
+            }]
+        }
+        self.mock_ssm_client.list_commands.return_value = mock_response
+
+        result = self.integration.get_domain_join_status('c-1234567890abcdef0')
+
+        self.assertEqual(result['status'], 'Success')
+        self.assertEqual(result['command_id'], 'c-1234567890abcdef0')
 
 
-class TestDirectorySnapshot(unittest.TestCase):
-    """Test directory snapshot operations"""
+class TestMultiRegionOperations(unittest.TestCase):
+    """Test multi-region operations"""
 
     def setUp(self):
         """Set up test fixtures"""
@@ -611,40 +747,117 @@ class TestDirectorySnapshot(unittest.TestCase):
             self.integration.ds_client = self.mock_ds_client
             self.integration._directory_cache = {}
 
-    def test_create_snapshot(self):
-        """Test creating a directory snapshot"""
-        mock_response = {'SnapshotId': 'snap-1234567890abcdef0'}
-        self.mock_ds_client.create_snapshot.return_value = mock_response
+    def test_enable_multi_region_replication(self):
+        """Test enabling multi-region replication"""
+        mock_response = {'DirectoryId': 'd-replica-123'}
+        self.mock_ds_client.create_microsoft_ad.return_value = mock_response
 
-        result = self.integration.create_snapshot('d-1234567890abcdef0')
+        vpc_config = {
+            'us-west-2': {
+                'vpc_id': 'vpc-123',
+                'subnet_ids': ['subnet-1', 'subnet-2']
+            }
+        }
 
-        self.assertEqual(result['snapshot_id'], 'snap-1234567890abcdef0')
+        result = self.integration.enable_multi_region_replication(
+            'd-1234567890abcdef0',
+            ['us-west-2'],
+            vpc_config
+        )
 
-    def test_describe_snapshots(self):
-        """Test describing directory snapshots"""
+        self.assertEqual(result['status'], 'configured')
+        self.assertEqual(len(result['replicas']), 1)
+
+    def test_list_directory_replicas(self):
+        """Test listing directory replicas"""
         mock_response = {
-            'Snapshots': [
-                {'SnapshotId': 'snap-1', 'Type': 'Daily', 'Status': 'Completed'},
-                {'SnapshotId': 'snap-2', 'Type': 'Manual', 'Status': 'Completed'}
+            'replicas': [
+                {'Region': 'us-west-2', 'Status': 'Active'},
+                {'Region': 'eu-west-1', 'Status': 'Creating'}
             ]
         }
-        self.mock_ds_client.describe_snapshots.return_value = mock_response
+        self.mock_ds_client.describe_directory_replicas.return_value = mock_response
 
-        result = self.integration.describe_snapshots('d-1234567890abcdef0')
+        result = self.integration.list_directory_replicas('d-1234567890abcdef0')
 
         self.assertEqual(len(result), 2)
 
-    def test_delete_snapshot(self):
-        """Test deleting a directory snapshot"""
-        self.mock_ds_client.delete_snapshot.return_value = {}
+    def test_remove_directory_replica(self):
+        """Test removing directory replica"""
+        self.mock_ds_client.remove_directory.return_value = {}
 
-        result = self.integration.delete_snapshot('d-1234567890abcdef0', 'snap-1234567890abcdef0')
+        result = self.integration.remove_directory_replica('d-1234567890abcdef0', 'us-west-2')
 
-        self.assertTrue(result)
+        self.assertEqual(result['status'], 'removed')
+        self.assertEqual(result['region'], 'us-west-2')
 
 
-class TestDirectoryServiceMonitoring(unittest.TestCase):
-    """Test directory service monitoring operations"""
+class TestIAMRoleManagement(unittest.TestCase):
+    """Test IAM role management operations"""
+
+    def setUp(self):
+        """Set up test fixtures"""
+        self.mock_iam_client = MagicMock()
+        self.mock_sts_client = MagicMock()
+
+        with patch.object(DirectoryServiceIntegration, '__init__', lambda x, **kwargs: None):
+            self.integration = DirectoryServiceIntegration()
+            self.integration.region = "us-east-1"
+            self.integration.iam_client = self.mock_iam_client
+            self.integration.sts_client = self.mock_sts_client
+
+    def test_create_directory_service_role(self):
+        """Test creating directory service role"""
+        # First call raises to simulate role doesn't exist
+        self.mock_iam_client.get_role.side_effect = Exception("Role not found")
+        self.mock_iam_client.create_role.return_value = {
+            'Role': {'Arn': 'arn:aws:iam::123456789012:role/AWSDirectoryServiceRole'}
+        }
+
+        result = self.integration.create_directory_service_role()
+
+        self.assertEqual(result['status'], 'created')
+        self.assertEqual(result['role_name'], 'AWSDirectoryServiceRole')
+
+    def test_create_directory_service_role_exists(self):
+        """Test creating directory service role when it already exists"""
+        self.mock_iam_client.get_role.return_value = {
+            'Role': {'RoleName': 'AWSDirectoryServiceRole'}
+        }
+
+        result = self.integration.create_directory_service_role()
+
+        self.assertEqual(result['status'], 'exists')
+
+    def test_get_directory_service_role(self):
+        """Test getting directory service role"""
+        self.mock_iam_client.get_role.return_value = {
+            'Role': {'RoleName': 'AWSDirectoryServiceRole', 'Arn': 'arn:aws:iam::123456789012:role/AWSDirectoryServiceRole'}
+        }
+
+        result = self.integration.get_directory_service_role()
+
+        self.assertEqual(result['RoleName'], 'AWSDirectoryServiceRole')
+
+    def test_assume_directory_service_role(self):
+        """Test assuming directory service role"""
+        self.mock_sts_client.assume_role.return_value = {
+            'Credentials': {
+                'AccessKeyId': 'AKIAIOSFODNN7EXAMPLE',
+                'SecretAccessKey': 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYzEXAMPLEKEY',
+                'SessionToken': 'FwoGZXIvYXdzEBYaDKsD'
+            }
+        }
+
+        result = self.integration.assume_directory_service_role('d-1234567890abcdef0')
+
+        self.assertIn('access_key', result)
+        self.assertIn('secret_key', result)
+        self.assertIn('token', result)
+
+
+class TestCloudWatchIntegration(unittest.TestCase):
+    """Test CloudWatch integration operations"""
 
     def setUp(self):
         """Set up test fixtures"""
@@ -654,7 +867,6 @@ class TestDirectoryServiceMonitoring(unittest.TestCase):
             self.integration = DirectoryServiceIntegration()
             self.integration.region = "us-east-1"
             self.integration.cloudwatch_client = self.mock_cloudwatch_client
-            self.integration._directory_cache = {}
 
     def test_get_directory_metrics(self):
         """Test getting directory metrics"""
@@ -666,24 +878,134 @@ class TestDirectoryServiceMonitoring(unittest.TestCase):
 
         result = self.integration.get_directory_metrics('d-1234567890abcdef0', 'DirectoryConnections')
 
-        self.assertIsNotNone(result)
-        self.mock_cloudwatch_client.get_metric_statistics.assert_called()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]['Average'], 10.0)
 
-    def test_get_trust_relationship_metrics(self):
-        """Test getting trust relationship metrics"""
-        self.mock_cloudwatch_client.get_metric_statistics.return_value = {
-            'Datapoints': [
-                {'Average': 5.0, 'Timestamp': '2024-01-01T00:00:00Z'}
-            ]
-        }
+    def test_list_directory_metrics(self):
+        """Test listing available metrics"""
+        result = self.integration.list_directory_metrics('d-1234567890abcdef0')
 
-        result = self.integration.get_trust_relationship_metrics(
+        self.assertIn('DirectorySSOEvents', result)
+        self.assertIn('DirectoryCacheHits', result)
+
+    def test_enable_directory_monitoring(self):
+        """Test enabling directory monitoring"""
+        self.mock_ds_client = MagicMock()
+        self.integration.ds_client = self.mock_ds_client
+
+        result = self.integration.enable_directory_monitoring('d-1234567890abcdef0', 'standard')
+
+        self.assertEqual(result['status'], 'enabled')
+        self.assertEqual(result['monitoring_type'], 'standard')
+
+    def test_create_directory_alarm(self):
+        """Test creating directory alarm"""
+        self.mock_cloudwatch_client.put_metric_alarm.return_value = {}
+
+        result = self.integration.create_directory_alarm(
             'd-1234567890abcdef0',
-            'trust.example.com',
-            'FailedTrustRequests'
+            'test-alarm',
+            'DirectoryConnections',
+            100.0
         )
 
-        self.assertIsNotNone(result)
+        self.assertEqual(result['status'], 'created')
+        self.assertEqual(result['alarm_name'], 'test-alarm')
+
+
+class TestUtilityMethods(unittest.TestCase):
+    """Test utility methods"""
+
+    def setUp(self):
+        """Set up test fixtures"""
+        self.mock_ds_client = MagicMock()
+
+        with patch.object(DirectoryServiceIntegration, '__init__', lambda x, **kwargs: None):
+            self.integration = DirectoryServiceIntegration()
+            self.integration.region = "us-east-1"
+            self.integration.ds_client = self.mock_ds_client
+            self.integration._directory_cache = {}
+
+    def test_get_directory(self):
+        """Test getting directory details regardless of type"""
+        mock_response = {
+            'DirectoryDescriptions': [{
+                'DirectoryId': 'd-1234567890abcdef0',
+                'Name': 'test.example.com',
+                'Type': 'SimpleAD',
+                'Stage': 'Active'
+            }]
+        }
+        self.mock_ds_client.describe_directories.return_value = mock_response
+
+        result = self.integration.get_directory('d-1234567890abcdef0')
+
+        self.assertEqual(result['DirectoryId'], 'd-1234567890abcdef0')
+
+    def test_get_directory_not_found(self):
+        """Test getting non-existent directory"""
+        mock_response = {'DirectoryDescriptions': []}
+        self.mock_ds_client.describe_directories.return_value = mock_response
+
+        result = self.integration.get_directory('d-nonexistent')
+
+        self.assertEqual(result['status'], 'not_found')
+
+    def test_list_directories(self):
+        """Test listing all directories"""
+        mock_response = {
+            'DirectoryDescriptions': [
+                {'DirectoryId': 'd-1', 'Type': 'SimpleAD', 'Stage': 'Active'},
+                {'DirectoryId': 'd-2', 'Type': 'MicrosoftAD', 'Stage': 'Active'},
+                {'DirectoryId': 'd-3', 'Type': 'ADConnector', 'Stage': 'Active'}
+            ]
+        }
+        self.mock_ds_client.describe_directories.return_value = mock_response
+
+        result = self.integration.list_directories()
+
+        self.assertEqual(len(result), 3)
+
+    def test_list_directories_filtered_by_type(self):
+        """Test listing directories filtered by type"""
+        mock_response = {
+            'DirectoryDescriptions': [
+                {'DirectoryId': 'd-1', 'Type': 'SimpleAD', 'Stage': 'Active'},
+                {'DirectoryId': 'd-2', 'Type': 'MicrosoftAD', 'Stage': 'Active'}
+            ]
+        }
+        self.mock_ds_client.describe_directories.return_value = mock_response
+
+        result = self.integration.list_directories(directory_type=DirectoryType.SIMPLE_AD)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]['Type'], 'SimpleAD')
+
+    def test_delete_directory(self):
+        """Test deleting a directory"""
+        self.mock_ds_client.delete_directory.return_value = {}
+
+        result = self.integration.delete_directory('d-1234567890abcdef0')
+
+        self.assertEqual(result['status'], 'deleting')
+        self.assertEqual(result['directory_id'], 'd-1234567890abcdef0')
+
+    def test_get_directory_status_summary(self):
+        """Test getting directory status summary"""
+        mock_response = {
+            'DirectoryDescriptions': [
+                {'DirectoryId': 'd-1', 'Type': 'SimpleAD', 'Stage': 'Active'},
+                {'DirectoryId': 'd-2', 'Type': 'MicrosoftAD', 'Stage': 'Active'},
+                {'DirectoryId': 'd-3', 'Type': 'SimpleAD', 'Stage': 'Creating'}
+            ]
+        }
+        self.mock_ds_client.describe_directories.return_value = mock_response
+
+        result = self.integration.get_directory_status_summary()
+
+        self.assertEqual(result['total'], 3)
+        self.assertEqual(result['by_type']['SimpleAD'], 2)
+        self.assertEqual(result['by_type']['MicrosoftAD'], 1)
 
 
 if __name__ == '__main__':

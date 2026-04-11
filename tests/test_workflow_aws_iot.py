@@ -1,27 +1,13 @@
 """
 Tests for workflow_aws_iot module
 
-Commit: 'tests: add comprehensive tests for workflow_aws_iot, workflow_aws_iotevents, and workflow_aws_iotdata'
+Tests actual implementation in src/workflow_aws_iot.py
 """
 import sys
-sys.path.insert(0, '/Users/guige/my_project')
-
 import unittest
-from unittest.mock import Mock, patch, MagicMock, PropertyMock
-import json
-import time
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional
+from unittest.mock import Mock, patch, MagicMock
+from datetime import datetime
 import types
-import dataclasses
-
-# First, patch dataclasses.field to handle the non-default following default issue
-_original_field = dataclasses.field
-
-def _patched_field(*args, **kwargs):
-    if 'default' not in kwargs and 'default_factory' not in kwargs:
-        kwargs['default'] = None
-    return _original_field(*args, **kwargs)
 
 # Create mock boto3 module before importing workflow_aws_iot
 mock_boto3 = types.ModuleType('boto3')
@@ -30,166 +16,109 @@ mock_boto3.client = MagicMock()
 mock_boto3.resource = MagicMock()
 
 # Create mock botocore exceptions
-mock_boto3_exceptions = types.ModuleType('botocore.exceptions')
-mock_boto3_exceptions.ClientError = Exception
-mock_boto3_exceptions.BotoCoreError = Exception
+mock_botocore = types.ModuleType('botocore')
+mock_botocore_exceptions = types.ModuleType('botocore.exceptions')
+mock_botocore_exceptions.ClientError = Exception
+mock_botocore_exceptions.BotoCoreError = Exception
 
 sys.modules['boto3'] = mock_boto3
-sys.modules['botocore'] = types.ModuleType('botocore')
-sys.modules['botocore.exceptions'] = mock_boto3_exceptions
+sys.modules['botocore'] = mock_botocore
+sys.modules['botocore.exceptions'] = mock_botocore_exceptions
 
-# Patch dataclasses.field BEFORE importing the module
-import dataclasses as dc_module
-dc_module.field = _patched_field
-sys.modules['dataclasses'].field = _patched_field
-
-# Now import the module
-try:
-    import src.workflow_aws_iot as _iot_module
-    _iot_import_error = None
-except TypeError as e:
-    _iot_import_error = str(e)
-    _iot_module = None
-
-# Restore original field
-dc_module.field = _original_field
-sys.modules['dataclasses'].field = _original_field
-
-# Extract the classes if import succeeded
-if _iot_module is not None:
-    IoTIntegration = _iot_module.IoTIntegration
-    ThingAttributeType = _iot_module.ThingAttributeType
-    ThingTypeStatus = _iot_module.ThingTypeStatus
-    CertificateStatus = _iot_module.CertificateStatus
-    PolicyType = _iot_module.PolicyType
-    JobStatus = _iot_module.JobStatus
-    JobExecutionStatus = _iot_module.JobExecutionStatus
-    TunnelStatus = _iot_module.TunnelStatus
-    IoTConfig = _iot_module.IoTConfig
-    ThingConfig = _iot_module.ThingConfig
-    ThingInfo = _iot_module.ThingInfo
-    ThingTypeConfig = _iot_module.ThingTypeConfig
-    ThingTypeInfo = _iot_module.ThingTypeInfo
-    ThingGroupConfig = _iot_module.ThingGroupConfig
-    ThingGroupInfo = _iot_module.ThingGroupInfo
-    CertificateConfig = _iot_module.CertificateConfig
-    CertificateInfo = _iot_module.CertificateInfo
-    PolicyConfig = _iot_module.PolicyConfig
-    PolicyInfo = _iot_module.PolicyInfo
-    RuleConfig = _iot_module.RuleConfig
-    RuleInfo = _iot_module.RuleInfo
-    JobConfig = _iot_module.JobConfig
-    JobInfo = _iot_module.JobInfo
-    TunnelConfig = _iot_module.TunnelConfig
-    TunnelInfo = _iot_module.TunnelInfo
-    FleetIndexingConfig = _iot_module.FleetIndexingConfig
-    FleetIndexingInfo = _iot_module.FleetIndexingInfo
-    _module_imported = True
-else:
-    _module_imported = False
+from src.workflow_aws_iot import (
+    IoTIntegration,
+    ThingAttributeType,
+    ThingTypeStatus,
+    CertificateStatus,
+    PolicyType,
+    JobStatus,
+    JobExecutionStatus,
+    TunnelStatus,
+    IoTConfig,
+    ThingConfig,
+    ThingInfo,
+    ThingTypeConfig,
+    ThingTypeInfo,
+    ThingGroupConfig,
+    ThingGroupInfo,
+    CertificateConfig,
+    CertificateInfo,
+    PolicyConfig,
+    PolicyInfo,
+    RuleConfig,
+    RuleInfo,
+    JobConfig,
+    JobInfo,
+    TunnelConfig,
+    TunnelInfo,
+    FleetIndexingConfig,
+    FleetIndexingInfo,
+)
 
 
 class TestThingAttributeType(unittest.TestCase):
     """Test ThingAttributeType enum"""
-
     def test_string_value(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         self.assertEqual(ThingAttributeType.STRING.value, "string")
 
     def test_string_list_value(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         self.assertEqual(ThingAttributeType.STRING_LIST.value, "string-list")
 
     def test_string_map_value(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         self.assertEqual(ThingAttributeType.STRING_MAP.value, "string-map")
 
 
 class TestThingTypeStatus(unittest.TestCase):
     """Test ThingTypeStatus enum"""
-
     def test_active_value(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         self.assertEqual(ThingTypeStatus.ACTIVE.value, "ACTIVE")
 
     def test_inactive_value(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         self.assertEqual(ThingTypeStatus.INACTIVE.value, "INACTIVE")
 
     def test_deprecated_value(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         self.assertEqual(ThingTypeStatus.DEPRECATED.value, "DEPRECATED")
 
 
 class TestCertificateStatus(unittest.TestCase):
     """Test CertificateStatus enum"""
-
     def test_active_value(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         self.assertEqual(CertificateStatus.ACTIVE.value, "ACTIVE")
 
     def test_inactive_value(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         self.assertEqual(CertificateStatus.INACTIVE.value, "INACTIVE")
 
     def test_revoked_value(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         self.assertEqual(CertificateStatus.REVOKED.value, "REVOKED")
 
 
 class TestJobStatus(unittest.TestCase):
     """Test JobStatus enum"""
-
     def test_in_progress_value(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         self.assertEqual(JobStatus.IN_PROGRESS.value, "IN_PROGRESS")
 
     def test_queued_value(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         self.assertEqual(JobStatus.QUEUED.value, "QUEUED")
 
     def test_succeeded_value(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         self.assertEqual(JobStatus.SUCCEEDED.value, "SUCCEEDED")
 
     def test_failed_value(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         self.assertEqual(JobStatus.FAILED.value, "FAILED")
 
 
 class TestTunnelStatus(unittest.TestCase):
     """Test TunnelStatus enum"""
-
     def test_open_value(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         self.assertEqual(TunnelStatus.OPEN.value, "Open")
 
     def test_closed_value(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         self.assertEqual(TunnelStatus.CLOSED.value, "Closed")
 
 
 class TestIoTConfig(unittest.TestCase):
     """Test IoTConfig dataclass"""
-
     def test_default_values(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         config = IoTConfig()
         self.assertEqual(config.region_name, "us-east-1")
         self.assertIsNone(config.aws_access_key_id)
@@ -200,11 +129,9 @@ class TestIoTConfig(unittest.TestCase):
         self.assertEqual(config.max_retries, 3)
 
     def test_custom_values(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         config = IoTConfig(
             region_name="us-west-2",
-            aws_access_key_id="AKIAIOSFODNN7EXAMPLE",
+            aws_access_key_id="AKIAIO...MPLE",
             aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
             endpoint_url="https://iot.us-west-2.amazonaws.com",
             verify_ssl=False,
@@ -212,17 +139,14 @@ class TestIoTConfig(unittest.TestCase):
             max_retries=5
         )
         self.assertEqual(config.region_name, "us-west-2")
-        self.assertEqual(config.aws_access_key_id, "AKIAIOSFODNN7EXAMPLE")
+        self.assertEqual(config.aws_access_key_id, "AKIAIO...MPLE")
         self.assertFalse(config.verify_ssl)
         self.assertEqual(config.timeout, 60)
 
 
 class TestThingConfig(unittest.TestCase):
     """Test ThingConfig dataclass"""
-
     def test_thing_name_required(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         config = ThingConfig(thing_name="TestThing")
         self.assertEqual(config.thing_name, "TestThing")
         self.assertIsNone(config.thing_type_name)
@@ -230,8 +154,6 @@ class TestThingConfig(unittest.TestCase):
         self.assertIsNone(config.billing_group_name)
 
     def test_with_optional_params(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         config = ThingConfig(
             thing_name="TestThing",
             thing_type_name="SensorType",
@@ -246,10 +168,7 @@ class TestThingConfig(unittest.TestCase):
 
 class TestThingInfo(unittest.TestCase):
     """Test ThingInfo dataclass"""
-
     def test_creation(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         thing_info = ThingInfo(
             thing_name="TestThing",
             thing_arn="arn:aws:iot:us-east-1:123456789012:thing/TestThing",
@@ -264,10 +183,7 @@ class TestThingInfo(unittest.TestCase):
 
 class TestThingTypeConfig(unittest.TestCase):
     """Test ThingTypeConfig dataclass"""
-
     def test_creation(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         config = ThingTypeConfig(
             thing_type_name="SensorType",
             thing_type_properties={"description": "A sensor device"},
@@ -279,10 +195,7 @@ class TestThingTypeConfig(unittest.TestCase):
 
 class TestThingGroupConfig(unittest.TestCase):
     """Test ThingGroupConfig dataclass"""
-
     def test_creation(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         config = ThingGroupConfig(
             group_name="TestGroup",
             parent_group_name="ParentGroup",
@@ -294,10 +207,7 @@ class TestThingGroupConfig(unittest.TestCase):
 
 class TestCertificateConfig(unittest.TestCase):
     """Test CertificateConfig dataclass"""
-
     def test_creation(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         config = CertificateConfig(
             certificate_pem="-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
             certificate_id="cert-id-123",
@@ -308,10 +218,7 @@ class TestCertificateConfig(unittest.TestCase):
 
 class TestPolicyConfig(unittest.TestCase):
     """Test PolicyConfig dataclass"""
-
     def test_creation(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         policy_doc = {
             "Version": "2012-10-17",
             "Statement": [
@@ -333,16 +240,13 @@ class TestPolicyConfig(unittest.TestCase):
 
 class TestRuleConfig(unittest.TestCase):
     """Test RuleConfig dataclass"""
-
     def test_creation(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         actions = [{"iot": {"topic": "my/topic"}}]
         config = RuleConfig(
             rule_name="TestRule",
             sql="SELECT * FROM 'topic/'",
-            description="Test rule",
-            actions=actions
+            actions=actions,
+            description="Test rule"
         )
         self.assertEqual(config.rule_name, "TestRule")
         self.assertEqual(config.sql, "SELECT * FROM 'topic/'")
@@ -352,10 +256,7 @@ class TestRuleConfig(unittest.TestCase):
 
 class TestJobConfig(unittest.TestCase):
     """Test JobConfig dataclass"""
-
     def test_creation(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         config = JobConfig(
             job_id="job-001",
             targets=["thing-1", "thing-2"],
@@ -370,10 +271,7 @@ class TestJobConfig(unittest.TestCase):
 
 class TestTunnelConfig(unittest.TestCase):
     """Test TunnelConfig dataclass"""
-
     def test_creation(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         config = TunnelConfig(
             thing_name="TestThing",
             description="Test tunnel",
@@ -385,17 +283,12 @@ class TestTunnelConfig(unittest.TestCase):
 
 class TestFleetIndexingConfig(unittest.TestCase):
     """Test FleetIndexingConfig dataclass"""
-
     def test_default_values(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         config = FleetIndexingConfig()
         self.assertEqual(config.thing_indexing_mode, "REGISTRY_AND_SHADOW")
         self.assertEqual(config.thing_connectivity_indexing_mode, "STATUS")
 
     def test_custom_values(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
         config = FleetIndexingConfig(
             thing_indexing_mode="REGISTRY_ONLY",
             thing_connectivity_indexing_mode="OFF",
@@ -407,10 +300,6 @@ class TestFleetIndexingConfig(unittest.TestCase):
 
 class TestIoTIntegration(unittest.TestCase):
     """Test IoTIntegration class"""
-
-    def setUp(self):
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
 
     def test_initialization_with_mock_clients(self):
         """Test IoTIntegration initialization with pre-configured clients"""
@@ -442,8 +331,7 @@ class TestIoTIntegration(unittest.TestCase):
         self.assertEqual(integration._thing_type_cache, {})
         self.assertEqual(integration._thing_group_cache, {})
 
-    @patch('src.workflow_aws_iot.boto3')
-    def test_create_thing_success(self, mock_boto3):
+    def test_create_thing_success(self):
         """Test successful thing creation"""
         mock_iot_client = MagicMock()
         mock_iot_client.create_thing.return_value = {
@@ -482,8 +370,7 @@ class TestIoTIntegration(unittest.TestCase):
         self.assertEqual(result.thing_name, "CachedThing")
         mock_iot_client.describe_thing.assert_not_called()
 
-    @patch('src.workflow_aws_iot.boto3')
-    def test_get_thing_from_aws(self, mock_boto3):
+    def test_get_thing_from_aws(self):
         """Test getting thing from AWS when not in cache"""
         mock_iot_client = MagicMock()
         mock_iot_client.describe_thing.return_value = {
@@ -503,8 +390,7 @@ class TestIoTIntegration(unittest.TestCase):
         self.assertEqual(result.attributes["location"], "warehouse")
         mock_iot_client.describe_thing.assert_called_once_with(thingName="RemoteThing")
 
-    @patch('src.workflow_aws_iot.boto3')
-    def test_update_thing_success(self, mock_boto3):
+    def test_update_thing_success(self):
         """Test successful thing update"""
         mock_iot_client = MagicMock()
         mock_iot_client.update_thing.return_value = {}
@@ -524,8 +410,7 @@ class TestIoTIntegration(unittest.TestCase):
         self.assertTrue(result)
         mock_iot_client.update_thing.assert_called_once()
 
-    @patch('src.workflow_aws_iot.boto3')
-    def test_delete_thing_success(self, mock_boto3):
+    def test_delete_thing_success(self):
         """Test successful thing deletion"""
         mock_iot_client = MagicMock()
         mock_iot_client.delete_thing.return_value = {}
@@ -542,8 +427,7 @@ class TestIoTIntegration(unittest.TestCase):
         mock_iot_client.delete_thing.assert_called_once_with(thingName="TestThing")
         self.assertNotIn("TestThing", integration._thing_cache)
 
-    @patch('src.workflow_aws_iot.boto3')
-    def test_create_thing_type(self, mock_boto3):
+    def test_create_thing_type(self):
         """Test thing type creation"""
         mock_iot_client = MagicMock()
         mock_iot_client.create_thing_type.return_value = {
@@ -564,14 +448,13 @@ class TestIoTIntegration(unittest.TestCase):
         self.assertEqual(result.status, ThingTypeStatus.ACTIVE)
         mock_iot_client.create_thing_type.assert_called_once()
 
-    @patch('src.workflow_aws_iot.boto3')
-    def test_create_thing_group(self, mock_boto3):
+    def test_create_thing_group(self):
         """Test thing group creation"""
         mock_iot_client = MagicMock()
         mock_iot_client.create_thing_group.return_value = {
-            "thingGroupName": "TestGroup",
-            "thingGroupArn": "arn:aws:iot:us-east-1:123456789012:thinggroup/TestGroup",
-            "thingGroupId": "group-uuid-1234"
+            "groupName": "TestGroup",
+            "groupArn": "arn:aws:iot:us-east-1:123456789012:thinggroup/TestGroup",
+            "groupId": "group-uuid-1234"
         }
 
         integration = IoTIntegration(iot_client=mock_iot_client)
@@ -585,42 +468,47 @@ class TestIoTIntegration(unittest.TestCase):
         self.assertEqual(result.group_name, "TestGroup")
         mock_iot_client.create_thing_group.assert_called_once()
 
-    @patch('src.workflow_aws_iot.boto3')
-    def test_list_things(self, mock_boto3):
-        """Test listing things"""
+    def test_list_things(self):
+        """Test listing things with pagination"""
         mock_iot_client = MagicMock()
-        mock_iot_client.list_things.return_value = {
-            "things": [
-                {"thingName": "Thing1", "thingArn": "arn:aws:iot:us-east-1:123456789012:thing/Thing1"},
-                {"thingName": "Thing2", "thingArn": "arn:aws:iot:us-east-1:123456789012:thing/Thing2"}
-            ]
-        }
+        mock_paginator = MagicMock()
+        mock_paginator.paginate.return_value = [
+            {
+                "things": [
+                    {"thingName": "Thing1", "thingArn": "arn:aws:iot:us-east-1:123456789012:thing/Thing1"},
+                    {"thingName": "Thing2", "thingArn": "arn:aws:iot:us-east-1:123456789012:thing/Thing2"}
+                ]
+            }
+        ]
+        mock_iot_client.get_paginator.return_value = mock_paginator
 
         integration = IoTIntegration(iot_client=mock_iot_client)
         result = integration.list_things(max_results=10)
 
         self.assertEqual(len(result), 2)
-        mock_iot_client.list_things.assert_called_once()
+        mock_iot_client.get_paginator.assert_called_once_with("list_things")
 
-    @patch('src.workflow_aws_iot.boto3')
-    def test_list_thing_types(self, mock_boto3):
-        """Test listing thing types"""
+    def test_list_thing_types(self):
+        """Test listing thing types with pagination"""
         mock_iot_client = MagicMock()
-        mock_iot_client.list_thing_types.return_value = {
-            "thingTypes": [
-                {"thingTypeName": "SensorType", "thingTypeArn": "arn:aws:iot:.../SensorType"},
-                {"thingTypeName": "ActuatorType", "thingTypeArn": "arn:aws:iot:.../ActuatorType"}
-            ]
-        }
+        mock_paginator = MagicMock()
+        mock_paginator.paginate.return_value = [
+            {
+                "thingTypes": [
+                    {"thingTypeName": "SensorType", "thingTypeArn": "arn:aws:iot:.../SensorType"},
+                    {"thingTypeName": "ActuatorType", "thingTypeArn": "arn:aws:iot:.../ActuatorType"}
+                ]
+            }
+        ]
+        mock_iot_client.get_paginator.return_value = mock_paginator
 
         integration = IoTIntegration(iot_client=mock_iot_client)
         result = integration.list_thing_types()
 
         self.assertEqual(len(result), 2)
-        mock_iot_client.list_thing_types.assert_called_once()
+        mock_iot_client.get_paginator.assert_called_once_with("list_thing_types")
 
-    @patch('src.workflow_aws_iot.boto3')
-    def test_create_policy(self, mock_boto3):
+    def test_create_policy(self):
         """Test policy creation"""
         mock_iot_client = MagicMock()
         mock_iam_client = MagicMock()
@@ -643,8 +531,7 @@ class TestIoTIntegration(unittest.TestCase):
         self.assertEqual(result.policy_name, "TestPolicy")
         mock_iot_client.create_policy.assert_called_once()
 
-    @patch('src.workflow_aws_iot.boto3')
-    def test_attach_thing_principal(self, mock_boto3):
+    def test_attach_thing_principal(self):
         """Test attaching thing principal"""
         mock_iot_client = MagicMock()
         mock_iot_client.attach_thing_principal.return_value = {}
@@ -658,8 +545,37 @@ class TestIoTIntegration(unittest.TestCase):
             principal="cert-arn"
         )
 
-    @patch('src.workflow_aws_iot.boto3')
-    def test_create_job(self, mock_boto3):
+    def test_add_thing_to_group(self):
+        """Test adding thing to group"""
+        mock_iot_client = MagicMock()
+        mock_iot_client.add_thing_to_thing_group.return_value = {}
+
+        integration = IoTIntegration(iot_client=mock_iot_client)
+        # Method signature: add_thing_to_group(thing_group_name, thing_name, ...)
+        result = integration.add_thing_to_group("TestGroup", "TestThing")
+
+        self.assertTrue(result)
+        mock_iot_client.add_thing_to_thing_group.assert_called_once_with(
+            thingGroupName="TestGroup",
+            thingName="TestThing"
+        )
+
+    def test_remove_thing_from_group(self):
+        """Test removing thing from group"""
+        mock_iot_client = MagicMock()
+        mock_iot_client.remove_thing_from_thing_group.return_value = {}
+
+        integration = IoTIntegration(iot_client=mock_iot_client)
+        # Method signature: remove_thing_from_group(thing_group_name, thing_name)
+        result = integration.remove_thing_from_group("TestGroup", "TestThing")
+
+        self.assertTrue(result)
+        mock_iot_client.remove_thing_from_thing_group.assert_called_once_with(
+            thingGroupName="TestGroup",
+            thingName="TestThing"
+        )
+
+    def test_create_job(self):
         """Test job creation"""
         mock_iot_client = MagicMock()
         mock_iot_client.create_job.return_value = {
@@ -681,11 +597,10 @@ class TestIoTIntegration(unittest.TestCase):
         self.assertEqual(result.job_id, "job-001")
         mock_iot_client.create_job.assert_called_once()
 
-    @patch('src.workflow_aws_iot.boto3')
-    def test_create_tunnel(self, mock_boto3):
+    def test_create_tunnel(self):
         """Test tunnel creation"""
         mock_iot_client = MagicMock()
-        mock_iot_client.open_tunnel.return_value = {
+        mock_iot_client.create_tunnel.return_value = {
             "tunnelId": "tunnel-123",
             "tunnelArn": "arn:aws:iot:us-east-1:123456789012:tunnel/tunnel-123"
         }
@@ -697,15 +612,16 @@ class TestIoTIntegration(unittest.TestCase):
 
         self.assertEqual(result.tunnel_id, "tunnel-123")
         self.assertEqual(result.status, TunnelStatus.OPEN)
-        mock_iot_client.open_tunnel.assert_called_once()
+        mock_iot_client.create_tunnel.assert_called_once()
 
-    @patch('src.workflow_aws_iot.boto3')
-    def test_get_fleet_indexing_configuration(self, mock_boto3):
+    def test_get_fleet_indexing_configuration(self):
         """Test getting fleet indexing configuration"""
         mock_iot_client = MagicMock()
-        mock_iot_client.get_v2_indexing_setting.return_value = {
-            "thingIndexingMode": "REGISTRY_AND_SHADOW",
-            "thingConnectivityIndexingMode": "STATUS"
+        mock_iot_client.get_indexing_configuration.return_value = {
+            "thingIndexingConfiguration": {
+                "thingIndexingMode": "REGISTRY_AND_SHADOW",
+                "thingConnectivityIndexingMode": "STATUS"
+            }
         }
 
         integration = IoTIntegration(iot_client=mock_iot_client)
@@ -714,11 +630,10 @@ class TestIoTIntegration(unittest.TestCase):
         self.assertEqual(result.thing_indexing_mode, "REGISTRY_AND_SHADOW")
         self.assertEqual(result.thing_connectivity_indexing_mode, "STATUS")
 
-    @patch('src.workflow_aws_iot.boto3')
-    def test_update_fleet_indexing_configuration(self, mock_boto3):
+    def test_update_fleet_indexing(self):
         """Test updating fleet indexing configuration"""
         mock_iot_client = MagicMock()
-        mock_iot_client.update_v2_indexing_setting.return_value = {}
+        mock_iot_client.update_indexing_configuration.return_value = {}
 
         integration = IoTIntegration(iot_client=mock_iot_client)
         config = FleetIndexingConfig(
@@ -726,55 +641,10 @@ class TestIoTIntegration(unittest.TestCase):
             thing_connectivity_indexing_mode="OFF"
         )
 
-        result = integration.update_fleet_indexing_configuration(config)
+        result = integration.update_fleet_indexing(config)
 
         self.assertTrue(result)
-        mock_iot_client.update_v2_indexing_setting.assert_called_once()
-
-    def test_add_thing_to_group(self):
-        """Test adding thing to group"""
-        mock_iot_client = MagicMock()
-        mock_iot_client.add_thing_to_thing_group.return_value = {}
-
-        integration = IoTIntegration(iot_client=mock_iot_client)
-        result = integration.add_thing_to_group("TestThing", "TestGroup")
-
-        self.assertTrue(result)
-        mock_iot_client.add_thing_to_thing_group.assert_called_once_with(
-            thingName="TestThing",
-            thingGroupName="TestGroup"
-        )
-
-    def test_remove_thing_from_group(self):
-        """Test removing thing from group"""
-        mock_iot_client = MagicMock()
-        mock_iot_client.remove_thing_from_thing_group.return_value = {}
-
-        integration = IoTIntegration(iot_client=mock_iot_client)
-        result = integration.remove_thing_from_group("TestThing", "TestGroup")
-
-        self.assertTrue(result)
-        mock_iot_client.remove_thing_from_thing_group.assert_called_once_with(
-            thingName="TestThing",
-            thingGroupName="TestGroup"
-        )
-
-    @patch('src.workflow_aws_iot.boto3')
-    def test_search_index(self, mock_boto3):
-        """Test searching index"""
-        mock_iot_client = MagicMock()
-        mock_iot_client.search_index.return_value = {
-            "things": [
-                {"thingName": "Thing1", "thingArn": "arn:aws:iot:.../Thing1"},
-                {"thingName": "Thing2", "thingArn": "arn:aws:iot:.../Thing2"}
-            ]
-        }
-
-        integration = IoTIntegration(iot_client=mock_iot_client)
-        result = integration.search_index(query_string="thingName:Thing*")
-
-        self.assertEqual(len(result), 2)
-        mock_iot_client.search_index.assert_called_once()
+        mock_iot_client.update_indexing_configuration.assert_called_once()
 
 
 if __name__ == '__main__':

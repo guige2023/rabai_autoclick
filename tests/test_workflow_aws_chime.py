@@ -834,7 +834,10 @@ class TestChimeIntegration(unittest.TestCase):
             }
         }
 
-        result = integration.create_team("Test Team")
+        result = integration.create_team(
+            chime_app_instance_arn="arn:aws:chime:...app-instance/ai-123",
+            name="Test Team"
+        )
 
         self.assertEqual(result["team_id"], "team-123")
         self.assertEqual(result["name"], "Test Team")
@@ -857,7 +860,9 @@ class TestChimeIntegration(unittest.TestCase):
             ]
         }
 
-        result = integration.list_teams()
+        result = integration.list_teams(
+            chime_app_instance_arn="arn:aws:chime:...app-instance/ai-123"
+        )
 
         self.assertEqual(len(result), 2)
 
@@ -870,7 +875,8 @@ class TestChimeIntegration(unittest.TestCase):
         integration = ChimeIntegration()
         self.mock_cloudwatch_client.put_metric_data.return_value = {}
 
-        result = integration.put_metric(
+        result = integration.put_meeting_metric(
+            meeting_id="meeting-123",
             metric_name="TestMetric",
             value=1.0,
             unit="Count"

@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 from queue import Queue, Empty
 import types
+import threading
 
 # Create mock pika module before importing workflow_rabbitmq
 mock_pika = types.ModuleType('pika')
@@ -264,6 +265,26 @@ class TestRabbitMQIntegrationInit(unittest.TestCase):
         self.assertEqual(integration._bindings, [])
 
 
+def _create_integration_with_mocks(integration):
+    """Helper to set up integration with mocked internals"""
+    integration._connection = None
+    integration._connection_lock = threading.RLock()
+    integration._channels = {}
+    integration._channel_lock = threading.RLock()
+    integration._channel_pool = Queue(maxsize=10)
+    integration._consumers = {}
+    integration._consumer_threads = {}
+    integration._running = False
+    integration._exchanges = set()
+    integration._queues = set()
+    integration._bindings = []
+    integration._rpc_callbacks = {}
+    integration._rpc_lock = threading.RLock()
+    integration._rpc_timeout = 30.0
+    integration._logger = __import__('logging').getLogger(__name__)
+    return integration
+
+
 class TestRabbitMQIntegrationConnection(unittest.TestCase):
     """Test RabbitMQIntegration connection management"""
 
@@ -342,6 +363,23 @@ class TestRabbitMQIntegrationConnection(unittest.TestCase):
         mock_disconnect.assert_called_once()
         mock_connect.assert_called_once()
 
+    def test_get_connection(self):
+        mock_connection = MagicMock()
+        integration = RabbitMQIntegration()
+        integration._connection = mock_connection
+
+        result = integration.get_connection()
+
+        self.assertEqual(result, mock_connection)
+
+    def test_get_connection_none(self):
+        integration = RabbitMQIntegration()
+        integration._connection = None
+
+        result = integration.get_connection()
+
+        self.assertIsNone(result)
+
 
 class TestRabbitMQIntegrationChannel(unittest.TestCase):
     """Test RabbitMQIntegration channel management"""
@@ -362,21 +400,7 @@ class TestRabbitMQIntegrationChannel(unittest.TestCase):
         self.integration.dlq_config = DeadLetterConfig()
         self.integration.max_channels = 100
         self.integration.channel_pool_size = 10
-        self.integration._connection = None
-        self.integration._connection_lock = __import__('threading').RLock()
-        self.integration._channels = {}
-        self.integration._channel_lock = __import__('threading').RLock()
-        self.integration._channel_pool = Queue(maxsize=10)
-        self.integration._consumers = {}
-        self.integration._consumer_threads = {}
-        self.integration._running = False
-        self.integration._exchanges = set()
-        self.integration._queues = set()
-        self.integration._bindings = []
-        self.integration._rpc_callbacks = {}
-        self.integration._rpc_lock = __import__('threading').RLock()
-        self.integration._rpc_timeout = 30.0
-        self.integration._logger = __import__('logging').getLogger(__name__)
+        _create_integration_with_mocks(self.integration)
 
     def test_create_channel(self):
         mock_connection = MagicMock()
@@ -462,21 +486,7 @@ class TestRabbitMQIntegrationExchange(unittest.TestCase):
         self.integration.dlq_config = DeadLetterConfig()
         self.integration.max_channels = 100
         self.integration.channel_pool_size = 10
-        self.integration._connection = None
-        self.integration._connection_lock = __import__('threading').RLock()
-        self.integration._channels = {}
-        self.integration._channel_lock = __import__('threading').RLock()
-        self.integration._channel_pool = Queue(maxsize=10)
-        self.integration._consumers = {}
-        self.integration._consumer_threads = {}
-        self.integration._running = False
-        self.integration._exchanges = set()
-        self.integration._queues = set()
-        self.integration._bindings = []
-        self.integration._rpc_callbacks = {}
-        self.integration._rpc_lock = __import__('threading').RLock()
-        self.integration._rpc_timeout = 30.0
-        self.integration._logger = __import__('logging').getLogger(__name__)
+        _create_integration_with_mocks(self.integration)
 
     def test_declare_exchange(self):
         mock_channel = MagicMock()
@@ -552,21 +562,7 @@ class TestRabbitMQIntegrationQueue(unittest.TestCase):
         self.integration.dlq_config = DeadLetterConfig()
         self.integration.max_channels = 100
         self.integration.channel_pool_size = 10
-        self.integration._connection = None
-        self.integration._connection_lock = __import__('threading').RLock()
-        self.integration._channels = {}
-        self.integration._channel_lock = __import__('threading').RLock()
-        self.integration._channel_pool = Queue(maxsize=10)
-        self.integration._consumers = {}
-        self.integration._consumer_threads = {}
-        self.integration._running = False
-        self.integration._exchanges = set()
-        self.integration._queues = set()
-        self.integration._bindings = []
-        self.integration._rpc_callbacks = {}
-        self.integration._rpc_lock = __import__('threading').RLock()
-        self.integration._rpc_timeout = 30.0
-        self.integration._logger = __import__('logging').getLogger(__name__)
+        _create_integration_with_mocks(self.integration)
 
     def test_declare_queue(self):
         mock_channel = MagicMock()
@@ -642,6 +638,42 @@ class TestRabbitMQIntegrationQueue(unittest.TestCase):
 
         self.assertEqual(queues, {"queue1", "queue2"})
 
+    def test_get_queue_info(self):
+        mock_channel = MagicMock()
+        mock_result = MagicMock()
+        mock_result.method = MagicMock(message_count=5, consumer_count=2)
+        mock_channel.queue_declare.return_value = mock_result
+        mock_connection = MagicMock()
+        mock_connection.is_open = True
+        mock_connection.channel.return_value = mock_channel
+
+        integration = RabbitMQIntegration()
+        integration._connection = mock_connection
+
+        with patch.object(integration, '_acquire_channel_from_pool', return_value=mock_channel):
+            with patch.object(integration, '_release_channel_to_pool'):
+                result = integration.get_queue_info("test-queue")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["message_count"], 5)
+        self.assertEqual(result["consumer_count"], 2)
+
+    def test_get_queue_info_failure(self):
+        mock_channel = MagicMock()
+        mock_channel.queue_declare.side_effect = Exception("Queue not found")
+        mock_connection = MagicMock()
+        mock_connection.is_open = True
+        mock_connection.channel.return_value = mock_channel
+
+        integration = RabbitMQIntegration()
+        integration._connection = mock_connection
+
+        with patch.object(integration, '_acquire_channel_from_pool', return_value=mock_channel):
+            with patch.object(integration, '_release_channel_to_pool'):
+                result = integration.get_queue_info("nonexistent")
+
+        self.assertIsNone(result)
+
 
 class TestRabbitMQIntegrationBinding(unittest.TestCase):
     """Test RabbitMQIntegration binding management"""
@@ -662,21 +694,7 @@ class TestRabbitMQIntegrationBinding(unittest.TestCase):
         self.integration.dlq_config = DeadLetterConfig()
         self.integration.max_channels = 100
         self.integration.channel_pool_size = 10
-        self.integration._connection = None
-        self.integration._connection_lock = __import__('threading').RLock()
-        self.integration._channels = {}
-        self.integration._channel_lock = __import__('threading').RLock()
-        self.integration._channel_pool = Queue(maxsize=10)
-        self.integration._consumers = {}
-        self.integration._consumer_threads = {}
-        self.integration._running = False
-        self.integration._exchanges = set()
-        self.integration._queues = set()
-        self.integration._bindings = []
-        self.integration._rpc_callbacks = {}
-        self.integration._rpc_lock = __import__('threading').RLock()
-        self.integration._rpc_timeout = 30.0
-        self.integration._logger = __import__('logging').getLogger(__name__)
+        _create_integration_with_mocks(self.integration)
 
     def test_bind_queue(self):
         mock_channel = MagicMock()
@@ -755,21 +773,7 @@ class TestRabbitMQIntegrationDeadLetterQueue(unittest.TestCase):
         self.integration.dlq_config = DeadLetterConfig()
         self.integration.max_channels = 100
         self.integration.channel_pool_size = 10
-        self.integration._connection = None
-        self.integration._connection_lock = __import__('threading').RLock()
-        self.integration._channels = {}
-        self.integration._channel_lock = __import__('threading').RLock()
-        self.integration._channel_pool = Queue(maxsize=10)
-        self.integration._consumers = {}
-        self.integration._consumer_threads = {}
-        self.integration._running = False
-        self.integration._exchanges = set()
-        self.integration._queues = set()
-        self.integration._bindings = []
-        self.integration._rpc_callbacks = {}
-        self.integration._rpc_lock = __import__('threading').RLock()
-        self.integration._rpc_timeout = 30.0
-        self.integration._logger = __import__('logging').getLogger(__name__)
+        _create_integration_with_mocks(self.integration)
 
     def test_enable_dlq_for_queue(self):
         with patch.object(self.integration, 'declare_queue', return_value=True) as mock_declare:
@@ -784,6 +788,26 @@ class TestRabbitMQIntegrationDeadLetterQueue(unittest.TestCase):
             count = self.integration.get_dlq_message_count()
 
         self.assertEqual(count, 10)
+
+    def test_consume_dlq(self):
+        mock_channel = MagicMock()
+        mock_connection = MagicMock()
+        mock_connection.is_open = True
+        mock_connection.channel.return_value = mock_channel
+
+        integration = RabbitMQIntegration()
+        integration._connection = mock_connection
+
+        callback = MagicMock()
+
+        with patch.object(integration, 'consume', return_value="consumer-tag") as mock_consume:
+            integration.consume_dlq(callback)
+
+        mock_consume.assert_called_once_with(
+            queue="dlq",
+            callback=callback,
+            auto_ack=False
+        )
 
 
 class TestRabbitMQIntegrationPublish(unittest.TestCase):
@@ -805,21 +829,7 @@ class TestRabbitMQIntegrationPublish(unittest.TestCase):
         self.integration.dlq_config = DeadLetterConfig()
         self.integration.max_channels = 100
         self.integration.channel_pool_size = 10
-        self.integration._connection = None
-        self.integration._connection_lock = __import__('threading').RLock()
-        self.integration._channels = {}
-        self.integration._channel_lock = __import__('threading').RLock()
-        self.integration._channel_pool = Queue(maxsize=10)
-        self.integration._consumers = {}
-        self.integration._consumer_threads = {}
-        self.integration._running = False
-        self.integration._exchanges = set()
-        self.integration._queues = set()
-        self.integration._bindings = []
-        self.integration._rpc_callbacks = {}
-        self.integration._rpc_lock = __import__('threading').RLock()
-        self.integration._rpc_timeout = 30.0
-        self.integration._logger = __import__('logging').getLogger(__name__)
+        _create_integration_with_mocks(self.integration)
 
     def test_publish_dict_message(self):
         mock_channel = MagicMock()
@@ -925,21 +935,7 @@ class TestRabbitMQIntegrationConsume(unittest.TestCase):
         self.integration.dlq_config = DeadLetterConfig()
         self.integration.max_channels = 100
         self.integration.channel_pool_size = 10
-        self.integration._connection = None
-        self.integration._connection_lock = __import__('threading').RLock()
-        self.integration._channels = {}
-        self.integration._channel_lock = __import__('threading').RLock()
-        self.integration._channel_pool = Queue(maxsize=10)
-        self.integration._consumers = {}
-        self.integration._consumer_threads = {}
-        self.integration._running = False
-        self.integration._exchanges = set()
-        self.integration._queues = set()
-        self.integration._bindings = []
-        self.integration._rpc_callbacks = {}
-        self.integration._rpc_lock = __import__('threading').RLock()
-        self.integration._rpc_timeout = 30.0
-        self.integration._logger = __import__('logging').getLogger(__name__)
+        _create_integration_with_mocks(self.integration)
 
     def test_consume(self):
         mock_channel = MagicMock()
@@ -958,6 +954,15 @@ class TestRabbitMQIntegrationConsume(unittest.TestCase):
 
         self.assertIsNotNone(result)
         mock_channel.basic_consume.assert_called_once()
+
+    def test_start_consuming(self):
+        mock_channel = MagicMock()
+        self.integration._channels = {"test": mock_channel}
+
+        # start_consuming sets _running to True and calls start_consuming on channels
+        self.integration.start_consuming(blocking=False)
+
+        self.assertTrue(self.integration._running)
 
     def test_stop_consuming(self):
         mock_channel = MagicMock()
@@ -1025,21 +1030,8 @@ class TestRabbitMQIntegrationRPC(unittest.TestCase):
         self.integration.dlq_config = DeadLetterConfig()
         self.integration.max_channels = 100
         self.integration.channel_pool_size = 10
-        self.integration._connection = None
-        self.integration._connection_lock = __import__('threading').RLock()
-        self.integration._channels = {}
-        self.integration._channel_lock = __import__('threading').RLock()
-        self.integration._channel_pool = Queue(maxsize=10)
-        self.integration._consumers = {}
-        self.integration._consumer_threads = {}
-        self.integration._running = False
-        self.integration._exchanges = set()
-        self.integration._queues = set()
-        self.integration._bindings = []
-        self.integration._rpc_callbacks = {}
-        self.integration._rpc_lock = __import__('threading').RLock()
+        _create_integration_with_mocks(self.integration)
         self.integration._rpc_timeout = 0.1
-        self.integration._logger = __import__('logging').getLogger(__name__)
 
     def test_rpc_call_timeout(self):
         mock_channel = MagicMock()
@@ -1109,21 +1101,7 @@ class TestRabbitMQIntegrationClustering(unittest.TestCase):
         self.integration.dlq_config = DeadLetterConfig()
         self.integration.max_channels = 100
         self.integration.channel_pool_size = 10
-        self.integration._connection = None
-        self.integration._connection_lock = __import__('threading').RLock()
-        self.integration._channels = {}
-        self.integration._channel_lock = __import__('threading').RLock()
-        self.integration._channel_pool = Queue(maxsize=10)
-        self.integration._consumers = {}
-        self.integration._consumer_threads = {}
-        self.integration._running = False
-        self.integration._exchanges = set()
-        self.integration._queues = set()
-        self.integration._bindings = []
-        self.integration._rpc_callbacks = {}
-        self.integration._rpc_lock = __import__('threading').RLock()
-        self.integration._rpc_timeout = 30.0
-        self.integration._logger = __import__('logging').getLogger(__name__)
+        _create_integration_with_mocks(self.integration)
 
     def test_add_cluster_node(self):
         node = ClusterNode(host="rabbitmq-2", is_master=True)
@@ -1203,6 +1181,8 @@ class TestRabbitMQIntegrationClustering(unittest.TestCase):
                     with patch('src.workflow_rabbitmq.pika.BlockingConnection', return_value=mock_connection):
                         result = self.integration.failover_to_node(node)
 
+        self.assertTrue(result)
+
     def test_is_master_node(self):
         master_node = ClusterNode(host="master", is_master=True)
         worker_node = ClusterNode(host="worker", is_master=False)
@@ -1240,21 +1220,7 @@ class TestRabbitMQIntegrationUtility(unittest.TestCase):
         self.integration.dlq_config = DeadLetterConfig()
         self.integration.max_channels = 100
         self.integration.channel_pool_size = 10
-        self.integration._connection = None
-        self.integration._connection_lock = __import__('threading').RLock()
-        self.integration._channels = {}
-        self.integration._channel_lock = __import__('threading').RLock()
-        self.integration._channel_pool = Queue(maxsize=10)
-        self.integration._consumers = {}
-        self.integration._consumer_threads = {}
-        self.integration._running = False
-        self.integration._exchanges = set()
-        self.integration._queues = set()
-        self.integration._bindings = []
-        self.integration._rpc_callbacks = {}
-        self.integration._rpc_lock = __import__('threading').RLock()
-        self.integration._rpc_timeout = 30.0
-        self.integration._logger = __import__('logging').getLogger(__name__)
+        _create_integration_with_mocks(self.integration)
 
     def test_health_check_healthy(self):
         mock_connection = MagicMock()

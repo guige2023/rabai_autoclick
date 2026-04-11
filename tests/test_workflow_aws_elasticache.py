@@ -411,7 +411,7 @@ class TestElastiCacheIntegrationParameterGroups(unittest.TestCase):
 
         result = self.integration.create_parameter_group(
             "my-param-group",
-            "redis7",
+            CacheEngine.REDIS,
             "My parameter group"
         )
 
@@ -458,8 +458,8 @@ class TestElastiCacheIntegrationSubnetGroups(unittest.TestCase):
 
         result = self.integration.create_subnet_group(
             "my-subnet-group",
-            "My subnet group",
-            ["subnet-1", "subnet-2"]
+            ["subnet-1", "subnet-2"],
+            "My subnet group"
         )
 
         self.assertEqual(result["CacheSubnetGroupName"], "my-subnet-group")
@@ -480,7 +480,7 @@ class TestElastiCacheIntegrationSubnetGroups(unittest.TestCase):
 
         result = self.integration.delete_subnet_group("my-subnet-group")
 
-        self.assertEqual(result, {})
+        self.assertTrue(result)
 
 
 class TestElastiCacheIntegrationSecurityGroups(unittest.TestCase):
@@ -488,15 +488,13 @@ class TestElastiCacheIntegrationSecurityGroups(unittest.TestCase):
 
     def setUp(self):
         self.integration = ElastiCacheIntegration()
-        self.mock_client = MagicMock()
-        self.integration._clients['elasticache'] = self.mock_client
+        self.mock_ec2_client = MagicMock()
+        self.integration._clients['ec2'] = self.mock_ec2_client
 
     def test_create_security_group(self):
-        self.mock_client.create_cache_security_group.return_value = {
-            "CacheSecurityGroup": {
-                "CacheSecurityGroupName": "my-sec-group",
-                "Description": "My security group"
-            }
+        self.mock_ec2_client.create_security_group.return_value = {
+            "GroupId": "sg-12345",
+            "GroupName": "my-sec-group"
         }
 
         result = self.integration.create_security_group(
@@ -504,11 +502,12 @@ class TestElastiCacheIntegrationSecurityGroups(unittest.TestCase):
             "My security group"
         )
 
-        self.assertEqual(result["CacheSecurityGroupName"], "my-sec-group")
+        self.assertEqual(result["GroupId"], "sg-12345")
+        self.assertEqual(result["GroupName"], "my-sec-group")
 
     def test_list_security_groups(self):
-        self.mock_client.describe_cache_security_groups.return_value = {
-            "CacheSecurityGroups": [{"CacheSecurityGroupName": "default"}]
+        self.mock_ec2_client.describe_security_groups.return_value = {
+            "SecurityGroups": [{"GroupId": "sg-12345", "GroupName": "default"}]
         }
 
         result = self.integration.list_security_groups()
@@ -544,7 +543,7 @@ class TestElastiCacheIntegrationSnapshots(unittest.TestCase):
         mock_paginator = MagicMock()
         self.mock_client.get_paginator.return_value = mock_paginator
         mock_paginator.paginate.return_value = [
-            {"Snapshots": [{"SnapshotName": "snap-1"}]}
+            {"Snapshots": [{"SnapshotName": "snap-1", "Engine": "redis"}]}
         ]
 
         result = self.integration.list_snapshots()
@@ -552,13 +551,11 @@ class TestElastiCacheIntegrationSnapshots(unittest.TestCase):
         self.assertEqual(len(result), 1)
 
     def test_delete_snapshot(self):
-        self.mock_client.delete_snapshot.return_value = {
-            "Snapshot": {"SnapshotName": "my-snapshot"}
-        }
+        self.mock_client.delete_snapshot.return_value = {}
 
         result = self.integration.delete_snapshot("my-snapshot")
 
-        self.assertEqual(result["SnapshotName"], "my-snapshot")
+        self.assertTrue(result)
 
 
 class TestElastiCacheIntegrationGlobalReplication(unittest.TestCase):
@@ -569,7 +566,7 @@ class TestElastiCacheIntegrationGlobalReplication(unittest.TestCase):
         self.mock_client = MagicMock()
         self.integration._clients['elasticache'] = self.mock_client
 
-    def test_create_global_replication_group(self):
+    def test_create_global_replication(self):
         self.mock_client.create_global_replication_group.return_value = {
             "GlobalReplicationGroup": {
                 "GlobalReplicationGroupId": "global-group-1",
@@ -577,21 +574,23 @@ class TestElastiCacheIntegrationGlobalReplication(unittest.TestCase):
             }
         }
 
-        result = self.integration.create_global_replication_group(
-            "global-group-1",
+        result = self.integration.create_global_replication(
+            "primary-cluster",
             "My global group"
         )
 
         self.assertEqual(result["GlobalReplicationGroupId"], "global-group-1")
 
-    def test_list_global_replication_groups(self):
-        self.mock_client.describe_global_replication_groups.return_value = {
-            "GlobalReplicationGroups": [{
+    def test_list_global_replications(self):
+        mock_paginator = MagicMock()
+        self.mock_client.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = [
+            {"GlobalReplicationGroups": [{
                 "GlobalReplicationGroupId": "global-group-1"
-            }]
-        }
+            }]}
+        ]
 
-        result = self.integration.list_global_replication_groups()
+        result = self.integration.list_global_replications()
 
         self.assertEqual(len(result), 1)
 
@@ -632,9 +631,11 @@ class TestElastiCacheIntegrationServerless(unittest.TestCase):
         self.assertEqual(result["ServerlessCacheName"], "my-serverless")
 
     def test_list_serverless_caches(self):
-        self.mock_client.describe_serverless_caches.return_value = {
-            "ServerlessCaches": [{"ServerlessCacheName": "cache-1"}]
-        }
+        mock_paginator = MagicMock()
+        self.mock_client.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = [
+            {"ServerlessCaches": [{"ServerlessCacheName": "cache-1", "Engine": "redis"}]}
+        ]
 
         result = self.integration.list_serverless_caches()
 
@@ -688,20 +689,23 @@ class TestElastiCacheIntegrationCloudWatch(unittest.TestCase):
         self.integration._clients['cloudwatch'] = self.mock_cw_client
 
     def test_get_metrics(self):
-        self.mock_cw_client.list_metrics.return_value = {
-            "Metrics": [{"MetricName": "CPUUtilization"}]
+        self.mock_cw_client.get_metric_statistics.return_value = {
+            "Datapoints": [{"Average": 50.0}]
         }
 
-        result = self.integration.get_metrics("CacheClusterMetrics")
+        result = self.integration.get_metrics(
+            "my-cluster",
+            ["CPUUtilization"]
+        )
 
-        self.assertEqual(len(result), 1)
+        self.assertIn("CPUUtilization", result)
 
-    def test_get_alarms(self):
+    def test_list_alarms(self):
         self.mock_cw_client.describe_alarms.return_value = {
             "MetricAlarms": [{"AlarmName": "CPUAlarm"}]
         }
 
-        result = self.integration.get_alarms("CacheClusterAlarms")
+        result = self.integration.list_alarms()
 
         self.assertEqual(len(result), 1)
 

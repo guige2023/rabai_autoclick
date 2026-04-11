@@ -467,7 +467,9 @@ class TestCloudSearchScaling(unittest.TestCase):
 
     def test_configure_scaling(self):
         """Test configuring scaling options"""
-        self.mock_cloudsearch_client.update_domain_service_options.return_value = {}
+        self.mock_cloudsearch_client.update_scaling_parameters.return_value = {
+            'ScalingParameters': {'DesiredInstanceType': 'search.m5.large'}
+        }
 
         config = ScalingConfiguration(
             scaling_type=ScalingType.PROVISIONED,
@@ -477,20 +479,20 @@ class TestCloudSearchScaling(unittest.TestCase):
 
         result = self.integration._configure_scaling("test-domain", config)
 
-        self.assertTrue(result)
+        self.assertTrue(result['success'])
 
-    def test_update_scaling_configuration(self):
-        """Test updating scaling configuration"""
-        self.mock_cloudsearch_client.update_domain_service_options.return_value = {
-            'DomainStatus': {'DomainName': 'test-domain', 'Processing': False}
+    def test_get_scaling_configuration(self):
+        """Test getting scaling configuration"""
+        self.mock_cloudsearch_client.describe_scaling_parameters.return_value = {
+            'ScalingParameters': {
+                'DesiredInstanceType': 'search.m5.large',
+                'DesiredReplicationCount': 1
+            }
         }
 
-        result = self.integration.update_scaling_configuration(
-            "test-domain",
-            scaling_type=ScalingType.ON_DEMAND
-        )
+        result = self.integration.get_scaling_configuration("test-domain")
 
-        self.assertTrue(result)
+        self.assertIn('DesiredInstanceType', result)
 
 
 class TestCloudSearchAccessPolicies(unittest.TestCase):
@@ -508,7 +510,9 @@ class TestCloudSearchAccessPolicies(unittest.TestCase):
 
     def test_configure_access_policy(self):
         """Test configuring access policy"""
-        self.mock_cloudsearch_client.update_domain_access_policies.return_value = {}
+        self.mock_cloudsearch_client.update_access_policy.return_value = {
+            'AccessPolicy': {'Status': {'State': 'Active'}}
+        }
 
         policy = AccessPolicy(
             statement=[
@@ -523,21 +527,31 @@ class TestCloudSearchAccessPolicies(unittest.TestCase):
 
         result = self.integration.configure_access_policy("test-domain", policy)
 
-        self.assertTrue(result)
+        self.assertTrue(result['success'])
 
-    def test_get_access_policies(self):
-        """Test getting access policies"""
+    def test_get_access_policy(self):
+        """Test getting access policy"""
         mock_response = {
             'AccessPolicies': {
                 'Status': {'CreationDate': '2024-01-01T00:00:00Z', 'State': 'Active'},
                 'Options': '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"cloudsearch:Search","Resource":"*"}]}'
             }
         }
-        self.mock_cloudsearch_client.describe_domain_access_policies.return_value = mock_response
+        self.mock_cloudsearch_client.describe_access_policies.return_value = mock_response
 
-        result = self.integration.get_access_policies("test-domain")
+        result = self.integration.get_access_policy("test-domain")
 
         self.assertIn('Options', result)
+
+    def test_create_public_access_policy(self):
+        """Test creating public access policy"""
+        self.mock_cloudsearch_client.update_access_policy.return_value = {
+            'AccessPolicy': {'Status': {'State': 'Active'}}
+        }
+
+        result = self.integration.create_public_access_policy("test-domain")
+
+        self.assertTrue(result['success'])
 
 
 class TestCloudSearchSuggesters(unittest.TestCase):
@@ -595,6 +609,19 @@ class TestCloudSearchSuggesters(unittest.TestCase):
 
         self.assertTrue(result['success'])
 
+    def test_get_suggester_config(self):
+        """Test getting suggester config"""
+        mock_response = {
+            'Suggesters': [
+                {'SuggesterName': 'docsuggest', 'DocumentScorer': 'tf-idf'}
+            ]
+        }
+        self.mock_cloudsearch_client.describe_suggesters.return_value = mock_response
+
+        result = self.integration.get_suggester_config("test-domain", "docsuggest")
+
+        self.assertEqual(result['SuggesterName'], 'docsuggest')
+
 
 class TestCloudSearchDocuments(unittest.TestCase):
     """Test CloudSearch document methods"""
@@ -602,43 +629,71 @@ class TestCloudSearchDocuments(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures"""
         self.mock_cloudsearch_client = MagicMock()
+        self.mock_cloudsearch_domain_client = MagicMock()
 
         with patch.object(CloudSearchIntegration, '__init__', lambda x, **kwargs: None):
             self.integration = CloudSearchIntegration()
             self.integration.region = "us-east-1"
+            self.integration.boto3_config = {}
             self.integration._client = self.mock_cloudsearch_client
+            self.integration._cloudwatch_client = MagicMock()
             self.integration._domain_status_cache = {}
 
     def test_upload_documents(self):
         """Test uploading documents"""
-        mock_response = {
-            'status': 'success',
-            'adds': 10,
-            'deletes': 2
-        }
-
-        documents = [
-            {"id": "doc-1", "type": "add", "fields": {"title": "Document 1", "body": "Content 1"}},
-            {"id": "doc-2", "type": "add", "fields": {"title": "Document 2", "body": "Content 2"}}
-        ]
-
-        result = self.integration.upload_documents("test-domain", documents)
-
-        self.assertTrue(result['success'])
-
-    def test_get_document_service_version(self):
-        """Test getting document service version"""
-        mock_response = {
+        # Mock describe_domains to return doc endpoint
+        self.mock_cloudsearch_client.describe_domains.return_value = {
             'Domains': [{
                 'DomainName': 'test-domain',
-                'DocService': {'Version': '2013-01-01'}
+                'DocService': {'Endpoint': 'https://doc-test-domain.us-east-1.cloudsearch.amazonaws.com'}
             }]
         }
-        self.mock_cloudsearch_client.describe_domains.return_value = mock_response
 
-        result = self.integration.get_document_service_version("test-domain")
+        # Mock cloudsearchdomain client
+        mock_cloudsearchdomain = MagicMock()
+        mock_cloudsearchdomain.upload_documents.return_value = {
+            'Adds': 10,
+            'Deletes': 0,
+            'Status': 'success'
+        }
 
-        self.assertEqual(result, DocumentServiceVersion.V_2013_01_01)
+        with patch('src.workflow_aws_cloudsearch.boto3') as mock_boto3:
+            mock_boto3.client.return_value = mock_cloudsearchdomain
+            
+            documents = [
+                {"id": "doc-1", "fields": {"title": "Document 1", "body": "Content 1"}},
+                {"id": "doc-2", "fields": {"title": "Document 2", "body": "Content 2"}}
+            ]
+
+            result = self.integration.upload_documents("test-domain", documents)
+
+            self.assertTrue(result['success'])
+            self.assertEqual(result['adds'], 10)
+
+    def test_delete_documents(self):
+        """Test deleting documents"""
+        # Mock describe_domains to return doc endpoint
+        self.mock_cloudsearch_client.describe_domains.return_value = {
+            'Domains': [{
+                'DomainName': 'test-domain',
+                'DocService': {'Endpoint': 'https://doc-test-domain.us-east-1.cloudsearch.amazonaws.com'}
+            }]
+        }
+
+        # Mock cloudsearchdomain client
+        mock_cloudsearchdomain = MagicMock()
+        mock_cloudsearchdomain.upload_documents.return_value = {
+            'Deletes': 2,
+            'Status': 'success'
+        }
+
+        with patch('src.workflow_aws_cloudsearch.boto3') as mock_boto3:
+            mock_boto3.client.return_value = mock_cloudsearchdomain
+
+            result = self.integration.delete_documents("test-domain", ["doc-1", "doc-2"])
+
+            self.assertTrue(result['success'])
+            self.assertEqual(result['deletes'], 2)
 
 
 class TestCloudSearchSearch(unittest.TestCase):
@@ -651,12 +706,24 @@ class TestCloudSearchSearch(unittest.TestCase):
         with patch.object(CloudSearchIntegration, '__init__', lambda x, **kwargs: None):
             self.integration = CloudSearchIntegration()
             self.integration.region = "us-east-1"
+            self.integration.boto3_config = {}
             self.integration._client = self.mock_cloudsearch_client
+            self.integration._cloudwatch_client = MagicMock()
             self.integration._domain_status_cache = {}
 
     def test_search(self):
         """Test executing a search"""
-        mock_response = {
+        # Mock describe_domains to return search endpoint
+        self.mock_cloudsearch_client.describe_domains.return_value = {
+            'Domains': [{
+                'DomainName': 'test-domain',
+                'SearchService': {'Endpoint': 'https://search-test-domain.us-east-1.cloudsearch.amazonaws.com'}
+            }]
+        }
+
+        # Mock cloudsearchdomain client
+        mock_cloudsearchdomain = MagicMock()
+        mock_cloudsearchdomain.search.return_value = {
             'hits': {
                 'found': 10,
                 'hit': [
@@ -666,32 +733,58 @@ class TestCloudSearchSearch(unittest.TestCase):
             },
             'status': {'timems': 5, 'rid': 'test-rid'}
         }
-        self.mock_cloudsearch_client.search.return_value = mock_response
 
-        result = self.integration.search("test-domain", "query=title:Document")
+        with patch('src.workflow_aws_cloudsearch.boto3') as mock_boto3:
+            mock_boto3.client.return_value = mock_cloudsearchdomain
 
-        self.assertEqual(result['hits']['found'], 10)
-        self.assertEqual(len(result['hits']['hit']), 2)
+            result = self.integration.search("test-domain", "query=title:Document")
+
+            self.assertTrue(result['success'])
+            self.assertEqual(result['hits']['found'], 10)
+            self.assertEqual(len(result['hits']['hit']), 2)
 
     def test_search_with_filters(self):
         """Test executing a search with filters"""
-        mock_response = {
+        # Mock describe_domains to return search endpoint
+        self.mock_cloudsearch_client.describe_domains.return_value = {
+            'Domains': [{
+                'DomainName': 'test-domain',
+                'SearchService': {'Endpoint': 'https://search-test-domain.us-east-1.cloudsearch.amazonaws.com'}
+            }]
+        }
+
+        # Mock cloudsearchdomain client
+        mock_cloudsearchdomain = MagicMock()
+        mock_cloudsearchdomain.search.return_value = {
             'hits': {'found': 5, 'hit': []},
             'status': {'timems': 3}
         }
-        self.mock_cloudsearch_client.search.return_value = mock_response
 
-        result = self.integration.search(
-            "test-domain",
-            "query=Document",
-            filter_query="price:[100,500]"
-        )
+        with patch('src.workflow_aws_cloudsearch.boto3') as mock_boto3:
+            mock_boto3.client.return_value = mock_cloudsearchdomain
 
-        self.assertTrue('hits' in result)
+            result = self.integration.search(
+                "test-domain",
+                "query=Document",
+                filter_query="price:[100,500]"
+            )
 
-    def test_suggest(self):
-        """Test executing a suggest query"""
-        mock_response = {
+            self.assertTrue(result['success'])
+            self.assertIn('hits', result)
+
+    def test_get_suggestions(self):
+        """Test getting search suggestions"""
+        # Mock describe_domains to return search endpoint
+        self.mock_cloudsearch_client.describe_domains.return_value = {
+            'Domains': [{
+                'DomainName': 'test-domain',
+                'SearchService': {'Endpoint': 'https://search-test-domain.us-east-1.cloudsearch.amazonaws.com'}
+            }]
+        }
+
+        # Mock cloudsearchdomain client
+        mock_cloudsearchdomain = MagicMock()
+        mock_cloudsearchdomain.suggest.return_value = {
             'suggest': {
                 'query': 'Doc',
                 'suggestions': [
@@ -700,11 +793,13 @@ class TestCloudSearchSearch(unittest.TestCase):
                 ]
             }
         }
-        self.mock_cloudsearch_client.suggest.return_value = mock_response
 
-        result = self.integration.suggest("test-domain", "Doc")
+        with patch('src.workflow_aws_cloudsearch.boto3') as mock_boto3:
+            mock_boto3.client.return_value = mock_cloudsearchdomain
 
-        self.assertEqual(len(result['suggest']['suggestions']), 2)
+            result = self.integration.get_suggestions("test-domain", "Doc")
+
+            self.assertEqual(len(result), 2)
 
 
 class TestCloudSearchIndexing(unittest.TestCase):
@@ -720,29 +815,38 @@ class TestCloudSearchIndexing(unittest.TestCase):
             self.integration._client = self.mock_cloudsearch_client
             self.integration._domain_status_cache = {}
 
-    def test_configure_indexing(self):
+    def test_configure_indexing_options(self):
         """Test configuring indexing options"""
-        self.mock_cloudsearch_client.index_documents.return_value = {}
+        self.mock_cloudsearch_client.update_indexing_options.return_value = {
+            'IndexingOptions': {'Indexing': True}
+        }
 
-        result = self.integration.configure_indexing("test-domain")
+        options = IndexingOptions(index_field_name="_version_", indexing=True)
 
-        self.assertTrue(result)
+        result = self.integration.configure_indexing_options("test-domain", options)
+
+        self.assertTrue(result['success'])
 
     def test_get_indexing_options(self):
         """Test getting indexing options"""
-        mock_response = {
-            'Domains': [{
-                'DomainName': 'test-domain',
-                'IndexFields': [
-                    {'IndexFieldName': 'title', 'IndexFieldType': 'text'}
-                ]
-            }]
+        self.mock_cloudsearch_client.describe_indexing_options.return_value = {
+            'IndexingOptions': {'Indexing': True}
         }
-        self.mock_cloudsearch_client.describe_domains.return_value = mock_response
 
         result = self.integration.get_indexing_options("test-domain")
 
-        self.assertIn('IndexFields', result)
+        self.assertIn('Indexing', result)
+
+    def test_rebuild_index(self):
+        """Test rebuilding index"""
+        self.mock_cloudsearch_client.index_documents.return_value = {
+            'FieldsToIndex': ['title', 'body']
+        }
+
+        result = self.integration.rebuild_index("test-domain")
+
+        self.assertTrue(result['success'])
+        self.assertIn('fields_to_index', result)
 
 
 class TestCloudSearchMonitoring(unittest.TestCase):
@@ -756,6 +860,7 @@ class TestCloudSearchMonitoring(unittest.TestCase):
         with patch.object(CloudSearchIntegration, '__init__', lambda x, **kwargs: None):
             self.integration = CloudSearchIntegration()
             self.integration.region = "us-east-1"
+            self.integration.boto3_config = {}
             self.integration._client = self.mock_cloudsearch_client
             self.integration._cloudwatch_client = self.mock_cloudwatch_client
             self.integration._domain_status_cache = {}
@@ -767,8 +872,14 @@ class TestCloudSearchMonitoring(unittest.TestCase):
                 {'Average': 50.0, 'Maximum': 100.0, 'Minimum': 10.0, 'Timestamp': '2024-01-01T00:00:00Z'}
             ]
         }
+        self.mock_cloudsearch_client.describe_domains.return_value = {
+            'Domains': [{'DomainName': 'test-domain', 'ARN': 'arn:aws:cloudsearch:us-east-1:123456789:domain/test-domain'}]
+        }
 
-        result = self.integration.get_search_metrics("test-domain")
+        start_time = datetime(2024, 1, 1)
+        end_time = datetime(2024, 1, 2)
+
+        result = self.integration.get_search_metrics("test-domain", "SearchLatency", start_time, end_time)
 
         self.assertIsNotNone(result)
         self.mock_cloudwatch_client.get_metric_statistics.assert_called()
@@ -780,22 +891,125 @@ class TestCloudSearchMonitoring(unittest.TestCase):
                 {'Average': 20.0, 'Timestamp': '2024-01-01T00:00:00Z'}
             ]
         }
-
-        result = self.integration.get_indexing_metrics("test-domain")
-
-        self.assertIsNotNone(result)
-
-    def test_get_document_metrics(self):
-        """Test getting document metrics"""
-        self.mock_cloudwatch_client.get_metric_statistics.return_value = {
-            'Datapoints': [
-                {'Sum': 1000.0, 'Timestamp': '2024-01-01T00:00:00Z'}
-            ]
+        self.mock_cloudsearch_client.describe_domains.return_value = {
+            'Domains': [{'DomainName': 'test-domain', 'ARN': 'arn:aws:cloudsearch:us-east-1:123456789:domain/test-domain'}]
         }
 
-        result = self.integration.get_document_metrics("test-domain")
+        start_time = datetime(2024, 1, 1)
+        end_time = datetime(2024, 1, 2)
+
+        result = self.integration.get_indexing_metrics("test-domain", start_time, end_time)
 
         self.assertIsNotNone(result)
+        self.assertIn('IndexingDocuments', result)
+
+    def test_get_cloudwatch_dashboard(self):
+        """Test getting CloudWatch dashboard"""
+        self.mock_cloudwatch_client.get_metric_statistics.return_value = {
+            'Datapoints': [{'Average': 50.0}]
+        }
+        self.mock_cloudsearch_client.describe_domains.return_value = {
+            'Domains': [{'DomainName': 'test-domain', 'ARN': 'arn:aws:cloudsearch:us-east-1:123456789:domain/test-domain'}]
+        }
+
+        start_time = datetime(2024, 1, 1)
+        end_time = datetime(2024, 1, 2)
+
+        result = self.integration.get_cloudwatch_dashboard("test-domain", start_time, end_time)
+
+        self.assertIn('search_metrics', result)
+        self.assertIn('indexing_metrics', result)
+
+    def test_set_cloudwatch_alarms(self):
+        """Test setting CloudWatch alarms"""
+        self.mock_cloudwatch_client.put_metric_alarm.return_value = {}
+        self.mock_cloudsearch_client.describe_domains.return_value = {
+            'Domains': [{'DomainName': 'test-domain', 'ARN': 'arn:aws:cloudsearch:us-east-1:123456789:domain/test-domain'}]
+        }
+
+        result = self.integration.set_cloudwatch_alarms("test-domain", search_latency_threshold=100)
+
+        self.assertIsInstance(result, list)
+
+
+class TestCloudSearchUtility(unittest.TestCase):
+    """Test CloudSearch utility methods"""
+
+    def setUp(self):
+        """Set up test fixtures"""
+        self.mock_cloudsearch_client = MagicMock()
+
+        with patch.object(CloudSearchIntegration, '__init__', lambda x, **kwargs: None):
+            self.integration = CloudSearchIntegration()
+            self.integration.region = "us-east-1"
+            self.integration._client = self.mock_cloudsearch_client
+            self.integration._domain_status_cache = {}
+
+    def test_get_service_limits(self):
+        """Test getting service limits"""
+        self.mock_cloudsearch_client.describe_service_access_policies.return_value = {}
+
+        result = self.integration.get_service_limits()
+
+        self.assertIn('max_domains', result)
+        self.assertIn('max_index_fields', result)
+
+    def test_health_check(self):
+        """Test health check"""
+        self.mock_cloudsearch_client.describe_domains.return_value = {
+            'Domains': [{
+                'DomainName': 'test-domain',
+                'DomainStatus': 'Active',
+                'ARN': 'arn:aws:cloudsearch:us-east-1:123456789:domain/test-domain',
+                'SearchService': {'Endpoint': 'https://search-test-domain.us-east-1.cloudsearch.amazonaws.com'},
+                'DocService': {'Endpoint': 'https://doc-test-domain.us-east-1.cloudsearch.amazonaws.com'}
+            }]
+        }
+        self.mock_cloudsearch_client.describe_index_fields.return_value = {
+            'IndexFields': [{'IndexFieldName': 'title'}]
+        }
+        self.mock_cloudsearch_client.describe_suggesters.return_value = {
+            'Suggesters': []
+        }
+        self.mock_cloudsearch_client.describe_scaling_parameters.return_value = {
+            'ScalingParameters': {}
+        }
+        self.mock_cloudsearch_client.describe_indexing_options.return_value = {
+            'IndexingOptions': {}
+        }
+
+        result = self.integration.health_check("test-domain")
+
+        self.assertIn('healthy', result)
+        self.assertIn('checks', result)
+
+    def test_get_domain_metrics_summary(self):
+        """Test getting domain metrics summary"""
+        self.mock_cloudsearch_client.describe_domains.return_value = {
+            'Domains': [{
+                'DomainName': 'test-domain',
+                'DomainStatus': 'Active',
+                'ARN': 'arn:aws:cloudsearch:us-east-1:123456789:domain/test-domain',
+                'SearchService': {'Endpoint': 'https://search-test-domain.us-east-1.cloudsearch.amazonaws.com'},
+                'DocService': {'Endpoint': 'https://doc-test-domain.us-east-1.cloudsearch.amazonaws.com'}
+            }]
+        }
+        self.mock_cloudsearch_client.describe_index_fields.return_value = {
+            'IndexFields': [{'IndexFieldName': 'title'}]
+        }
+        self.mock_cloudsearch_client.describe_suggesters.return_value = {
+            'Suggesters': []
+        }
+        self.mock_cloudsearch_client.describe_scaling_parameters.return_value = {
+            'ScalingParameters': {}
+        }
+        self.mock_cloudsearch_client.describe_indexing_options.return_value = {
+            'IndexingOptions': {}
+        }
+
+        result = self.integration.get_domain_metrics_summary("test-domain")
+
+        self.assertEqual(result['domain_name'], 'test-domain')
 
 
 if __name__ == '__main__':

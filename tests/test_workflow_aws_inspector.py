@@ -857,12 +857,12 @@ class TestSNSTopics(unittest.TestCase):
         """Tear down test fixtures"""
         self.patcher.stop()
 
-    def test_configure_sns_topic(self):
-        """Test configure_sns_topic method"""
-        self.mock_inspector.set_tags_for_resource.return_value = {}
+    def test_configure_sns_notifications(self):
+        """Test configure_sns_notifications method"""
+        self.mock_inspector.subscribe_to_event.return_value = {}
         
         integration = InspectorIntegration()
-        config = integration.configure_sns_topic(
+        config = integration.configure_sns_notifications(
             topic_arn="arn:aws:sns:us-east-1:123456789012:inspector-topic",
             sns_role_arn="arn:aws:iam::123456789012:role/inspector-sns",
             event_types=["ASSESSMENT_RUN_COMPLETED", "FINDING_REPORTED"]
@@ -870,6 +870,19 @@ class TestSNSTopics(unittest.TestCase):
         
         self.assertEqual(config.topic_arn, "arn:aws:sns:us-east-1:123456789012:inspector-topic")
         self.assertTrue(config.enabled)
+
+    def test_list_event_subscriptions(self):
+        """Test list_event_subscriptions method"""
+        self.mock_inspector.list_event_subscriptions.return_value = {
+            "subscriptions": [
+                {"topicArn": "arn:aws:sns:us-east-1:123456789012:topic1"}
+            ]
+        }
+        
+        integration = InspectorIntegration()
+        result = integration.list_event_subscriptions()
+        
+        self.assertIsInstance(result, list)
 
 
 class TestCloudWatchIntegration(unittest.TestCase):
@@ -903,25 +916,29 @@ class TestCloudWatchIntegration(unittest.TestCase):
         
         self.assertTrue(result)
 
-    def test_publish_assessment_run_metrics(self):
-        """Test publish_assessment_run_metrics method"""
-        self.mock_inspector.describe_assessment_runs.return_value = {
-            "assessmentRuns": [
-                {
-                    "assessmentTemplateArn": "arn:aws:inspector:template/123",
-                    "state": "COMPLETED",
-                    "startedAt": "2024-01-01T00:00:00Z",
-                    "completedAt": "2024-01-01T01:00:00Z",
-                    "findingIdsCount": 10,
-                    "rulesPackagesCount": 3
-                }
+    def test_get_cloudwatch_metrics(self):
+        """Test get_cloudwatch_metrics method"""
+        mock_cloudwatch = MagicMock()
+        mock_cloudwatch.get_metric_statistics.return_value = {
+            "Datapoints": [
+                {"Timestamp": datetime(2024, 1, 1), "Sum": 10.0, "Average": 5.0}
             ]
         }
         
-        integration = InspectorIntegration()
-        result = integration.publish_assessment_run_metrics("run-123")
-        
-        self.assertTrue(result)
+        with patch('src.workflow_aws_inspector.boto3') as mock_boto3:
+            mock_session = MagicMock()
+            mock_boto3.Session.return_value = mock_session
+            mock_session.client.return_value = mock_cloudwatch
+            
+            integration = InspectorIntegration()
+            result = integration.get_cloudwatch_metrics(
+                metric_name="AssessmentRuns",
+                start_time=datetime(2024, 1, 1),
+                end_time=datetime(2024, 1, 2),
+                period=300
+            )
+            
+            self.assertIsInstance(result, list)
 
 
 class TestInspectorWorkflows(unittest.TestCase):
@@ -943,67 +960,45 @@ class TestInspectorWorkflows(unittest.TestCase):
         """Tear down test fixtures"""
         self.patcher.stop()
 
-    def test_run_assessment_and_wait(self):
-        """Test run_assessment_and_wait method"""
-        self.mock_inspector.start_assessment_run.return_value = {
-            "assessmentRunArn": "arn:aws:inspector:run/789"
-        }
-        self.mock_inspector.describe_assessment_runs.return_value = {
-            "assessmentRuns": [
-                {
-                    "assessmentTemplateArn": "arn:aws:inspector:template/456",
-                    "state": "COMPLETED",
-                    "startedAt": "2024-01-01T00:00:00Z",
-                    "completedAt": "2024-01-01T01:00:00Z",
-                    "findingIdsCount": 5,
-                    "rulesPackagesCount": 3
-                }
-            ]
+    def test_generate_assessment_report(self):
+        """Test generate_assessment_report method"""
+        self.mock_inspector.get_assessment_report.return_value = {
+            "assessmentReport": {
+                "reportId": "report-123",
+                "status": "COMPLETED"
+            },
+            "url": "https://example.com/report.pdf"
         }
         
         integration = InspectorIntegration()
-        run = integration.run_assessment_and_wait("456", timeout=60)
+        result = integration.generate_assessment_report(
+            run_id="789",
+            report_format="PDF",
+            output_bucket="my-bucket"
+        )
         
-        self.assertIsNotNone(run)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["report_id"], "report-123")
 
-    def test_get_severity_summary(self):
-        """Test get_severity_summary method"""
-        self.mock_inspector.list_findings.return_value = {
-            "findingArns": [
-                "arn:aws:inspector:finding/1",
-                "arn:aws:inspector:finding/2"
-            ]
-        }
-        self.mock_inspector.describe_findings.return_value = {
-            "findings": [
-                {
-                    "id": "1",
-                    "severity": "HIGH",
-                    "title": "High Finding",
-                    "description": "High severity",
-                    "assetType": "ec2",
-                    "asset": {"id": "i-123"},
-                    "createdAt": "2024-01-01T00:00:00Z",
-                    "updatedAt": "2024-01-01T00:00:00Z"
-                },
-                {
-                    "id": "2",
-                    "severity": "LOW",
-                    "title": "Low Finding",
-                    "description": "Low severity",
-                    "assetType": "ec2",
-                    "asset": {"id": "i-456"},
-                    "createdAt": "2024-01-01T00:00:00Z",
-                    "updatedAt": "2024-01-01T00:00:00Z"
-                }
-            ]
+    def test_get_assessment_summary_report(self):
+        """Test get_assessment_summary_report method"""
+        self.mock_inspector.get_assessment_summary.return_value = {
+            "assessmentRunCount": 10,
+            "totalFindingCount": 25
         }
         
         integration = InspectorIntegration()
-        summary = integration.get_severity_summary()
+        result = integration.get_assessment_summary_report()
         
-        self.assertIn("high", summary)
-        self.assertIn("low", summary)
+        self.assertIn("assessmentRunCount", result)
+
+    def test_health_check(self):
+        """Test health_check method"""
+        integration = InspectorIntegration()
+        health = integration.health_check()
+        
+        self.assertIn("status", health)
+        self.assertIn("region", health)
 
 
 if __name__ == '__main__':

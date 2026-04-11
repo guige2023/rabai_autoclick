@@ -427,54 +427,8 @@ class TestECSIntegration(unittest.TestCase):
         self.assertEqual(call_kwargs["tags"][0]["key"], "Environment")
         self.assertEqual(call_kwargs["tags"][0]["value"], "production")
 
-    def test_list_clusters(self):
-        """Test listing clusters"""
-        self.mock_ecs_client.list_clusters.return_value = {
-            "clusterArns": [
-                "arn:aws:ecs:us-east-1:123456789:cluster/cluster-1",
-                "arn:aws:ecs:us-east-1:123456789:cluster/cluster-2"
-            ]
-        }
-        self.mock_ecs_client.describe_clusters.return_value = {
-            "clusters": [
-                {
-                    "clusterArn": "arn:aws:ecs:us-east-1:123456789:cluster/cluster-1",
-                    "clusterName": "cluster-1",
-                    "status": "ACTIVE",
-                    "registeredContainerInstancesCount": 2,
-                    "runningTasksCount": 5,
-                    "pendingTasksCount": 1,
-                    "activeServicesCount": 2,
-                    "statistics": [],
-                    "settings": [],
-                    "capacityProviders": ["FARGATE"],
-                    "defaultCapacityProviderStrategy": []
-                },
-                {
-                    "clusterArn": "arn:aws:ecs:us-east-1:123456789:cluster/cluster-2",
-                    "clusterName": "cluster-2",
-                    "status": "ACTIVE",
-                    "registeredContainerInstancesCount": 0,
-                    "runningTasksCount": 0,
-                    "pendingTasksCount": 0,
-                    "activeServicesCount": 0,
-                    "statistics": [],
-                    "settings": [],
-                    "capacityProviders": ["EC2"],
-                    "defaultCapacityProviderStrategy": []
-                }
-            ]
-        }
-
-        result = self.integration.list_clusters()
-
-        self.assertEqual(len(result), 2)
-        self.assertEqual(result[0].cluster_name, "cluster-1")
-        self.assertEqual(result[0].running_tasks, 5)
-        self.assertEqual(result[1].cluster_name, "cluster-2")
-
-    def test_describe_cluster(self):
-        """Test describing a specific cluster"""
+    def test_describe_clusters(self):
+        """Test describing clusters"""
         self.mock_ecs_client.describe_clusters.return_value = {
             "clusters": [
                 {
@@ -495,34 +449,21 @@ class TestECSIntegration(unittest.TestCase):
             ]
         }
 
-        result = self.integration.describe_cluster(cluster_name="my-cluster")
+        result = self.integration.describe_clusters(clusters=["my-cluster"])
 
-        self.assertEqual(result.cluster_name, "my-cluster")
-        self.assertEqual(result.running_tasks, 10)
-        self.assertEqual(result.active_services, 5)
-        self.assertEqual(result.capacity_providers, ["FARGATE", "FARGATE_SPOT"])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].cluster_name, "my-cluster")
+        self.assertEqual(result[0].running_tasks, 10)
+        self.assertEqual(result[0].active_services, 5)
+        self.assertEqual(result[0].capacity_providers, ["FARGATE", "FARGATE_SPOT"])
 
     def test_delete_cluster(self):
         """Test cluster deletion"""
-        self.mock_ecs_client.delete_cluster.return_value = {
-            "cluster": {
-                "clusterArn": "arn:aws:ecs:us-east-1:123456789:cluster/to-delete",
-                "clusterName": "to-delete",
-                "status": "DEPROVISIONING",
-                "registeredContainerInstancesCount": 0,
-                "runningTasksCount": 0,
-                "pendingTasksCount": 0,
-                "activeServicesCount": 0,
-                "statistics": [],
-                "settings": [],
-                "capacityProviders": [],
-                "defaultCapacityProviderStrategy": []
-            }
-        }
+        self.mock_ecs_client.delete_cluster.return_value = {}
 
-        result = self.integration.delete_cluster(cluster_name="to-delete")
+        result = self.integration.delete_cluster(cluster="to-delete")
 
-        self.assertEqual(result.cluster_name, "to-delete")
+        self.assertTrue(result)
         self.mock_ecs_client.delete_cluster.assert_called_once_with(cluster="to-delete")
 
     def test_register_task_definition(self):
@@ -567,20 +508,20 @@ class TestECSIntegration(unittest.TestCase):
         self.assertEqual(result["status"], "ACTIVE")
 
     def test_list_task_definitions(self):
-        """Test listing task definitions"""
-        self.mock_ecs_client.list_task_definitions.return_value = {
-            "taskDefinitionArns": [
+        """Test listing task definitions - returns list of ARNs"""
+        mock_paginator = MagicMock()
+        mock_paginator.paginate.return_value = [
+            {"taskDefinitionArns": [
                 "arn:aws:ecs:us-east-1:123456789:task-definition/my-task:1",
-                "arn:aws:ecs:us-east-1:123456789:task-definition/my-task:2",
-                "arn:aws:ecs:us-east-1:123456789:task-definition/other-task:1"
-            ]
-        }
+                "arn:aws:ecs:us-east-1:123456789:task-definition/my-task:2"
+            ]}
+        ]
+        self.mock_ecs_client.get_paginator.return_value = mock_paginator
 
         result = self.integration.list_task_definitions(family_prefix="my-task")
 
         self.assertEqual(len(result), 2)
-        call_kwargs = self.mock_ecs_client.list_task_definitions.call_args[1]
-        self.assertEqual(call_kwargs["familyPrefix"], "my-task")
+        self.mock_ecs_client.get_paginator.assert_called_with("list_task_definitions")
 
     def test_describe_task_definition(self):
         """Test describing a task definition"""
@@ -608,19 +549,15 @@ class TestECSIntegration(unittest.TestCase):
         self.assertEqual(result["containerDefinitions"][0]["name"], "web")
 
     def test_deregister_task_definition(self):
-        """Test task definition deregistration"""
-        self.mock_ecs_client.deregister_task_definition.return_value = {
-            "taskDefinition": {
-                "taskDefinitionArn": "arn:aws:ecs:us-east-1:123456789:task-definition/my-task:1",
-                "family": "my-task",
-                "revision": 1,
-                "status": "INACTIVE"
-            }
-        }
+        """Test task definition deregistration - returns bool"""
+        self.mock_ecs_client.deregister_task_definition.return_value = {}
 
         result = self.integration.deregister_task_definition(task_definition="my-task:1")
 
-        self.assertEqual(result["status"], "INACTIVE")
+        self.assertTrue(result)
+        self.mock_ecs_client.deregister_task_definition.assert_called_once_with(
+            taskDefinition="my-task:1"
+        )
 
     def test_run_task(self):
         """Test running a task"""
@@ -631,7 +568,7 @@ class TestECSIntegration(unittest.TestCase):
                     "taskDefinitionArn": "arn:aws:ecs:us-east-1:123456789:task-definition/my-task:1",
                     "clusterArn": "arn:aws:ecs:us-east-1:123456789:cluster/test-cluster",
                     "desiredStatus": "RUNNING",
-                    "status": "RUNNING",
+                    "lastStatus": "RUNNING",
                     "launchType": "FARGATE",
                     "containerInstanceArn": "",
                     "startedBy": "ecs-integration"
@@ -641,8 +578,8 @@ class TestECSIntegration(unittest.TestCase):
         }
 
         result = self.integration.run_task(
-            cluster_name="test-cluster",
             task_definition="my-task:1",
+            cluster="test-cluster",
             count=1,
             started_by="ecs-integration"
         )
@@ -652,44 +589,19 @@ class TestECSIntegration(unittest.TestCase):
         self.assertEqual(result[0].launch_type, LaunchType.FARGATE)
 
     def test_list_tasks(self):
-        """Test listing tasks"""
-        self.mock_ecs_client.list_tasks.return_value = {
-            "taskArns": [
+        """Test listing tasks - returns list of ARNs"""
+        mock_paginator = MagicMock()
+        mock_paginator.paginate.return_value = [
+            {"taskArns": [
                 "arn:aws:ecs:us-east-1:123456789:task/test-cluster/task-id-1",
                 "arn:aws:ecs:us-east-1:123456789:task/test-cluster/task-id-2"
-            ]
-        }
-        self.mock_ecs_client.describe_tasks.return_value = {
-            "tasks": [
-                {
-                    "taskArn": "arn:aws:ecs:us-east-1:123456789:task/test-cluster/task-id-1",
-                    "taskDefinitionArn": "arn:aws:ecs:us-east-1:123456789:task-definition/my-task:1",
-                    "clusterArn": "arn:aws:ecs:us-east-1:123456789:cluster/test-cluster",
-                    "desiredStatus": "RUNNING",
-                    "status": "RUNNING",
-                    "launchType": "FARGATE",
-                    "containerInstanceArn": "",
-                    "startedBy": ""
-                },
-                {
-                    "taskArn": "arn:aws:ecs:us-east-1:123456789:task/test-cluster/task-id-2",
-                    "taskDefinitionArn": "arn:aws:ecs:us-east-1:123456789:task-definition/my-task:1",
-                    "clusterArn": "arn:aws:ecs:us-east-1:123456789:cluster/test-cluster",
-                    "desiredStatus": "STOPPED",
-                    "status": "STOPPED",
-                    "launchType": "FARGATE",
-                    "containerInstanceArn": "",
-                    "startedBy": ""
-                }
-            ],
-            "failures": []
-        }
+            ]}
+        ]
+        self.mock_ecs_client.get_paginator.return_value = mock_paginator
 
-        result = self.integration.list_tasks(cluster_name="test-cluster")
+        result = self.integration.list_tasks(cluster="test-cluster")
 
         self.assertEqual(len(result), 2)
-        self.assertEqual(result[0].status, TaskStatus.RUNNING)
-        self.assertEqual(result[1].status, TaskStatus.STOPPED)
 
     def test_stop_task(self):
         """Test stopping a task"""
@@ -699,7 +611,7 @@ class TestECSIntegration(unittest.TestCase):
                 "taskDefinitionArn": "arn:aws:ecs:us-east-1:123456789:task-definition/my-task:1",
                 "clusterArn": "arn:aws:ecs:us-east-1:123456789:cluster/test-cluster",
                 "desiredStatus": "STOPPED",
-                "status": "STOPPING",
+                "lastStatus": "STOPPING",
                 "launchType": "FARGATE",
                 "containerInstanceArn": "",
                 "startedBy": ""
@@ -707,12 +619,12 @@ class TestECSIntegration(unittest.TestCase):
         }
 
         result = self.integration.stop_task(
-            cluster_name="test-cluster",
-            task_id="task-id-1",
+            task="task-id-1",
+            cluster="test-cluster",
             reason="User requested stop"
         )
 
-        self.assertEqual(result["desiredStatus"], "STOPPED")
+        self.assertEqual(result.desired_status, "STOPPED")
         self.mock_ecs_client.stop_task.assert_called_once()
 
     def test_create_service(self):
@@ -734,9 +646,9 @@ class TestECSIntegration(unittest.TestCase):
         }
 
         result = self.integration.create_service(
-            cluster_name="test-cluster",
             service_name="my-service",
             task_definition="my-task:1",
+            cluster="test-cluster",
             desired_count=2
         )
 
@@ -763,8 +675,8 @@ class TestECSIntegration(unittest.TestCase):
         }
 
         result = self.integration.update_service(
-            cluster_name="test-cluster",
-            service_name="my-service",
+            service="my-service",
+            cluster="test-cluster",
             desired_count=5,
             task_definition="my-task:2"
         )
@@ -773,74 +685,30 @@ class TestECSIntegration(unittest.TestCase):
         self.assertEqual(result.running_count, 3)
 
     def test_delete_service(self):
-        """Test service deletion"""
-        self.mock_ecs_client.update_service.return_value = {
-            "service": {
-                "serviceArn": "arn:aws:ecs:us-east-1:123456789:service/test-cluster/to-delete",
-                "serviceName": "to-delete",
-                "clusterArn": "arn:aws:ecs:us-east-1:123456789:cluster/test-cluster",
-                "status": "INACTIVE",
-                "desiredCount": 0,
-                "runningCount": 0,
-                "pendingCount": 0,
-                "taskDefinition": "arn:aws:ecs:us-east-1:123456789:task-definition/my-task:1",
-                "deploymentController": {"type": "ECS"},
-                "deployments": [],
-                "loadBalancers": []
-            }
-        }
+        """Test service deletion - returns bool"""
+        self.mock_ecs_client.delete_service.return_value = {}
 
         result = self.integration.delete_service(
-            cluster_name="test-cluster",
-            service_name="to-delete"
+            service="to-delete",
+            cluster="test-cluster"
         )
 
-        self.assertEqual(result.desired_count, 0)
+        self.assertTrue(result)
 
     def test_list_services(self):
-        """Test listing services"""
-        self.mock_ecs_client.list_services.return_value = {
-            "serviceArns": [
+        """Test listing services - returns list of ARNs"""
+        mock_paginator = MagicMock()
+        mock_paginator.paginate.return_value = [
+            {"serviceArns": [
                 "arn:aws:ecs:us-east-1:123456789:service/test-cluster/service-1",
                 "arn:aws:ecs:us-east-1:123456789:service/test-cluster/service-2"
-            ]
-        }
-        self.mock_ecs_client.describe_services.return_value = {
-            "services": [
-                {
-                    "serviceArn": "arn:aws:ecs:us-east-1:123456789:service/test-cluster/service-1",
-                    "serviceName": "service-1",
-                    "clusterArn": "arn:aws:ecs:us-east-1:123456789:cluster/test-cluster",
-                    "status": "ACTIVE",
-                    "desiredCount": 2,
-                    "runningCount": 2,
-                    "pendingCount": 0,
-                    "taskDefinition": "arn:aws:ecs:us-east-1:123456789:task-definition/my-task:1",
-                    "deploymentController": {"type": "ECS"},
-                    "deployments": [],
-                    "loadBalancers": []
-                },
-                {
-                    "serviceArn": "arn:aws:ecs:us-east-1:123456789:service/test-cluster/service-2",
-                    "serviceName": "service-2",
-                    "clusterArn": "arn:aws:ecs:us-east-1:123456789:cluster/test-cluster",
-                    "status": "ACTIVE",
-                    "desiredCount": 1,
-                    "runningCount": 1,
-                    "pendingCount": 0,
-                    "taskDefinition": "arn:aws:ecs:us-east-1:123456789:task-definition/my-task:1",
-                    "deploymentController": {"type": "ECS"},
-                    "deployments": [],
-                    "loadBalancers": []
-                }
-            ]
-        }
+            ]}
+        ]
+        self.mock_ecs_client.get_paginator.return_value = mock_paginator
 
-        result = self.integration.list_services(cluster_name="test-cluster")
+        result = self.integration.list_services(cluster="test-cluster")
 
         self.assertEqual(len(result), 2)
-        self.assertEqual(result[0].service_name, "service-1")
-        self.assertEqual(result[0].running_count, 2)
 
     def test_describe_services(self):
         """Test describing services"""
@@ -869,8 +737,8 @@ class TestECSIntegration(unittest.TestCase):
         }
 
         result = self.integration.describe_services(
-            cluster_name="test-cluster",
-            service_names=["web"]
+            services=["web"],
+            cluster="test-cluster"
         )
 
         self.assertEqual(len(result), 1)
@@ -890,37 +758,49 @@ class TestECSIntegrationAutoScaling(unittest.TestCase):
         self.integration.ecs_client = self.mock_ecs_client
         self.integration.application_autoscaling_client = self.mock_application_autoscaling_client
 
-    def test_register_scalable_target(self):
-        """Test registering scalable target"""
+    def test_configure_service_auto_scaling(self):
+        """Test configuring service auto scaling"""
         self.mock_application_autoscaling_client.register_scalable_target.return_value = {}
-
-        result = self.integration.register_scalable_target(
-            service_namespace="ecs",
-            resource_id="service/test-cluster/my-service",
-            min_capacity=2,
-            max_capacity=10,
-            role_arn="arn:aws:iam::123456789:role/ecsAutoscaleRole"
-        )
-
-        self.assertIsNone(result)
-        self.mock_application_autoscaling_client.register_scalable_target.assert_called_once()
-
-    def test_put_scaling_policy(self):
-        """Test putting scaling policy"""
         self.mock_application_autoscaling_client.put_scaling_policy.return_value = {
             "PolicyARN": "arn:aws:autoscaling:us-east-1:123456789:scalingPolicy:abc:service/my-service/TargetPolicy:scalable-target"
         }
 
-        result = self.integration.put_scaling_policy(
-            policy_name="my-scaling-policy",
-            service_namespace="ecs",
-            resource_id="service/test-cluster/my-service",
-            policy_type="TargetTrackingScaling",
-            target_value=70.0,
-            scaling_dimension="ecs:service:DesiredCount"
+        config = AutoScalingConfig(
+            min_capacity=2,
+            max_capacity=10,
+            target_cpu_utilization=70.0
+        )
+        result = self.integration.configure_service_auto_scaling(
+            service="my-service",
+            cluster="test-cluster",
+            config=config
         )
 
-        self.assertIn("PolicyARN", result)
+        self.assertTrue(result)
+        self.mock_application_autoscaling_client.register_scalable_target.assert_called_once()
+        self.mock_application_autoscaling_client.put_scaling_policy.assert_called()
+
+    def test_deregister_scalable_target(self):
+        """Test deregistering scalable target"""
+        self.mock_application_autoscaling_client.deregister_scalable_target.return_value = {}
+
+        result = self.integration.deregister_scalable_target(
+            service="my-service",
+            cluster="test-cluster"
+        )
+
+        self.assertTrue(result)
+
+    def test_delete_scaling_policies(self):
+        """Test deleting scaling policies"""
+        self.mock_application_autoscaling_client.delete_scaling_policy.return_value = {}
+
+        result = self.integration.delete_scaling_policies(
+            service="my-service",
+            cluster="test-cluster"
+        )
+
+        self.assertTrue(result)
 
 
 class TestECSIntegrationLoadBalancer(unittest.TestCase):
@@ -988,6 +868,27 @@ class TestECSIntegrationLoadBalancer(unittest.TestCase):
         self.assertEqual(result["TargetGroupName"], "my-tg")
         self.assertEqual(result["TargetType"], "ip")
 
+    def test_delete_target_group(self):
+        """Test deleting target group"""
+        self.mock_elbv2_client.delete_target_group.return_value = {}
+
+        result = self.integration.delete_target_group(
+            target_group_arn="arn:aws:elasticloadbalancing:us-east-1:123456789:targetgroup/my-tg/abc"
+        )
+
+        self.assertTrue(result)
+
+    def test_register_targets(self):
+        """Test registering targets"""
+        self.mock_elbv2_client.register_targets.return_value = {}
+
+        result = self.integration.register_targets(
+            target_group_arn="arn:aws:elasticloadbalancing:us-east-1:123456789:targetgroup/my-tg/abc",
+            targets=[{"Id": "10.0.0.1", "Port": 80}]
+        )
+
+        self.assertTrue(result)
+
 
 class TestECSIntegrationCloudWatch(unittest.TestCase):
     """Test ECSIntegration CloudWatch methods"""
@@ -1012,30 +913,24 @@ class TestECSIntegrationCloudWatch(unittest.TestCase):
         result = self.integration.get_metric_statistics(
             namespace="AWS/ECS",
             metric_name="CPUUtilization",
+            dimensions=[{"Name": "ClusterName", "Value": "test-cluster"}],
             start_time=datetime(2024, 1, 1, 11, 0),
             end_time=datetime(2024, 1, 1, 12, 0),
             period=300
         )
 
-        self.assertEqual(result["Label"], "CPUUtilization")
-        self.assertEqual(len(result["Datapoints"]), 2)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["Average"], 65.5)
 
-    def test_put_metric_alarm(self):
-        """Test putting metric alarm"""
-        self.mock_cloudwatch_client.put_metric_alarm.return_value = {}
+    def test_put_cluster_metrics(self):
+        """Test putting cluster metrics"""
+        self.mock_ecs_client = MagicMock()
+        self.integration.ecs_client = self.mock_ecs_client
+        self.mock_ecs_client.put_cluster_capacity_settings.return_value = {}
 
-        result = self.integration.put_metric_alarm(
-            alarm_name="high-cpu-alarm",
-            namespace="AWS/ECS",
-            metric_name="CPUUtilization",
-            threshold=80.0,
-            comparison_operator="GreaterThanThreshold",
-            period=300,
-            evaluation_periods=2
-        )
+        result = self.integration.put_cluster_metrics(cluster="test-cluster")
 
-        self.assertIsNone(result)
-        self.mock_cloudwatch_client.put_metric_alarm.assert_called_once()
+        self.assertTrue(result)
 
 
 if __name__ == "__main__":

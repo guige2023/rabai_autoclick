@@ -399,10 +399,10 @@ class TestAmplifyBackendIntegrationFeatureFlags(unittest.TestCase):
     def test_create_feature_flag(self):
         """Test creating a feature flag"""
         flag = self.integration.create_feature_flag(
+            environment_name="dev",
             flag_name="new-feature",
             flag_type=FeatureFlagType.BOOLEAN,
-            value=True,
-            environment_name="dev"
+            value=True
         )
 
         self.assertEqual(flag.flag_name, "new-feature")
@@ -418,7 +418,8 @@ class TestAmplifyBackendIntegrationFeatureFlags(unittest.TestCase):
             value="test-value"
         )
 
-        result = self.integration.get_feature_flag("test-flag", "dev")
+        # Note: get_feature_flag takes (environment_name, flag_name)
+        result = self.integration.get_feature_flag("dev", "test-flag")
 
         self.assertIsNotNone(result)
         self.assertEqual(result.flag_name, "test-flag")
@@ -449,9 +450,9 @@ class TestAmplifyBackendIntegrationFeatureFlags(unittest.TestCase):
         )
 
         result = self.integration.update_feature_flag(
+            environment_name="dev",
             flag_name="update-flag",
-            value=True,
-            environment_name="dev"
+            value=True
         )
 
         self.assertTrue(result.value)
@@ -464,7 +465,8 @@ class TestAmplifyBackendIntegrationFeatureFlags(unittest.TestCase):
             value=True
         )
 
-        result = self.integration.delete_feature_flag("to-delete", "dev")
+        # Note: delete_feature_flag takes (environment_name, flag_name)
+        result = self.integration.delete_feature_flag("dev", "to-delete")
 
         self.assertTrue(result)
         self.assertNotIn("to-delete", self.integration._feature_flags["dev"])
@@ -482,25 +484,31 @@ class TestAmplifyBackendIntegrationBackendConfiguration(unittest.TestCase):
 
     def test_get_backend_configuration(self):
         """Test getting backend configuration"""
-        self.mock_amplify_client.get_backend.return_value = {
-            "backendEnvironment": {
-                "environmentName": "dev",
-                "backendEnvironmentId": "test-app-id-dev"
-            }
+        # First, create a backend environment in cache
+        self.integration._backends["dev"] = BackendEnvironment(
+            environment_name="dev",
+            environment_id="test-app-id-dev",
+            status=BackendStatus.DEPLOYED
+        )
+
+        self.mock_amplify_client.get_backend_configuration.return_value = {
+            "cloudFormationTemplateUrl": "https://example.com/template.yaml",
+            "deploymentArtifacts": {"bucket": "my-bucket"}
         }
 
         result = self.integration.get_backend_configuration("dev")
 
         self.assertIsNotNone(result)
-        self.mock_amplify_client.get_backend.assert_called_once()
+        self.assertIsInstance(result, BackendConfiguration)
+        self.mock_amplify_client.get_backend_configuration.assert_called_once()
 
     def test_get_backend_configuration_without_client(self):
         """Test getting backend configuration without amplify client"""
         integration = AmplifyBackendIntegration(app_id="test-app-id")
         integration._amplify_client = None
 
-        # This should return cached or None since no client available
-        result = integration.get_backend_configuration("dev")
+        # This should return None since no client available and no cached backend
+        result = integration.get_backend_configuration("nonexistent")
         self.assertIsNone(result)
 
 
@@ -512,16 +520,18 @@ class TestAmplifyBackendIntegrationGitHubWebhooks(unittest.TestCase):
             self.skipTest("Module could not be imported due to dataclass issue")
         self.integration = AmplifyBackendIntegration(app_id="test-app-id")
 
-    def test_create_github_webhook(self):
-        """Test creating a GitHub webhook"""
-        result = self.integration.create_github_webhook(
-            repository="test/repo",
-            branch="main",
+    def test_setup_github_webhook(self):
+        """Test setting up a GitHub webhook"""
+        result = self.integration.setup_github_webhook(
+            environment_name="main",
+            repository_owner="testowner",
+            repository_name="testrepo",
+            branch_pattern="main",
             events=[GitHubEventType.PUSH.value]
         )
 
         self.assertIsNotNone(result)
-        self.assertIn("webhook", result)
+        self.assertIsInstance(result, GitHubWebhookConfig)
         self.assertEqual(len(self.integration._github_webhooks), 1)
 
     def test_list_github_webhooks(self):
@@ -562,29 +572,28 @@ class TestAmplifyBackendIntegrationCLIConfig(unittest.TestCase):
             self.skipTest("Module could not be imported due to dataclass issue")
         self.integration = AmplifyBackendIntegration()
 
-    def test_configure_amplify_cli(self):
-        """Test configuring Amplify CLI"""
-        result = self.integration.configure_amplify_cli(
-            project_path="/path/to/project",
-            amplify_app_id="test-app-id",
-            env_name="dev"
-        )
-
-        self.assertIsNotNone(result)
-        self.assertEqual(result.project_path, "/path/to/project")
-        self.assertIn("/path/to/project", self.integration._cli_configs)
-
-    def test_get_amplify_cli_config(self):
-        """Test getting Amplify CLI configuration"""
-        self.integration._cli_configs["/path/to/project"] = AmplifyCLIConfig(
+    def test_setup_amplify_cli(self):
+        """Test setting up Amplify CLI"""
+        result = self.integration.setup_amplify_cli(
             project_path="/path/to/project",
             amplify_app_id="test-app-id"
         )
 
-        result = self.integration.get_amplify_cli_config("/path/to/project")
-
         self.assertIsNotNone(result)
-        self.assertEqual(result.amplify_app_id, "test-app-id")
+        self.assertIsInstance(result, AmplifyCLIConfig)
+        self.assertEqual(result.project_path, "/path/to/project")
+        self.assertIn("/path/to/project", self.integration._cli_configs)
+
+    def test_run_amplify_cli_command_not_found(self):
+        """Test running Amplify CLI command when amplify is not installed"""
+        result = self.integration.run_amplify_cli_command(
+            project_path="/path/to/project",
+            command=["status"]
+        )
+
+        # Should return error since amplify is not installed
+        self.assertFalse(result["success"])
+        self.assertEqual(result["returncode"], -1)
 
 
 class TestAmplifyBackendIntegrationMetrics(unittest.TestCase):
@@ -601,26 +610,36 @@ class TestAmplifyBackendIntegrationMetrics(unittest.TestCase):
 
     def test_record_operation_metric(self):
         """Test recording an operation metric"""
-        self.mock_cloudwatch.put_metric_data.return_value = {}
-
+        # Just verify the metric is recorded in the buffer
+        # The actual flush to CloudWatch happens when buffer reaches 10 items
         self.integration._record_operation_metric(
-            operation_name="CreateBackendEnvironment",
-            status="Success",
-            environment_name="test-env"
+            operation="CreateBackendEnvironment",
+            result="Success",
+            environment="test-env"
         )
 
-        self.mock_cloudwatch.put_metric_data.assert_called_once()
+        # Verify metric was added to buffer
+        self.assertEqual(len(self.integration._metrics_buffer), 1)
+        metric = self.integration._metrics_buffer[0]
+        self.assertEqual(metric["operation"], "CreateBackendEnvironment")
+        self.assertEqual(metric["result"], "Success")
+        self.assertEqual(metric["environment"], "test-env")
 
-    def test_get_operation_metrics(self):
-        """Test getting operation metrics"""
-        self.integration._metrics_buffer = [
-            {"operation": "op1", "status": "Success", "timestamp": "2024-01-01"},
-            {"operation": "op2", "status": "Failure", "timestamp": "2024-01-02"}
-        ]
+    def test_get_operation_history(self):
+        """Test getting operation history"""
+        # Create a mock operation
+        op = BackendOperation(
+            operation_id="op-1",
+            operation_type=BackendOperationType.CREATE,
+            backend_environment_name="dev",
+            status="COMPLETED"
+        )
+        self.integration._operations["op-1"] = op
 
-        result = self.integration.get_operation_metrics(days=7)
+        result = self.integration.get_operation_history(limit=10)
 
-        self.assertEqual(len(result), 2)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].operation_id, "op-1")
 
 
 class TestAmplifyBackendIntegrationUtilityMethods(unittest.TestCase):
@@ -640,19 +659,65 @@ class TestAmplifyBackendIntegrationUtilityMethods(unittest.TestCase):
         self.assertIsNotNone(op_id2)
         self.assertNotEqual(op_id1, op_id2)
 
-    def test_health_check(self):
-        """Test health check"""
-        mock_amplify = MagicMock()
-        mock_cloudwatch = MagicMock()
-        self.integration._amplify_client = mock_amplify
-        self.integration._cloudwatch_client = mock_cloudwatch
+    def test_get_backend_summary(self):
+        """Test getting backend summary"""
+        self.integration._backends["env1"] = BackendEnvironment(
+            environment_name="env1",
+            environment_id="id1",
+            status=BackendStatus.DEPLOYED
+        )
 
-        mock_amplify.list_apps.return_value = {"apps": []}
-        mock_cloudwatch.list_metrics.return_value = {"Metrics": []}
+        result = self.integration.get_backend_summary()
 
-        result = self.integration.health_check()
+        self.assertEqual(result["total_backends"], 1)
+        self.assertIn("by_status", result)
+        self.assertIn("environments", result)
 
-        self.assertTrue(result["status"] in ["healthy", "degraded"])
+    def test_export_configuration(self):
+        """Test exporting configuration"""
+        self.integration._backends["env1"] = BackendEnvironment(
+            environment_name="env1",
+            environment_id="id1",
+            status=BackendStatus.DEPLOYED
+        )
+        self.integration._feature_flags["env1"]["flag1"] = FeatureFlag(
+            flag_name="flag1",
+            flag_type=FeatureFlagType.BOOLEAN,
+            value=True
+        )
+
+        result = self.integration.export_configuration()
+
+        self.assertIn("backends", result)
+        self.assertIn("feature_flags", result)
+        self.assertEqual(len(result["backends"]), 1)
+
+    def test_import_configuration(self):
+        """Test importing configuration"""
+        config = {
+            "backends": {
+                "env1": {
+                    "environment_name": "env1",
+                    "environment_id": "id1",
+                    "status": "DEPLOYED",
+                    "metadata": {}
+                }
+            },
+            "feature_flags": {
+                "env1": {
+                    "flag1": {
+                        "name": "flag1",
+                        "type": "BOOLEAN",
+                        "value": True
+                    }
+                }
+            }
+        }
+
+        self.integration.import_configuration(config)
+
+        self.assertIn("env1", self.integration._backends)
+        self.assertIn("env1", self.integration._feature_flags)
 
 
 if __name__ == "__main__":

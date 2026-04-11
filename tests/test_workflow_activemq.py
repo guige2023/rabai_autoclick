@@ -1,5 +1,5 @@
 """
-Tests for workflow_activemq module
+Tests for workflow_activemq module - testing actual implementation
 """
 import sys
 sys.path.insert(0, '/Users/guige/my_project')
@@ -631,12 +631,13 @@ class TestActiveMQIntegration(unittest.TestCase):
     def test_configure_security(self):
         """Test security configuration"""
         security = SecurityConfig(
-            users={"admin": {"password": "secret"}},
+            users={"admin": {"password": "secret_password"}},
             roles={"admin": ["read", "write"]}
         )
         result = self.integration.configure_security(security)
         self.assertTrue(result)
-        self.assertEqual(self.integration._security.users["admin"]["password"], "secret")
+        # The actual implementation stores the config as-is
+        self.assertEqual(self.integration._security.users["admin"]["password"], "secret_password")
 
     def test_configure_persistence(self):
         """Test persistence configuration"""
@@ -648,7 +649,8 @@ class TestActiveMQIntegration(unittest.TestCase):
     def test_configure_advisory(self):
         """Test advisory configuration"""
         advisory = AdvisoryConfig(enabled=False)
-        self.integration._advisory = advisory
+        result = self.integration.setup_advisories(advisory)
+        self.assertTrue(result)
         self.assertFalse(self.integration._advisory.enabled)
 
     @patch.object(ActiveMQConnection, 'is_connected')
@@ -665,6 +667,247 @@ class TestActiveMQIntegration(unittest.TestCase):
         """Test purging non-existent queue"""
         result = self.integration.purge_queue("non-existent")
         self.assertFalse(result)
+
+    def test_register_message_handler(self):
+        """Test registering a message handler"""
+        self.integration.create_consumer("consumer1", "test-queue")
+        callback = MagicMock()
+        result = self.integration.register_message_handler("consumer1", callback)
+        self.assertTrue(result)
+        self.assertEqual(self.integration._message_listeners["consumer1"], callback)
+
+    def test_register_message_handler_consumer_not_found(self):
+        """Test registering handler for non-existent consumer"""
+        callback = MagicMock()
+        result = self.integration.register_message_handler("non-existent", callback)
+        self.assertFalse(result)
+
+    def test_add_network_connector(self):
+        """Test adding a network connector"""
+        config = NetworkConnectorConfig(name="conn1", uri="tcp://broker2:61616")
+        result = self.integration.add_network_connector(config)
+        self.assertTrue(result)
+        self.assertIn("conn1", self.integration._network_connectors)
+
+    def test_remove_network_connector(self):
+        """Test removing a network connector"""
+        config = NetworkConnectorConfig(name="conn1", uri="tcp://broker2:61616")
+        self.integration.add_network_connector(config)
+        result = self.integration.remove_network_connector("conn1")
+        self.assertTrue(result)
+        self.assertNotIn("conn1", self.integration._network_connectors)
+
+    def test_remove_network_connector_not_found(self):
+        """Test removing non-existent network connector"""
+        result = self.integration.remove_network_connector("non-existent")
+        self.assertFalse(result)
+
+    def test_get_network_connector_info(self):
+        """Test getting network connector info"""
+        config = NetworkConnectorConfig(name="conn1", uri="tcp://broker2:61616")
+        self.integration.add_network_connector(config)
+        info = self.integration.get_network_connector_info("conn1")
+        self.assertIsNotNone(info)
+        self.assertEqual(info["name"], "conn1")
+        self.assertEqual(info["uri"], "tcp://broker2:61616")
+
+    def test_get_network_connector_info_not_found(self):
+        """Test getting info for non-existent network connector"""
+        info = self.integration.get_network_connector_info("non-existent")
+        self.assertIsNone(info)
+
+    def test_list_network_connectors(self):
+        """Test listing network connectors"""
+        self.integration.add_network_connector(NetworkConnectorConfig(name="conn1", uri="tcp://broker1:61616"))
+        self.integration.add_network_connector(NetworkConnectorConfig(name="conn2", uri="tcp://broker2:61616"))
+        connectors = self.integration.list_network_connectors()
+        self.assertEqual(len(connectors), 2)
+        self.assertIn("conn1", connectors)
+        self.assertIn("conn2", connectors)
+
+    def test_get_network_info(self):
+        """Test getting network info"""
+        self.integration.add_network_connector(NetworkConnectorConfig(name="conn1", uri="tcp://broker1:61616"))
+        info = self.integration.get_network_info()
+        self.assertEqual(info["connector_count"], 1)
+        self.assertEqual(len(info["connectors"]), 1)
+
+    def test_get_persistence_info(self):
+        """Test getting persistence info"""
+        info = self.integration.get_persistence_info()
+        self.assertTrue(info["enabled"])
+        self.assertEqual(info["type"], "kahaDB")
+
+    def test_set_persistence_enabled(self):
+        """Test enabling/disabling persistence"""
+        result = self.integration.set_persistence_enabled(False)
+        self.assertTrue(result)
+        self.assertFalse(self.integration._persistence.enabled)
+
+    def test_get_destination_stats(self):
+        """Test getting destination stats"""
+        self.integration._queues["q1"] = QueueConfig(name="q1")
+        self.integration._topics["t1"] = TopicConfig(name="t1")
+        stats = self.integration.get_destination_stats()
+        self.assertIn("queues", stats)
+        self.assertIn("topics", stats)
+        self.assertEqual(len(stats["queues"]), 1)
+        self.assertEqual(len(stats["topics"]), 1)
+
+    def test_health_check(self):
+        """Test health check"""
+        health = self.integration.health_check()
+        self.assertIn("connected", health)
+        self.assertIn("broker_info", health)
+        self.assertIn("health", health)
+        self.assertIn("stats", health)
+
+    def test_add_user(self):
+        """Test adding a user"""
+        result = self.integration.add_user("testuser", "testpass", ["group1"])
+        self.assertTrue(result)
+        self.assertIn("testuser", self.integration._security.users)
+        self.assertEqual(self.integration._security.users["testuser"]["password"], "testpass")
+
+    def test_remove_user(self):
+        """Test removing a user"""
+        self.integration.add_user("testuser", "testpass", ["group1"])
+        result = self.integration.remove_user("testuser")
+        self.assertTrue(result)
+        self.assertNotIn("testuser", self.integration._security.users)
+
+    def test_remove_user_not_found(self):
+        """Test removing non-existent user"""
+        result = self.integration.remove_user("non-existent")
+        self.assertFalse(result)
+
+    def test_get_user_info(self):
+        """Test getting user info"""
+        self.integration.add_user("testuser", "testpass", ["group1"])
+        info = self.integration.get_user_info("testuser")
+        self.assertIsNotNone(info)
+        self.assertEqual(info["username"], "testuser")
+        self.assertIn("group1", info["groups"])
+
+    def test_get_user_info_not_found(self):
+        """Test getting info for non-existent user"""
+        info = self.integration.get_user_info("non-existent")
+        self.assertIsNone(info)
+
+    def test_list_users(self):
+        """Test listing users"""
+        self.integration.add_user("user1", "pass1")
+        self.integration.add_user("user2", "pass2")
+        users = self.integration.list_users()
+        self.assertEqual(len(users), 2)
+        self.assertIn("user1", users)
+        self.assertIn("user2", users)
+
+    def test_add_role(self):
+        """Test adding a role"""
+        result = self.integration.add_role("admin", ["read", "write", "delete"])
+        self.assertTrue(result)
+        self.assertIn("admin", self.integration._security.roles)
+        self.assertEqual(self.integration._security.roles["admin"], ["read", "write", "delete"])
+
+    def test_get_role_info(self):
+        """Test getting role info"""
+        self.integration.add_role("admin", ["read", "write"])
+        self.integration.add_user("testuser", "testpass", ["admin"])
+        info = self.integration.get_role_info("admin")
+        self.assertIsNotNone(info)
+        self.assertEqual(info["role"], "admin")
+        self.assertIn("testuser", info["members"])
+
+    def test_get_role_info_not_found(self):
+        """Test getting info for non-existent role"""
+        info = self.integration.get_role_info("non-existent")
+        self.assertIsNone(info)
+
+    def test_list_roles(self):
+        """Test listing roles"""
+        self.integration.add_role("role1", ["read"])
+        self.integration.add_role("role2", ["write"])
+        roles = self.integration.list_roles()
+        self.assertEqual(len(roles), 2)
+        self.assertIn("role1", roles)
+        self.assertIn("role2", roles)
+
+    def test_get_security_info(self):
+        """Test getting security info"""
+        self.integration.add_user("testuser", "testpass")
+        self.integration.add_role("admin", ["read"])
+        info = self.integration.get_security_info()
+        self.assertEqual(info["user_count"], 1)
+        self.assertEqual(info["role_count"], 1)
+
+    def test_setup_advisories(self):
+        """Test setting up advisories"""
+        advisory = AdvisoryConfig(enabled=True, connection=False)
+        result = self.integration.setup_advisories(advisory)
+        self.assertTrue(result)
+        self.assertFalse(self.integration._advisory.connection)
+        self.assertTrue(self.integration._advisory.enabled)
+
+    def test_get_advisory_info(self):
+        """Test getting advisory info"""
+        info = self.integration.get_advisory_info()
+        self.assertIn("enabled", info)
+        self.assertIn("topic_prefix", info)
+        self.assertTrue(info["enabled"])
+
+    def test_register_advisory_handler(self):
+        """Test registering advisory handler"""
+        callback = MagicMock()
+        self.integration.register_advisory_handler(callback)
+        self.assertEqual(len(self.integration._advisory_listeners), 1)
+
+    def test_send_to_destination(self):
+        """Test send_to_destination method"""
+        with patch.object(self.integration, '_do_send_message', return_value=True) as mock_send:
+            result = self.integration.send_to_destination(
+                destination="test-queue",
+                destination_type=DestinationType.QUEUE,
+                body="test message"
+            )
+            self.assertTrue(result)
+            mock_send.assert_called_once()
+
+    def test_receive_message(self):
+        """Test receiving a message"""
+        # Create a test message and put it in pending
+        msg = ActiveMQMessage(body="test", destination="test-queue")
+        self.integration._pending_messages.put(msg)
+        received = self.integration.receive_message("consumer1", timeout=0.1)
+        self.assertIsNotNone(received)
+        self.assertEqual(received.body, "test")
+
+    def test_receive_message_empty(self):
+        """Test receiving from empty queue"""
+        received = self.integration.receive_message("consumer1", timeout=0.1)
+        self.assertIsNone(received)
+
+    def test_ack_message(self):
+        """Test acknowledging a message"""
+        self.integration.create_consumer("consumer1", "test-queue")
+        self.integration.connection.connection = MagicMock()
+        result = self.integration.ack_message("consumer1", "msg-id-123")
+        self.assertTrue(result)
+
+    def test_ack_message_consumer_not_found(self):
+        """Test acking with non-existent consumer"""
+        result = self.integration.ack_message("non-existent", "msg-id")
+        self.assertFalse(result)
+
+    def test_cleanup(self):
+        """Test cleanup method"""
+        self.integration._running = True
+        self.integration.create_producer("p1", "q1")
+        self.integration.create_consumer("c1", "q1")
+        self.integration.cleanup()
+        self.assertFalse(self.integration._running)
+        self.assertEqual(len(self.integration._producers), 0)
+        self.assertEqual(len(self.integration._consumers), 0)
 
 
 class TestActiveMQIntegrationAsync(unittest.TestCase):

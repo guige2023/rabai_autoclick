@@ -629,7 +629,7 @@ class TestFSxIntegrationNetAppONTAP(unittest.TestCase):
         self.mock_session.client.return_value = self.mock_client
         self.integration = FSxIntegration(boto_session=self.mock_session)
 
-    def test_create_ontap_file_system(self):
+    def test_create_netapp_ontap_file_system(self):
         config = FSxNetAppONTAPConfig(
             storage_capacity_gb=1024,
             subnet_ids=["subnet-1"]
@@ -641,12 +641,12 @@ class TestFSxIntegrationNetAppONTAP(unittest.TestCase):
             }
         }
 
-        result = self.integration.create_ontap_file_system(config)
+        result = self.integration.create_netapp_ontap_file_system(config)
 
         self.assertEqual(result["FileSystemId"], "fs-ontap-1")
         self.assertEqual(result["FileSystemType"], "NETAPP_ONTAP")
 
-    def test_describe_ontap_file_system(self):
+    def test_describe_netapp_ontap_file_system(self):
         self.mock_client.describe_file_systems.return_value = {
             "FileSystems": [{
                 "FileSystemId": "fs-ontap-1",
@@ -654,14 +654,14 @@ class TestFSxIntegrationNetAppONTAP(unittest.TestCase):
             }]
         }
 
-        result = self.integration.describe_ontap_file_system("fs-ontap-1")
+        result = self.integration.describe_netapp_ontap_file_system("fs-ontap-1")
 
         self.assertEqual(result["FileSystems"][0]["FileSystemId"], "fs-ontap-1")
 
-    def test_delete_ontap_file_system(self):
+    def test_delete_netapp_ontap_file_system(self):
         self.mock_client.delete_file_system.return_value = {}
 
-        result = self.integration.delete_ontap_file_system("fs-ontap-1")
+        result = self.integration.delete_netapp_ontap_file_system("fs-ontap-1")
 
         self.assertEqual(result, {})
 
@@ -682,23 +682,23 @@ class TestFSxIntegrationDataRepositoryAssociations(unittest.TestCase):
             data_repository_path="s3://my-bucket/data"
         )
         self.mock_client.create_data_repository_association.return_value = {
-            "Association": {
+            "DataRepositoryAssociation": {
                 "AssociationId": "dra-12345678"
             }
         }
 
         result = self.integration.create_data_repository_association(config)
 
-        self.assertEqual(result["Association"]["AssociationId"], "dra-12345678")
+        self.assertEqual(result["AssociationId"], "dra-12345678")
 
     def test_list_data_repository_associations(self):
-        self.mock_client.list_data_repository_associations.return_value = {
+        self.mock_client.describe_data_repository_associations.return_value = {
             "Associations": [{"AssociationId": "dra-1"}]
         }
 
         result = self.integration.list_data_repository_associations()
 
-        self.assertEqual(len(result), 1)
+        self.assertEqual(len(result.get("Associations", [])), 1)
 
     def test_delete_data_repository_association(self):
         self.mock_client.delete_data_repository_association.return_value = {}
@@ -727,14 +727,14 @@ class TestFSxIntegrationBackups(unittest.TestCase):
 
         result = self.integration.create_backup(config)
 
-        self.assertEqual(result["Backup"]["BackupId"], "backup-12345678")
+        self.assertEqual(result["BackupId"], "backup-12345678")
 
-    def test_get_backup(self):
+    def test_describe_backup(self):
         self.mock_client.describe_backups.return_value = {
             "Backups": [{"BackupId": "backup-12345678"}]
         }
 
-        result = self.integration.get_backup("backup-12345678")
+        result = self.integration.describe_backup("backup-12345678")
 
         self.assertEqual(result["Backups"][0]["BackupId"], "backup-12345678")
 
@@ -745,7 +745,7 @@ class TestFSxIntegrationBackups(unittest.TestCase):
 
         result = self.integration.list_backups()
 
-        self.assertEqual(len(result), 2)
+        self.assertEqual(len(result.get("Backups", [])), 2)
 
     def test_delete_backup(self):
         self.mock_client.delete_backup.return_value = {}
@@ -765,30 +765,40 @@ class TestFSxIntegrationActiveDirectory(unittest.TestCase):
         self.integration = FSxIntegration(boto_session=self.mock_session)
 
     def test_join_active_directory(self):
-        config = ActiveDirectoryConfig(
-            domain_name="example.com",
-            net_bios_name="FSX",
-            dns_ips=["10.0.0.1"]
-        )
-        self.mock_client.create_ad.return_value = {
-            "DirectoryId": "d-123456789"
+        self.mock_client.update_file_system.return_value = {
+            "FileSystem": {"FileSystemId": "fs-12345678"}
         }
 
         result = self.integration.join_active_directory(
             "fs-12345678",
-            config
+            "d-123456789",
+            "example.com"
         )
 
-        self.assertEqual(result["DirectoryId"], "d-123456789")
+        self.assertEqual(result["FileSystem"]["FileSystemId"], "fs-12345678")
 
-    def test_list_active_directories(self):
-        self.mock_client.describe_directories.return_value = {
-            "Directories": [{"DirectoryId": "d-123456789"}]
+    def test_disjoin_active_directory(self):
+        self.mock_client.update_file_system.return_value = {
+            "FileSystem": {"FileSystemId": "fs-12345678"}
         }
 
-        result = self.integration.list_active_directories()
+        result = self.integration.disjoin_active_directory("fs-12345678")
 
-        self.assertEqual(len(result), 1)
+        self.assertEqual(result["FileSystem"]["FileSystemId"], "fs-12345678")
+
+    def test_describe_active_directory(self):
+        self.mock_client.describe_file_systems.return_value = {
+            "FileSystems": [{
+                "FileSystemId": "fs-12345678",
+                "WindowsConfiguration": {
+                    "ActiveDirectoryId": "d-123456789"
+                }
+            }]
+        }
+
+        result = self.integration.describe_active_directory("fs-12345678")
+
+        self.assertEqual(result["FileSystems"][0]["FileSystemId"], "fs-12345678")
 
 
 class TestFSxIntegrationStorageVirtualMachines(unittest.TestCase):
@@ -813,14 +823,14 @@ class TestFSxIntegrationStorageVirtualMachines(unittest.TestCase):
 
         result = self.integration.create_storage_virtual_machine(config)
 
-        self.assertEqual(result["StorageVirtualMachine"]["StorageVirtualMachineId"], "svm-12345678")
+        self.assertEqual(result["StorageVirtualMachineId"], "svm-12345678")
 
-    def test_get_storage_virtual_machine(self):
+    def test_describe_storage_virtual_machine(self):
         self.mock_client.describe_storage_virtual_machines.return_value = {
             "StorageVirtualMachines": [{"StorageVirtualMachineId": "svm-12345678"}]
         }
 
-        result = self.integration.get_storage_virtual_machine("svm-12345678")
+        result = self.integration.describe_storage_virtual_machine("svm-12345678")
 
         self.assertEqual(result["StorageVirtualMachines"][0]["StorageVirtualMachineId"], "svm-12345678")
 
@@ -831,7 +841,7 @@ class TestFSxIntegrationStorageVirtualMachines(unittest.TestCase):
 
         result = self.integration.list_storage_virtual_machines()
 
-        self.assertEqual(len(result), 1)
+        self.assertEqual(len(result.get("StorageVirtualMachines", [])), 1)
 
     def test_delete_storage_virtual_machine(self):
         self.mock_client.delete_storage_virtual_machine.return_value = {}
@@ -864,14 +874,14 @@ class TestFSxIntegrationVolumes(unittest.TestCase):
 
         result = self.integration.create_volume(config)
 
-        self.assertEqual(result["Volume"]["VolumeId"], "vol-12345678")
+        self.assertEqual(result["VolumeId"], "vol-12345678")
 
-    def test_get_volume(self):
+    def test_describe_volume(self):
         self.mock_client.describe_volumes.return_value = {
             "Volumes": [{"VolumeId": "vol-12345678"}]
         }
 
-        result = self.integration.get_volume("vol-12345678")
+        result = self.integration.describe_volume("vol-12345678")
 
         self.assertEqual(result["Volumes"][0]["VolumeId"], "vol-12345678")
 
@@ -882,7 +892,7 @@ class TestFSxIntegrationVolumes(unittest.TestCase):
 
         result = self.integration.list_volumes()
 
-        self.assertEqual(len(result), 1)
+        self.assertEqual(len(result.get("Volumes", [])), 1)
 
     def test_delete_volume(self):
         self.mock_client.delete_volume.return_value = {}
@@ -905,25 +915,86 @@ class TestFSxIntegrationCloudWatch(unittest.TestCase):
         }.get(service, MagicMock())
         self.integration = FSxIntegration(boto_session=self.mock_session)
 
-    def test_enable_cloudwatch_monitoring(self):
+    def test_configure_cloudwatch_monitoring(self):
         config = CloudWatchConfig(
             enable_performance_metrics=True,
             metrics_interval_minutes=5
         )
 
-        result = self.integration.enable_cloudwatch_monitoring(config)
+        result = self.integration.configure_cloudwatch_monitoring(config)
 
-        # Should not raise an exception
-        self.assertTrue(result)
+        self.assertTrue(result.get("performance_metrics_enabled"))
+        self.assertEqual(result.get("metrics_interval_minutes"), 5)
 
-    def test_get_performance_metrics(self):
+    def test_get_cloudwatch_metrics(self):
         self.mock_cw_client.get_metric_statistics.return_value = {
             "Datapoints": [{"Average": 45.5}]
         }
 
-        result = self.integration.get_performance_metrics("fs-12345678")
+        result = self.integration.get_cloudwatch_metrics("fs-12345678")
 
-        self.assertIsNotNone(result)
+        self.assertIn("StorageCapacity", result)
+
+
+class TestFSxIntegrationUtility(unittest.TestCase):
+    """Test FSxIntegration utility methods"""
+
+    def setUp(self):
+        self.mock_session = MagicMock()
+        self.mock_client = MagicMock()
+        self.mock_session.client.return_value = self.mock_client
+        self.integration = FSxIntegration(boto_session=self.mock_session)
+
+    def test_list_file_systems(self):
+        self.mock_client.describe_file_systems.return_value = {
+            "FileSystems": [{"FileSystemId": "fs-1"}]
+        }
+
+        result = self.integration.list_file_systems()
+
+        self.assertEqual(len(result.get("FileSystems", [])), 1)
+
+    def test_get_file_system_health_status(self):
+        self.mock_client.describe_file_systems.return_value = {
+            "FileSystems": [{
+                "FileSystemId": "fs-12345678",
+                "Lifecycle": "AVAILABLE",
+                "HealthCheck": {"Status": "PASS"},
+                "FailureDetails": {}
+            }]
+        }
+
+        result = self.integration.get_file_system_health_status("fs-12345678")
+
+        self.assertEqual(result["file_system_id"], "fs-12345678")
+        self.assertEqual(result["lifecycle"], "AVAILABLE")
+
+    def test_tag_resource(self):
+        self.mock_client.tag_resource.return_value = {}
+
+        result = self.integration.tag_resource(
+            "arn:aws:fsx:us-east-1:123456789012:volume/fs-12345678/vol-12345678",
+            {"env": "prod"}
+        )
+
+        self.assertEqual(result, {})
+
+    def test_untag_resource(self):
+        self.mock_client.untag_resource.return_value = {}
+
+        result = self.integration.untag_resource(
+            "arn:aws:fsx:us-east-1:123456789012:volume/fs-12345678/vol-12345678",
+            ["env"]
+        )
+
+        self.assertEqual(result, {})
+
+    def test_get_config_summary(self):
+        result = self.integration.get_config_summary()
+
+        self.assertIn("region", result)
+        self.assertIn("windows_file_systems", result)
+        self.assertIn("lustre_file_systems", result)
 
 
 if __name__ == "__main__":

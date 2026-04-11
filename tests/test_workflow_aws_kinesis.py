@@ -272,7 +272,6 @@ class TestKinesisIntegration(unittest.TestCase):
 
     def test_init_boto3_unavailable(self):
         """Test initialization raises ImportError when boto3 unavailable"""
-        # Temporarily set BOTO3_AVAILABLE to False
         import src.workflow_aws_kinesis as kinesis_module
         original_value = kinesis_module.BOTO3_AVAILABLE
         kinesis_module.BOTO3_AVAILABLE = False
@@ -284,6 +283,10 @@ class TestKinesisIntegration(unittest.TestCase):
         # Restore
         kinesis_module.BOTO3_AVAILABLE = original_value
         kinesis_module.boto3 = mock_boto3
+
+    # ========================================================================
+    # STREAM MANAGEMENT TESTS
+    # ========================================================================
 
     def test_create_stream(self):
         """Test creating a Kinesis stream"""
@@ -408,6 +411,137 @@ class TestKinesisIntegration(unittest.TestCase):
         self.mock_kinesis_client.delete_stream.assert_called_once_with(StreamName="test-stream")
         self.assertNotIn("test-stream", self.integration._stream_cache)
 
+    def test_update_stream_mode(self):
+        """Test updating stream mode"""
+        self.mock_kinesis_client.update_stream_mode.return_value = {}
+
+        result = self.integration.update_stream_mode("test-stream", "ON_DEMAND")
+
+        self.mock_kinesis_client.update_stream_mode.assert_called_once_with(
+            StreamName="test-stream",
+            StreamModeDetails={"StreamMode": "ON_DEMAND"}
+        )
+
+    def test_wait_for_stream_active(self):
+        """Test waiting for stream to become active"""
+        self.mock_kinesis_client.describe_stream.return_value = {
+            "StreamDescription": {
+                "StreamName": "test-stream",
+                "StreamARN": "arn:aws:kinesis:us-east-1:123456789:stream/test-stream",
+                "StreamStatus": "ACTIVE",
+                "Shards": []
+            }
+        }
+
+        result = self.integration.wait_for_stream_active("test-stream", timeout=10)
+
+        self.assertTrue(result)
+
+    def test_wait_for_stream_active_timeout(self):
+        """Test wait_for_stream_active timeout"""
+        self.mock_kinesis_client.describe_stream.return_value = {
+            "StreamDescription": {
+                "StreamName": "test-stream",
+                "StreamARN": "arn:aws:kinesis:us-east-1:123456789:stream/test-stream",
+                "StreamStatus": "CREATING",
+                "Shards": []
+            }
+        }
+
+        result = self.integration.wait_for_stream_active("test-stream", timeout=2)
+
+        self.assertFalse(result)
+
+    # ========================================================================
+    # SHARD MANAGEMENT TESTS
+    # ========================================================================
+
+    def test_get_shards(self):
+        """Test getting shards for a stream"""
+        self.mock_kinesis_client.describe_stream.return_value = {
+            "StreamDescription": {
+                "StreamName": "test-stream",
+                "StreamARN": "arn:aws:kinesis:us-east-1:123456789:stream/test-stream",
+                "StreamStatus": "ACTIVE",
+                "Shards": [
+                    {
+                        "ShardId": "shard-1",
+                        "HashKeyRange": {"StartingHashKey": "0", "EndingHashKey": "100"},
+                        "SequenceNumberRange": {"StartingSequenceNumber": "001"}
+                    },
+                    {
+                        "ShardId": "shard-2",
+                        "HashKeyRange": {"StartingHashKey": "100", "EndingHashKey": "200"},
+                        "SequenceNumberRange": {"StartingSequenceNumber": "002"}
+                    }
+                ]
+            }
+        }
+
+        result = self.integration.get_shards("test-stream")
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["ShardId"], "shard-1")
+
+    def test_get_shard_iterator(self):
+        """Test getting a shard iterator"""
+        self.mock_kinesis_client.get_shard_iterator.return_value = {
+            "ShardIterator": "iterator-value"
+        }
+
+        result = self.integration.get_shard_iterator(
+            stream_name="test-stream",
+            shard_id="shard-id-1",
+            iterator_type=ShardIteratorType.LATEST
+        )
+
+        self.assertEqual(result, "iterator-value")
+        self.mock_kinesis_client.get_shard_iterator.assert_called_once()
+
+    def test_split_shard(self):
+        """Test splitting a shard"""
+        self.mock_kinesis_client.split_shard.return_value = {}
+        self.mock_kinesis_client.describe_stream.return_value = {
+            "StreamDescription": {
+                "StreamName": "test-stream",
+                "StreamARN": "arn:aws:kinesis:us-east-1:123456789:stream/test-stream",
+                "StreamStatus": "ACTIVE",
+                "Shards": []
+            }
+        }
+
+        result = self.integration.split_shard("test-stream", "shard-1", "50")
+
+        self.mock_kinesis_client.split_shard.assert_called_once_with(
+            StreamName="test-stream",
+            ShardToSplit="shard-1",
+            NewStartingHashKey="50"
+        )
+
+    def test_mergeate_shards(self):
+        """Test merging shards"""
+        self.mock_kinesis_client.mergeate_shards.return_value = {}
+        self.mock_kinesis_client.describe_stream.return_value = {
+            "StreamDescription": {
+                "StreamName": "test-stream",
+                "StreamARN": "arn:aws:kinesis:us-east-1:123456789:stream/test-stream",
+                "StreamStatus": "ACTIVE",
+                "Shards": []
+            }
+        }
+
+        result = self.integration.mergeate_shards("test-stream", "shard-1", "shard-2")
+
+        self.mock_kinesis_client.mergeate_shards.assert_called_once_with(
+            StreamName="test-stream",
+            ShardToMerge="shard-1",
+            AdjacentShardToMerge="shard-2"
+        )
+
+    # ========================================================================
+    # DATA OPERATIONS TESTS
+    # ========================================================================
+
     def test_put_record(self):
         """Test putting a record"""
         self.mock_kinesis_client.put_record.return_value = {
@@ -479,21 +613,6 @@ class TestKinesisIntegration(unittest.TestCase):
         self.assertEqual(result["FailedRecordCount"], 0)
         self.assertEqual(len(result["Records"]), 2)
 
-    def test_get_shard_iterator(self):
-        """Test getting a shard iterator"""
-        self.mock_kinesis_client.get_shard_iterator.return_value = {
-            "ShardIterator": "iterator-value"
-        }
-
-        result = self.integration.get_shard_iterator(
-            stream_name="test-stream",
-            shard_id="shard-id-1",
-            iterator_type=ShardIteratorType.LATEST
-        )
-
-        self.assertEqual(result, "iterator-value")
-        self.mock_kinesis_client.get_shard_iterator.assert_called_once()
-
     def test_get_records(self):
         """Test getting records from a shard"""
         self.mock_kinesis_client.get_records.return_value = {
@@ -521,9 +640,90 @@ class TestKinesisIntegration(unittest.TestCase):
         self.assertEqual(len(result["Records"]), 2)
         self.assertEqual(result["NextShardIterator"], "next-iterator")
 
+    def test_read_stream(self):
+        """Test reading records from a stream"""
+        self.mock_kinesis_client.get_shard_iterator.return_value = {
+            "ShardIterator": "iterator-1"
+        }
+        self.mock_kinesis_client.get_records.side_effect = [
+            {
+                "Records": [{"Data": b"data1", "SequenceNumber": "001"}],
+                "NextShardIterator": "iterator-2",
+                "MillisBehindLatest": 1000
+            },
+            {
+                "Records": [],
+                "NextShardIterator": None,
+                "MillisBehindLatest": 0
+            }
+        ]
+
+        result = self.integration.read_stream(
+            stream_name="test-stream",
+            shard_id="shard-1"
+        )
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["Data"], b"data1")
+
+    def test_get_record_decoder_bytes(self):
+        """Test decoding record with bytes data"""
+        record = {"Data": b'{"key": "value"}'}
+        result = self.integration.get_record_decoder(record)
+        self.assertEqual(result, {"key": "value"})
+
+    def test_get_record_decoder_string(self):
+        """Test decoding record with string data"""
+        record = {"Data": "plain string"}
+        result = self.integration.get_record_decoder(record)
+        self.assertEqual(result, "plain string")
+
+    # ========================================================================
+    # ENHANCED FAN-OUT (CONSUMERS) TESTS
+    # ========================================================================
+
+    def test_register_consumer(self):
+        """Test registering a consumer"""
+        self.mock_kinesis_client.register_stream_consumer.return_value = {
+            "Consumer": {
+                "ConsumerName": "my-consumer",
+                "ConsumerARN": "arn:aws:kinesis:us-east-1:123456789:consumer/my-stream:my-consumer",
+                "ConsumerStatus": "ACTIVE"
+            }
+        }
+
+        result = self.integration.register_consumer(
+            stream_arn="arn:aws:kinesis:us-east-1:123456789:stream/my-stream",
+            consumer_name="my-consumer"
+        )
+
+        self.assertEqual(result.consumer_name, "my-consumer")
+        self.assertEqual(result.consumer_arn, "arn:aws:kinesis:us-east-1:123456789:consumer/my-stream:my-consumer")
+
+    def test_list_consumers(self):
+        """Test listing consumers"""
+        mock_paginator = MagicMock()
+        self.mock_kinesis_client.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = [
+            {"Consumers": [{"ConsumerName": "consumer1"}, {"ConsumerName": "consumer2"}]}
+        ]
+
+        result = self.integration.list_consumers(stream_name="test-stream")
+
+        self.assertEqual(len(result), 2)
+        self.mock_kinesis_client.describe_stream.assert_called_once()
+
     def test_deregister_consumer(self):
         """Test deregistering a consumer"""
         self.mock_kinesis_client.deregister_stream_consumer.return_value = {}
+        self.mock_kinesis_client.describe_stream.return_value = {
+            "StreamDescription": {
+                "StreamName": "test-stream",
+                "StreamARN": "arn:aws:kinesis:us-east-1:123456789:stream/test-stream",
+                "StreamStatus": "ACTIVE",
+                "Shards": []
+            }
+        }
 
         result = self.integration.deregister_consumer(
             consumer_name="my-consumer",
@@ -531,6 +731,113 @@ class TestKinesisIntegration(unittest.TestCase):
         )
 
         self.mock_kinesis_client.deregister_stream_consumer.assert_called_once()
+
+    # ========================================================================
+    # KINESIS DATA ANALYTICS TESTS
+    # ========================================================================
+
+    def test_create_application(self):
+        """Test creating an analytics application"""
+        self.mock_analytics_client.create_application.return_value = {
+            "ApplicationDetail": {
+                "ApplicationARN": "arn:aws:kinesisanalytics:us-east-1:123456789:application/my-app"
+            }
+        }
+
+        config = AnalyticsConfig(name="my-app", runtime_environment="FLINK-1_11")
+        result = self.integration.create_application(config)
+
+        self.assertIn("ApplicationDetail", result)
+        self.mock_analytics_client.create_application.assert_called_once()
+
+    def test_describe_application(self):
+        """Test describing an analytics application"""
+        self.mock_analytics_client.describe_application.return_value = {
+            "ApplicationDetail": {
+                "ApplicationName": "my-app",
+                "ApplicationARN": "arn:aws:kinesisanalytics:us-east-1:123456789:application/my-app"
+            }
+        }
+
+        result = self.integration.describe_application("my-app")
+
+        self.assertEqual(result["ApplicationName"], "my-app")
+
+    def test_list_applications(self):
+        """Test listing analytics applications"""
+        mock_paginator = MagicMock()
+        self.mock_analytics_client.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = [
+            {"ApplicationSummaries": [{"ApplicationName": "app1"}, {"ApplicationName": "app2"}]}
+        ]
+
+        result = self.integration.list_applications()
+
+        self.assertEqual(len(result), 2)
+
+    def test_delete_application(self):
+        """Test deleting an analytics application"""
+        self.mock_analytics_client.delete_application.return_value = {}
+
+        result = self.integration.delete_application("my-app")
+
+        self.mock_analytics_client.delete_application.assert_called_once_with(ApplicationName="my-app")
+
+    def test_start_application(self):
+        """Test starting an analytics application"""
+        self.mock_analytics_client.start_application.return_value = {}
+
+        result = self.integration.start_application("my-app")
+
+        self.mock_analytics_client.start_application.assert_called_once_with(ApplicationName="my-app")
+
+    def test_stop_application(self):
+        """Test stopping an analytics application"""
+        self.mock_analytics_client.stop_application.return_value = {}
+
+        result = self.integration.stop_application("my-app")
+
+        self.mock_analytics_client.stop_application.assert_called_once_with(ApplicationName="my-app")
+
+    # ========================================================================
+    # KINESIS DATA FIREHOSE TESTS
+    # ========================================================================
+
+    def test_create_firehose_delivery_stream(self):
+        """Test creating a Firehose delivery stream"""
+        self.mock_firehose_client.create_delivery_stream.return_value = {
+            "DeliveryStreamARN": "arn:aws:firehose:us-east-1:123456789:deliverystream/my-firehose"
+        }
+
+        config = FirehoseConfig(name="my-firehose")
+        result = self.integration.create_firehose_delivery_stream(config)
+
+        self.assertEqual(result, "arn:aws:firehose:us-east-1:123456789:deliverystream/my-firehose")
+
+    def test_describe_firehose_delivery_stream(self):
+        """Test describing a Firehose delivery stream"""
+        self.mock_firehose_client.describe_delivery_stream.return_value = {
+            "DeliveryStreamDescription": {
+                "DeliveryStreamName": "my-firehose",
+                "DeliveryStreamARN": "arn:aws:firehose:us-east-1:123456789:deliverystream/my-firehose"
+            }
+        }
+
+        result = self.integration.describe_firehose_delivery_stream("my-firehose")
+
+        self.assertEqual(result["DeliveryStreamName"], "my-firehose")
+
+    def test_list_firehose_delivery_streams(self):
+        """Test listing Firehose delivery streams"""
+        mock_paginator = MagicMock()
+        self.mock_firehose_client.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = [
+            {"DeliveryStreamNames": ["firehose1", "firehose2"]}
+        ]
+
+        result = self.integration.list_firehose_delivery_streams()
+
+        self.assertEqual(result, ["firehose1", "firehose2"])
 
     def test_delete_firehose_delivery_stream(self):
         """Test deleting a Firehose delivery stream"""
@@ -542,6 +849,66 @@ class TestKinesisIntegration(unittest.TestCase):
             DeliveryStreamName="my-firehose"
         )
 
+    def test_put_to_firehose(self):
+        """Test putting a record to Firehose"""
+        self.mock_firehose_client.put_record.return_value = {"RecordId": "record-1"}
+
+        result = self.integration.put_to_firehose("my-firehose", {"key": "value"})
+
+        self.assertEqual(result["RecordId"], "record-1")
+
+    def test_update_firehose_destination(self):
+        """Test updating Firehose destination"""
+        self.mock_firehose_client.update_destination.return_value = {}
+
+        result = self.integration.update_firehose_destination(
+            delivery_stream_name="my-firehose",
+            s3_destination_arn="arn:aws:s3:::my-bucket",
+            role_arn="arn:aws:iam::123456789:role/my-role"
+        )
+
+        self.mock_firehose_client.update_destination.assert_called_once()
+
+    # ========================================================================
+    # KINESIS VIDEO STREAMS TESTS
+    # ========================================================================
+
+    def test_create_video_stream(self):
+        """Test creating a video stream"""
+        self.mock_video_client.create_stream.return_value = {
+            "StreamARN": "arn:aws:kinesisvideo:us-east-1:123456789:stream/my-video-stream"
+        }
+
+        config = VideoStreamConfig(name="my-video-stream")
+        result = self.integration.create_video_stream(config)
+
+        self.assertEqual(result, "arn:aws:kinesisvideo:us-east-1:123456789:stream/my-video-stream")
+
+    def test_describe_video_stream(self):
+        """Test describing a video stream"""
+        self.mock_video_client.describe_stream.return_value = {
+            "StreamInfo": {
+                "StreamName": "my-video-stream",
+                "StreamARN": "arn:aws:kinesisvideo:us-east-1:123456789:stream/my-video-stream"
+            }
+        }
+
+        result = self.integration.describe_video_stream(stream_name="my-video-stream")
+
+        self.assertEqual(result["StreamName"], "my-video-stream")
+
+    def test_list_video_streams(self):
+        """Test listing video streams"""
+        mock_paginator = MagicMock()
+        self.mock_video_client.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = [
+            {"StreamInfoList": [{"StreamName": "video1"}, {"StreamName": "video2"}]}
+        ]
+
+        result = self.integration.list_video_streams()
+
+        self.assertEqual(len(result), 2)
+
     def test_delete_video_stream(self):
         """Test deleting a Kinesis Video Stream"""
         self.mock_video_client.delete_stream.return_value = {}
@@ -549,6 +916,127 @@ class TestKinesisIntegration(unittest.TestCase):
         result = self.integration.delete_video_stream("my-video-stream")
 
         self.mock_video_client.delete_stream.assert_called_once()
+
+    def test_get_video_streaming_endpoint(self):
+        """Test getting video streaming endpoint"""
+        self.mock_video_client.get_data_endpoint.return_value = {
+            "DataEndpoint": "https://video-endpoint.example.com"
+        }
+
+        result = self.integration.get_video_streaming_endpoint(stream_name="my-video-stream")
+
+        self.assertEqual(result, "https://video-endpoint.example.com")
+
+    def test_get_hls_streaming_session_url(self):
+        """Test getting HLS streaming session URL"""
+        self.mock_video_client.get_hls_streaming_session_url.return_value = {
+            "HLSStreamingSessionURL": "https://example.com/hls/stream.m3u8"
+        }
+
+        result = self.integration.get_hls_streaming_session_url(stream_name="my-video-stream")
+
+        self.assertEqual(result, "https://example.com/hls/stream.m3u8")
+
+    # ========================================================================
+    # LAMBDA EVENT SOURCE MAPPING TESTS
+    # ========================================================================
+
+    def test_create_event_source_mapping(self):
+        """Test creating Lambda event source mapping"""
+        self.mock_lambda_client.create_event_source_mapping.return_value = {
+            "UUID": "test-uuid-123"
+        }
+
+        config = LambdaEventSourceMappingConfig(
+            function_name="my-function",
+            stream_arn="arn:aws:kinesis:us-east-1:123456789:stream/my-stream"
+        )
+        result = self.integration.create_event_source_mapping(config)
+
+        self.assertEqual(result, "test-uuid-123")
+
+    def test_list_event_source_mappings(self):
+        """Test listing Lambda event source mappings"""
+        self.mock_lambda_client.list_event_source_mappings.return_value = {
+            "EventSourceMappings": [{"UUID": "uuid-1"}, {"UUID": "uuid-2"}]
+        }
+
+        result = self.integration.list_event_source_mappings(stream_arn="arn:aws:kinesis:us-east-1:123456789:stream/my-stream")
+
+        self.assertEqual(len(result), 2)
+
+    def test_get_event_source_mapping(self):
+        """Test getting a Lambda event source mapping"""
+        self.mock_lambda_client.get_event_source_mapping.return_value = {
+            "UUID": "test-uuid-123",
+            "FunctionName": "my-function"
+        }
+
+        result = self.integration.get_event_source_mapping("test-uuid-123")
+
+        self.assertEqual(result["UUID"], "test-uuid-123")
+
+    def test_update_event_source_mapping(self):
+        """Test updating Lambda event source mapping"""
+        self.mock_lambda_client.update_event_source_mapping.return_value = {
+            "UUID": "test-uuid-123",
+            "BatchSize": 500
+        }
+
+        result = self.integration.update_event_source_mapping("test-uuid-123", batch_size=500)
+
+        self.assertEqual(result["BatchSize"], 500)
+
+    def test_delete_event_source_mapping(self):
+        """Test deleting Lambda event source mapping"""
+        self.mock_lambda_client.delete_event_source_mapping.return_value = {}
+
+        result = self.integration.delete_event_source_mapping("test-uuid-123")
+
+        self.mock_lambda_client.delete_event_source_mapping.assert_called_once_with(UUID="test-uuid-123")
+
+    # ========================================================================
+    # SERVER-SIDE ENCRYPTION TESTS
+    # ========================================================================
+
+    def test_enable_stream_encryption(self):
+        """Test enabling stream encryption"""
+        self.mock_kinesis_client.start_stream_encryption.return_value = {}
+
+        result = self.integration.enable_stream_encryption("test-stream", "my-key-id")
+
+        self.mock_kinesis_client.start_stream_encryption.assert_called_once_with(
+            StreamName="test-stream",
+            EncryptionType="KMS",
+            KeyId="my-key-id"
+        )
+
+    def test_disable_stream_encryption(self):
+        """Test disabling stream encryption"""
+        self.mock_kinesis_client.stop_stream_encryption.return_value = {}
+
+        result = self.integration.disable_stream_encryption("test-stream")
+
+        self.mock_kinesis_client.stop_stream_encryption.assert_called_once_with(
+            StreamName="test-stream",
+            EncryptionType="KMS"
+        )
+
+    def test_describe_stream_encryption(self):
+        """Test describing stream encryption"""
+        self.mock_kinesis_client.describe_stream_summary.return_value = {
+            "StreamDescriptionSummary": {
+                "EncryptionType": "KMS"
+            }
+        }
+
+        result = self.integration.describe_stream_encryption("test-stream")
+
+        self.assertEqual(result, "KMS")
+
+    # ========================================================================
+    # CLOUDWATCH METRICS TESTS
+    # ========================================================================
 
     def test_flush_metrics(self):
         """Test flushing metrics to CloudWatch"""
@@ -561,6 +1049,126 @@ class TestKinesisIntegration(unittest.TestCase):
 
         self.mock_cloudwatch_client.put_metric_data.assert_called_once()
         self.assertEqual(len(self.integration._metrics_buffer), 0)
+
+    def test_get_stream_metrics(self):
+        """Test getting stream metrics"""
+        self.mock_cloudwatch_client.get_metric_statistics.return_value = {
+            "Datapoints": [{"Sum": 100, "Average": 50}]
+        }
+
+        result = self.integration.get_stream_metrics(
+            stream_name="test-stream",
+            start_time=datetime(2024, 1, 1),
+            end_time=datetime(2024, 1, 2)
+        )
+
+        self.assertIn("IncomingRecords", result)
+
+    def test_get_consumer_metrics(self):
+        """Test getting consumer metrics"""
+        self.mock_cloudwatch_client.get_metric_statistics.return_value = {
+            "Datapoints": [{"Sum": 50}]
+        }
+
+        result = self.integration.get_consumer_metrics(
+            consumer_arn="arn:aws:kinesis:us-east-1:123456789:consumer/my-stream:my-consumer",
+            start_time=datetime(2024, 1, 1),
+            end_time=datetime(2024, 1, 2)
+        )
+
+        self.assertIn("IncomingRecords", result)
+
+    def test_put_custom_metric(self):
+        """Test putting custom metric"""
+        self.integration.put_custom_metric("CustomMetric", 42.0, "Count")
+
+        self.assertEqual(len(self.integration._metrics_buffer), 1)
+        self.assertEqual(self.integration._metrics_buffer[0]["MetricName"], "CustomMetric")
+
+    # ========================================================================
+    # UTILITY METHODS TESTS
+    # ========================================================================
+
+    def test_get_stream_arn(self):
+        """Test getting stream ARN"""
+        self.mock_kinesis_client.describe_stream.return_value = {
+            "StreamDescription": {
+                "StreamName": "test-stream",
+                "StreamARN": "arn:aws:kinesis:us-east-1:123456789:stream/test-stream",
+                "StreamStatus": "ACTIVE",
+                "Shards": []
+            }
+        }
+
+        result = self.integration.get_stream_arn("test-stream")
+
+        self.assertEqual(result, "arn:aws:kinesis:us-east-1:123456789:stream/test-stream")
+
+    def test_get_consumer_arn(self):
+        """Test getting consumer ARN"""
+        mock_paginator = MagicMock()
+        self.mock_kinesis_client.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = [
+            {"Consumers": [
+                {"ConsumerName": "my-consumer", "ConsumerARN": "arn:aws:kinesis:consumer/my-consumer"}
+            ]}
+        ]
+        self.mock_kinesis_client.describe_stream.return_value = {
+            "StreamDescription": {
+                "StreamName": "test-stream",
+                "StreamARN": "arn:aws:kinesis:us-east-1:123456789:stream/test-stream",
+                "StreamStatus": "ACTIVE",
+                "Shards": []
+            }
+        }
+
+        result = self.integration.get_consumer_arn("test-stream", "my-consumer")
+
+        self.assertEqual(result, "arn:aws:kinesis:consumer/my-consumer")
+
+    def test_hash_key_to_partition_key(self):
+        """Test hash key to partition key mapping"""
+        partition_keys = ["pk1", "pk2", "pk3"]
+        result = self.integration.hash_key_to_partition_key("50", partition_keys)
+        self.assertIsInstance(result, str)
+
+    def test_compute_sequence_number(self):
+        """Test computing sequence number"""
+        result = self.integration.compute_sequence_number("test-data")
+        self.assertEqual(len(result), 32)
+        self.assertTrue(result.isdigit())
+
+    def test_health_check(self):
+        """Test health check"""
+        mock_paginator = MagicMock()
+        self.mock_kinesis_client.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = [{"StreamNames": ["stream1"]}]
+        self.mock_firehose_client.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = [{"DeliveryStreamNames": ["firehose1"]}]
+        self.mock_analytics_client.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = [{"ApplicationSummaries": []}]
+        self.mock_video_client.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = [{"StreamInfoList": []}]
+        self.mock_cloudwatch_client.list_metrics.return_value = {}
+
+        result = self.integration.health_check()
+
+        self.assertTrue(result["kinesis"])
+        self.assertTrue(result["firehose"])
+        self.assertTrue(result["healthy"])
+
+    def test_close(self):
+        """Test close method"""
+        self.integration._metrics_buffer = [{"MetricName": "Test"}]
+        self.mock_cloudwatch_client.put_metric_data.return_value = {}
+
+        self.integration.close()
+
+        self.assertEqual(len(self.integration._metrics_buffer), 0)
+
+    # ========================================================================
+    # INTERNAL METHODS TESTS
+    # ========================================================================
 
     def test_serialize_data_string(self):
         """Test serializing string data"""

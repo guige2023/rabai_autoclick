@@ -607,6 +607,142 @@ class TestCostExplorerIntegration(unittest.TestCase):
             self.assertTrue(result["success"])
             self.assertEqual(len(result["cost_categories"]), 1)
 
+    def test_get_cost_by_cost_category(self):
+        """Test get_cost_by_cost_category method"""
+        with patch('src.workflow_aws_ce.boto3.client', return_value=self.mock_ce_client):
+            self.mock_ce_client.get_cost_and_usage.return_value = {
+                "ResultsByTime": [
+                    {
+                        "TimePeriod": {"Start": "2024-01-01", "End": "2024-01-31"},
+                        "Groups": [
+                            {
+                                "Keys": ["Production"],
+                                "Metrics": {
+                                    "BlendedCost": {"Amount": "1000.00", "Unit": "USD"},
+                                    "AmortizedCost": {"Amount": "950.00", "Unit": "USD"}
+                                }
+                            }
+                        ],
+                        "Total": {}
+                    }
+                ]
+            }
+
+            config = CostExplorerConfig()
+            integration = CostExplorerIntegration(config=config)
+            integration._client = self.mock_ce_client
+
+            result = integration.get_cost_by_cost_category("Environment", "2024-01-01", "2024-01-31")
+
+            self.assertTrue(result["success"])
+            self.assertIn("category_costs", result)
+
+    def test_generate_visualization_data(self):
+        """Test generate_visualization_data method"""
+        with patch('src.workflow_aws_ce.boto3.client', return_value=self.mock_ce_client):
+            self.mock_ce_client.get_cost_and_usage.return_value = {
+                "ResultsByTime": [
+                    {
+                        "TimePeriod": {"Start": "2024-01-01", "End": "2024-01-02"},
+                        "Groups": [
+                            {
+                                "Keys": ["Amazon EC2"],
+                                "Metrics": {
+                                    "BlendedCost": {"Amount": "100.50", "Unit": "USD"},
+                                    "UsageQuantity": {"Amount": "50", "Unit": "Hrs"}
+                                }
+                            }
+                        ],
+                        "Total": {}
+                    }
+                ]
+            }
+
+            config = CostExplorerConfig()
+            integration = CostExplorerIntegration(config=config)
+            integration._client = self.mock_ce_client
+
+            result = integration.generate_visualization_data("2024-01-01", "2024-01-31")
+
+            self.assertTrue(result["success"])
+            self.assertIn("visualization", result)
+            self.assertIn("summary", result["visualization"])
+            self.assertIn("time_series", result["visualization"])
+
+    def test_get_organization_cost_data(self):
+        """Test get_organization_cost_data method"""
+        with patch('src.workflow_aws_ce.boto3.client', return_value=self.mock_ce_client):
+            self.mock_ce_client.get_cost_and_usage.return_value = {
+                "ResultsByTime": [
+                    {
+                        "TimePeriod": {"Start": "2024-01-01", "End": "2024-01-31"},
+                        "Groups": [
+                            {
+                                "Keys": ["123456789012"],
+                                "Metrics": {
+                                    "BlendedCost": {"Amount": "500.00", "Unit": "USD"},
+                                    "UnblendedCost": {"Amount": "490.00", "Unit": "USD"}
+                                }
+                            }
+                        ],
+                        "Total": {}
+                    }
+                ]
+            }
+            self.mock_org_client.get_paginator.return_value.paginate.return_value = [
+                {"Accounts": [{"Id": "123456789012", "Name": "TestAccount", "Status": "ACTIVE"}]}
+            ]
+
+            config = CostExplorerConfig()
+            integration = CostExplorerIntegration(config=config)
+            integration._client = self.mock_ce_client
+            integration._org_client = self.mock_org_client
+
+            result = integration.get_organization_cost_data("2024-01-01", "2024-01-31")
+
+            self.assertTrue(result["success"])
+            self.assertIn("organization_accounts", result)
+            self.assertIn("cost_by_account", result)
+
+    def test_build_filter_expression(self):
+        """Test _build_filter_expression method"""
+        config = CostExplorerConfig()
+        integration = CostExplorerIntegration(config=config)
+
+        # Test simple filter
+        simple_filter = integration._build_filter_expression({"Service": "Amazon EC2"})
+        self.assertEqual(simple_filter, {"Dimensions": {"Key": "Service", "Values": ["Amazon EC2"]}})
+
+        # Test list filter (OR conditions)
+        list_filter = integration._build_filter_expression({"Service": ["Amazon EC2", "Amazon RDS"]})
+        self.assertIn("Or", list_filter)
+
+        # Test multiple filters (AND conditions)
+        multi_filter = integration._build_filter_expression({
+            "Service": "Amazon EC2",
+            "Region": "us-east-1"
+        })
+        self.assertIn("And", multi_filter)
+
+    def test_close_and_context_manager(self):
+        """Test close method and context manager"""
+        config = CostExplorerConfig()
+        integration = CostExplorerIntegration(config=config)
+        integration._client = self.mock_ce_client
+        integration._org_client = self.mock_org_client
+
+        # Test close
+        integration.close()
+        self.assertIsNone(integration._client)
+        self.assertIsNone(integration._org_client)
+
+        # Test context manager
+        with CostExplorerIntegration(config=config) as ce:
+            ce._client = self.mock_ce_client
+            ce._org_client = self.mock_org_client
+        # After exit, clients should be closed
+        self.assertIsNone(ce._client)
+
 
 if __name__ == '__main__':
     unittest.main()

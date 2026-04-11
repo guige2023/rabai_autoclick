@@ -39,14 +39,11 @@ sys.modules['botocore'] = types.ModuleType('botocore')
 sys.modules['botocore.exceptions'] = mock_boto3_exceptions
 
 # Patch dataclasses.field BEFORE importing the module
-# This is crucial because the module uses `from dataclasses import field`
 import dataclasses as dc_module
 dc_module.field = _patched_field
-
-# Also need to patch sys.modules['dataclasses'].field
 sys.modules['dataclasses'].field = _patched_field
 
-# Now import the module - the patch should be in effect
+# Now import the module
 try:
     import src.workflow_aws_amplify as _amplify_module
     _amplify_import_error = None
@@ -94,10 +91,10 @@ class TestBranchFramework(unittest.TestCase):
     def test_framework_values(self):
         if not _module_imported:
             self.skipTest("Module could not be imported due to dataclass issue")
-        self.assertEqual(BranchFramework.REACT.value, "React")
+        self.assertEqual(BranchFramework.React.value, "React")
         self.assertEqual(BranchFramework.NEXT_JS.value, "NEXT_JS")
-        self.assertEqual(BranchFramework.ANGULAR.value, "Angular")
-        self.assertEqual(BranchFramework.VUE.value, "Vue")
+        self.assertEqual(BranchFramework.Angular.value, "Angular")
+        self.assertEqual(BranchFramework.Vue.value, "Vue")
 
 
 class TestBuildStatus(unittest.TestCase):
@@ -237,11 +234,11 @@ class TestBranchConfig(unittest.TestCase):
         config = BranchConfig(
             branch_name="feature",
             description="Feature branch",
-            framework=BranchFramework.REACT,
+            framework="React",
             enable_notification=True
         )
         self.assertEqual(config.branch_name, "feature")
-        self.assertEqual(config.framework, BranchFramework.REACT)
+        self.assertEqual(config.framework, "React")
 
 
 class TestDomainConfig(unittest.TestCase):
@@ -325,7 +322,7 @@ class TestAmplifyIntegration(unittest.TestCase):
         mock_response = {
             "app": {
                 "appId": "app-123",
-                "appName": "test-app",
+                "name": "test-app",
                 "arn": "arn:aws:amplify:us-east-1:123:apps/app-123",
                 "description": "Test app"
             }
@@ -335,7 +332,8 @@ class TestAmplifyIntegration(unittest.TestCase):
         config = AppConfig(name="test-app", description="Test app")
         result = self.integration.create_app(config)
         
-        self.assertEqual(result["app"]["appName"], "test-app")
+        self.assertEqual(result["name"], "test-app")
+        self.assertEqual(result["appId"], "app-123")
         self.mock_amplify_client.create_app.assert_called_once()
 
     def test_get_app(self):
@@ -345,7 +343,7 @@ class TestAmplifyIntegration(unittest.TestCase):
         mock_response = {
             "app": {
                 "appId": "app-123",
-                "appName": "test-app",
+                "name": "test-app",
                 "arn": "arn:aws:amplify:us-east-1:123:apps/app-123"
             }
         }
@@ -353,7 +351,8 @@ class TestAmplifyIntegration(unittest.TestCase):
         
         result = self.integration.get_app("app-123")
         
-        self.assertEqual(result["app"]["appId"], "app-123")
+        self.assertEqual(result["appId"], "app-123")
+        self.assertEqual(result["name"], "test-app")
 
     def test_list_apps(self):
         """Test listing Amplify apps"""
@@ -361,15 +360,20 @@ class TestAmplifyIntegration(unittest.TestCase):
             self.skipTest("Module could not be imported due to dataclass issue")
         mock_response = {
             "apps": [
-                {"appId": "app-1", "appName": "app-one"},
-                {"appId": "app-2", "appName": "app-two"}
+                {"appId": "app-1", "name": "app-one"},
+                {"appId": "app-2", "name": "app-two"}
             ]
         }
-        self.mock_amplify_client.list_apps.return_value = mock_response
+        
+        # Mock paginator
+        mock_paginator = MagicMock()
+        mock_paginator.paginate.return_value = [mock_response]
+        self.mock_amplify_client.get_paginator.return_value = mock_paginator
         
         result = self.integration.list_apps()
         
-        self.assertEqual(len(result["apps"]), 2)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["appId"], "app-1")
 
     def test_delete_app(self):
         """Test deleting an Amplify app"""
@@ -389,15 +393,16 @@ class TestAmplifyIntegration(unittest.TestCase):
         mock_response = {
             "app": {
                 "appId": "app-123",
-                "appName": "updated-app",
+                "name": "updated-app",
                 "description": "Updated description"
             }
         }
         self.mock_amplify_client.update_app.return_value = mock_response
         
-        result = self.integration.update_app("app-123", name="updated-app")
+        config = AppConfig(name="updated-app", description="Updated description")
+        result = self.integration.update_app("app-123", config)
         
-        self.assertEqual(result["app"]["appName"], "updated-app")
+        self.assertEqual(result["name"], "updated-app")
 
     def test_create_branch(self):
         """Test creating a branch"""
@@ -415,7 +420,8 @@ class TestAmplifyIntegration(unittest.TestCase):
         config = BranchConfig(branch_name="main")
         result = self.integration.create_branch("app-123", config)
         
-        self.assertEqual(result["branch"]["branchName"], "main")
+        self.assertEqual(result["branchName"], "main")
+        self.assertEqual(result["appId"], "app-123")
 
     def test_get_branch(self):
         """Test getting a branch"""
@@ -432,7 +438,8 @@ class TestAmplifyIntegration(unittest.TestCase):
         
         result = self.integration.get_branch("app-123", "main")
         
-        self.assertEqual(result["branch"]["branchName"], "main")
+        self.assertEqual(result["branchName"], "main")
+        self.assertEqual(result["status"], "AVAILABLE")
 
     def test_list_branches(self):
         """Test listing branches"""
@@ -448,7 +455,8 @@ class TestAmplifyIntegration(unittest.TestCase):
         
         result = self.integration.list_branches("app-123")
         
-        self.assertEqual(len(result["branches"]), 2)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["branchName"], "main")
 
     def test_delete_branch(self):
         """Test deleting a branch"""
@@ -460,32 +468,21 @@ class TestAmplifyIntegration(unittest.TestCase):
         
         self.assertTrue(result)
 
-    def test_create_deployment(self):
-        """Test creating a deployment"""
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
-        mock_response = {
-            "deploymentId": "deploy-123",
-            "jobId": "job-123"
-        }
-        self.mock_amplify_client.create_deployment.return_value = mock_response
-        
-        result = self.integration.create_deployment("app-123", "main")
-        
-        self.assertEqual(result["deploymentId"], "deploy-123")
-
     def test_start_deployment(self):
         """Test starting a deployment"""
         if not _module_imported:
             self.skipTest("Module could not be imported due to dataclass issue")
         mock_response = {
-            "deploymentId": "deploy-123",
-            "status": "PENDING"
+            "deployment": {
+                "deploymentId": "deploy-123",
+                "status": "PENDING"
+            }
         }
         self.mock_amplify_client.start_deployment.return_value = mock_response
         
         result = self.integration.start_deployment("app-123", "main")
         
+        self.assertEqual(result["deploymentId"], "deploy-123")
         self.assertEqual(result["status"], "PENDING")
 
     def test_get_deployment(self):
@@ -493,14 +490,43 @@ class TestAmplifyIntegration(unittest.TestCase):
         if not _module_imported:
             self.skipTest("Module could not be imported due to dataclass issue")
         mock_response = {
-            "deploymentId": "deploy-123",
-            "status": "SUCCEEDED"
+            "deployment": {
+                "deploymentId": "deploy-123",
+                "status": "SUCCEEDED"
+            }
         }
         self.mock_amplify_client.get_deployment.return_value = mock_response
         
-        result = self.integration.get_deployment("app-123", "deploy-123")
+        result = self.integration.get_deployment("app-123", "main", "deploy-123")
         
+        self.assertEqual(result["deploymentId"], "deploy-123")
         self.assertEqual(result["status"], "SUCCEEDED")
+
+    def test_stop_deployment(self):
+        """Test stopping a deployment"""
+        if not _module_imported:
+            self.skipTest("Module could not be imported due to dataclass issue")
+        self.mock_amplify_client.stop_deployment.return_value = {}
+        
+        result = self.integration.stop_deployment("app-123", "main", "deploy-123")
+        
+        self.assertTrue(result)
+
+    def test_list_deployments(self):
+        """Test listing deployments"""
+        if not _module_imported:
+            self.skipTest("Module could not be imported due to dataclass issue")
+        mock_response = {
+            "deployments": [
+                {"deploymentId": "deploy-1", "status": "SUCCEEDED"},
+                {"deploymentId": "deploy-2", "status": "FAILED"}
+            ]
+        }
+        self.mock_amplify_client.list_deployments.return_value = mock_response
+        
+        result = self.integration.list_deployments("app-123", "main")
+        
+        self.assertEqual(len(result), 2)
 
     def test_create_domain_association(self):
         """Test creating domain association"""
@@ -517,7 +543,8 @@ class TestAmplifyIntegration(unittest.TestCase):
         config = DomainConfig(domain_name="example.com")
         result = self.integration.create_domain_association("app-123", config)
         
-        self.assertEqual(result["domainAssociation"]["domainName"], "example.com")
+        self.assertEqual(result["domainName"], "example.com")
+        self.assertEqual(result["status"], "PENDING_VERIFICATION")
 
     def test_get_domain_association(self):
         """Test getting domain association"""
@@ -533,7 +560,22 @@ class TestAmplifyIntegration(unittest.TestCase):
         
         result = self.integration.get_domain_association("app-123", "example.com")
         
-        self.assertEqual(result["domainAssociation"]["domainName"], "example.com")
+        self.assertEqual(result["domainName"], "example.com")
+
+    def test_list_domain_associations(self):
+        """Test listing domain associations"""
+        if not _module_imported:
+            self.skipTest("Module could not be imported due to dataclass issue")
+        mock_response = {
+            "domainAssociations": [
+                {"domainName": "example.com", "domainStatus": "IN_USE"}
+            ]
+        }
+        self.mock_amplify_client.list_domain_associations.return_value = mock_response
+        
+        result = self.integration.list_domain_associations("app-123")
+        
+        self.assertEqual(len(result), 1)
 
     def test_delete_domain_association(self):
         """Test deleting domain association"""
@@ -561,7 +603,8 @@ class TestAmplifyIntegration(unittest.TestCase):
         config = WebhookConfig(webhook_name="test-webhook", branch_name="main")
         result = self.integration.create_webhook("app-123", config)
         
-        self.assertEqual(result["webhook"]["webhookName"], "test-webhook")
+        self.assertEqual(result["webhookName"], "test-webhook")
+        self.assertEqual(result["webhookUrl"], "https://example.com/webhook")
 
     def test_get_webhook(self):
         """Test getting a webhook"""
@@ -577,7 +620,8 @@ class TestAmplifyIntegration(unittest.TestCase):
         
         result = self.integration.get_webhook("app-123", "webhook-123")
         
-        self.assertEqual(result["webhook"]["webhookId"], "webhook-123")
+        self.assertEqual(result["webhookId"], "webhook-123")
+        self.assertEqual(result["webhookName"], "test-webhook")
 
     def test_list_webhooks(self):
         """Test listing webhooks"""
@@ -593,7 +637,7 @@ class TestAmplifyIntegration(unittest.TestCase):
         
         result = self.integration.list_webhooks("app-123")
         
-        self.assertEqual(len(result["webhooks"]), 2)
+        self.assertEqual(len(result), 2)
 
     def test_delete_webhook(self):
         """Test deleting a webhook"""
@@ -621,7 +665,8 @@ class TestAmplifyIntegration(unittest.TestCase):
         config = BackendEnvironmentConfig(environment_name="dev")
         result = self.integration.create_backend_environment("app-123", config)
         
-        self.assertEqual(result["backendEnvironment"]["environmentName"], "dev")
+        self.assertEqual(result["environmentName"], "dev")
+        self.assertEqual(result["environmentId"], "env-123")
 
     def test_get_backend_environment(self):
         """Test getting backend environment"""
@@ -636,9 +681,10 @@ class TestAmplifyIntegration(unittest.TestCase):
         }
         self.mock_amplify_client.get_backend_environment.return_value = mock_response
         
-        result = self.integration.get_backend_environment("app-123", "dev")
+        result = self.integration.get_backend_environment("app-123", "env-123")
         
-        self.assertEqual(result["backendEnvironment"]["environmentName"], "dev")
+        self.assertEqual(result["environmentName"], "dev")
+        self.assertEqual(result["environmentId"], "env-123")
 
     def test_list_backend_environments(self):
         """Test listing backend environments"""
@@ -654,7 +700,7 @@ class TestAmplifyIntegration(unittest.TestCase):
         
         result = self.integration.list_backend_environments("app-123")
         
-        self.assertEqual(len(result["backendEnvironments"]), 2)
+        self.assertEqual(len(result), 2)
 
     def test_delete_backend_environment(self):
         """Test deleting backend environment"""
@@ -662,25 +708,9 @@ class TestAmplifyIntegration(unittest.TestCase):
             self.skipTest("Module could not be imported due to dataclass issue")
         self.mock_amplify_client.delete_backend_environment.return_value = {}
         
-        result = self.integration.delete_backend_environment("app-123", "dev")
+        result = self.integration.delete_backend_environment("app-123", "env-123")
         
         self.assertTrue(result)
-
-    def test_get_artifact(self):
-        """Test getting artifact"""
-        if not _module_imported:
-            self.skipTest("Module could not be imported due to dataclass issue")
-        mock_response = {
-            "artifact": {
-                "artifactId": "artifact-123",
-                "artifactArn": "arn:aws:amplify:us-east-1:123:artifact/artifact-123"
-            }
-        }
-        self.mock_amplify_client.get_artifact.return_value = mock_response
-        
-        result = self.integration.get_artifact("artifact-123")
-        
-        self.assertEqual(result["artifact"]["artifactId"], "artifact-123")
 
     def test_list_artifacts(self):
         """Test listing artifacts"""
@@ -694,32 +724,29 @@ class TestAmplifyIntegration(unittest.TestCase):
         }
         self.mock_amplify_client.list_artifacts.return_value = mock_response
         
-        result = self.integration.list_artifacts("app-123", "job-123")
+        result = self.integration.list_artifacts("app-123", "main", "deploy-123")
         
-        self.assertEqual(len(result["artifacts"]), 2)
+        self.assertEqual(len(result), 2)
 
-    def test_get_build_info(self):
-        """Test getting build info"""
+    def test_get_artifact_url(self):
+        """Test getting artifact URL"""
         if not _module_imported:
             self.skipTest("Module could not be imported due to dataclass issue")
         mock_response = {
-            "buildInfo": {
-                "buildId": "build-123",
-                "status": "SUCCEEDED"
-            }
+            "artifactUrl": "https://example.com/artifact.zip"
         }
-        self.mock_amplify_client.get_build_info.return_value = mock_response
+        self.mock_amplify_client.get_artifact_url.return_value = mock_response
         
-        result = self.integration.get_build_info("app-123", "branch-123")
+        result = self.integration.get_artifact_url("app-123", "artifact-123")
         
-        self.assertEqual(result["buildInfo"]["buildId"], "build-123")
+        self.assertEqual(result, "https://example.com/artifact.zip")
 
     def test_start_build(self):
         """Test starting a build"""
         if not _module_imported:
             self.skipTest("Module could not be imported due to dataclass issue")
         mock_response = {
-            "buildInfo": {
+            "buildJob": {
                 "buildId": "build-123",
                 "status": "IN_PROGRESS"
             }
@@ -728,70 +755,105 @@ class TestAmplifyIntegration(unittest.TestCase):
         
         result = self.integration.start_build("app-123", "main")
         
-        self.assertEqual(result["buildInfo"]["status"], "IN_PROGRESS")
+        self.assertEqual(result["buildId"], "build-123")
+        self.assertEqual(result["status"], "IN_PROGRESS")
+
+    def test_get_build(self):
+        """Test getting a build"""
+        if not _module_imported:
+            self.skipTest("Module could not be imported due to dataclass issue")
+        mock_response = {
+            "buildJob": {
+                "buildId": "build-123",
+                "status": "SUCCEEDED"
+            }
+        }
+        self.mock_amplify_client.get_build.return_value = mock_response
+        
+        result = self.integration.get_build("app-123", "main", "build-123")
+        
+        self.assertEqual(result["buildId"], "build-123")
+
+    def test_list_builds(self):
+        """Test listing builds"""
+        if not _module_imported:
+            self.skipTest("Module could not be imported due to dataclass issue")
+        mock_response = {
+            "builds": [
+                {"buildId": "build-1", "status": "SUCCEEDED"},
+                {"buildId": "build-2", "status": "FAILED"}
+            ]
+        }
+        self.mock_amplify_client.list_builds.return_value = mock_response
+        
+        result = self.integration.list_builds("app-123", "main")
+        
+        self.assertEqual(len(result), 2)
 
     def test_stop_build(self):
         """Test stopping a build"""
         if not _module_imported:
             self.skipTest("Module could not be imported due to dataclass issue")
-        mock_response = {
-            "buildInfo": {
-                "buildId": "build-123",
-                "status": "STOPPED"
-            }
-        }
-        self.mock_amplify_client.stop_build.return_value = mock_response
+        self.mock_amplify_client.stop_build.return_value = {}
         
-        result = self.integration.stop_build("app-123", "main")
+        result = self.integration.stop_build("app-123", "main", "build-123")
         
-        self.assertEqual(result["buildInfo"]["status"], "STOPPED")
+        self.assertTrue(result)
 
-    def test_get_job(self):
-        """Test getting job info"""
+    def test_get_app_url(self):
+        """Test getting app URL"""
         if not _module_imported:
             self.skipTest("Module could not be imported due to dataclass issue")
-        mock_response = {
-            "job": {
-                "jobId": "job-123",
-                "status": "SUCCEEDED"
-            }
-        }
-        self.mock_amplify_client.get_job.return_value = mock_response
-        
-        result = self.integration.get_job("app-123", "main", "job-123")
-        
-        self.assertEqual(result["job"]["jobId"], "job-123")
+        url = self.integration.get_app_url("app-123")
+        self.assertIn("app-123", url)
+        self.assertIn("console.aws.amazon.com", url)
 
-    def test_list_jobs(self):
-        """Test listing jobs"""
+    def test_get_branch_url(self):
+        """Test getting branch URL"""
         if not _module_imported:
             self.skipTest("Module could not be imported due to dataclass issue")
-        mock_response = {
-            "jobResults": [
-                {"jobId": "job-1", "status": "SUCCEEDED"},
-                {"jobId": "job-2", "status": "FAILED"}
-            ]
-        }
-        self.mock_amplify_client.list_jobs.return_value = mock_response
-        
-        result = self.integration.list_jobs("app-123", "main")
-        
-        self.assertEqual(len(result["jobResults"]), 2)
+        url = self.integration.get_branch_url("app-123", "main")
+        self.assertIn("app-123", url)
+        self.assertIn("main", url)
 
-    def test_get_metrics(self):
-        """Test getting CloudWatch metrics"""
+    def test_clear_cache(self):
+        """Test clearing cache"""
         if not _module_imported:
             self.skipTest("Module could not be imported due to dataclass issue")
-        mock_cloudwatch_response = {
-            "Datapoints": [
-                {"Timestamp": datetime.now(), "Value": 100.0}
-            ]
+        # Add some cache entries
+        self.integration._apps_cache["test"] = {}
+        self.integration._branches_cache["test"] = {}
+        
+        self.integration.clear_cache()
+        
+        self.assertEqual(len(self.integration._apps_cache), 0)
+        self.assertEqual(len(self.integration._branches_cache), 0)
+
+    def test_close(self):
+        """Test closing integration"""
+        if not _module_imported:
+            self.skipTest("Module could not be imported due to dataclass issue")
+        self.integration._client = MagicMock()
+        self.integration._cloudwatch_client = MagicMock()
+        
+        self.integration.close()
+        
+        self.assertIsNone(self.integration._client)
+        self.assertIsNone(self.integration._cloudwatch_client)
+
+    def test_wait_for_deployment_timeout(self):
+        """Test wait_for_deployment with timeout"""
+        if not _module_imported:
+            self.skipTest("Module could not be imported due to dataclass issue")
+        # Mock get_deployment to always return PENDING
+        self.mock_amplify_client.get_deployment.return_value = {
+            "deployment": {"status": "PENDING"}
         }
-        self.mock_cloudwatch_client.get_metric_statistics.return_value = mock_cloudwatch_response
         
-        result = self.integration.get_metrics("app-123", "main")
+        # Use a very short timeout
+        result = self.integration.wait_for_deployment("app-123", "main", "deploy-123", timeout=1, poll_interval=0.1)
         
-        self.assertIsNotNone(result)
+        self.assertFalse(result)
 
 
 if __name__ == "__main__":

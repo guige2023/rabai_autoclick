@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 import types
+import threading
 
 # Create mock boto3 module before importing workflow_aws_connect
 mock_boto3 = types.ModuleType('boto3')
@@ -61,6 +62,22 @@ PromptConfig = connect_module.PromptConfig
 PromptInfo = connect_module.PromptInfo
 ContactSearchResult = connect_module.ContactSearchResult
 ContactMetrics = connect_module.ContactMetrics
+
+
+def create_mock_integration():
+    """Create a mock ConnectIntegration with all required attributes."""
+    mock_connect_client = MagicMock()
+    mock_cloudwatch_client = MagicMock()
+    
+    with patch.object(ConnectIntegration, '__init__', lambda x, **kwargs: None):
+        integration = ConnectIntegration()
+        integration.region_name = "us-east-1"
+        integration.endpoint_url = None
+        integration._clients = {'connect': mock_connect_client, 'cloudwatch': mock_cloudwatch_client}
+        integration._session = MagicMock()
+        integration._config = None
+        integration._lock = threading.Lock()
+        return integration, mock_connect_client, mock_cloudwatch_client
 
 
 class TestConnectEnums(unittest.TestCase):
@@ -239,26 +256,7 @@ class TestConnectIntegration(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures"""
-        self.mock_connect_client = MagicMock()
-        self.mock_cloudwatch_client = MagicMock()
-
-        with patch.object(ConnectIntegration, '__init__', lambda x, **kwargs: None):
-            self.integration = ConnectIntegration()
-            self.integration.region_name = "us-east-1"
-            self.integration.endpoint_url = None
-            self.integration._clients = {'connect': self.mock_connect_client, 'cloudwatch': self.mock_cloudwatch_client}
-            self.integration._session = MagicMock()
-            self.integration._config = None
-
-    def test_init_with_boto3(self):
-        """Test initialization with boto3 session"""
-        with patch.object(ConnectIntegration, '__init__', lambda x, **kwargs: None):
-            integration = ConnectIntegration()
-            integration.region_name = "us-east-1"
-            integration.endpoint_url = None
-            integration._clients = {}
-            integration._session = MagicMock()
-            integration._config = None
+        self.integration, self.mock_connect_client, self.mock_cloudwatch_client = create_mock_integration()
 
     def test_connect_client_property(self):
         """Test connect client property"""
@@ -276,14 +274,7 @@ class TestConnectInstanceManagement(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures"""
-        self.mock_connect_client = MagicMock()
-
-        with patch.object(ConnectIntegration, '__init__', lambda x, **kwargs: None):
-            self.integration = ConnectIntegration()
-            self.integration.region_name = "us-east-1"
-            self.integration.endpoint_url = None
-            self.integration._clients = {'connect': self.mock_connect_client}
-            self.integration._session = MagicMock()
+        self.integration, self.mock_connect_client, _ = create_mock_integration()
 
     def test_create_instance(self):
         """Test creating a Connect instance"""
@@ -328,23 +319,77 @@ class TestConnectInstanceManagement(unittest.TestCase):
         call_args = self.mock_connect_client.create_instance.call_args
         self.assertEqual(call_args[1]['Attributes'], {"attr1": "value1"})
 
+    def test_describe_instance(self):
+        """Test describing a Connect instance"""
+        mock_response = {
+            'Instance': {
+                'InstanceId': 'test-instance-id',
+                'InstanceArn': 'arn:aws:connect:us-east-1:123456789012:instance/test-instance-id',
+                'IdentityManagementType': 'SAML',
+                'InstanceAlias': 'test-instance',
+                'CreatedTime': '2024-01-01T00:00:00Z',
+                'ServiceRole': 'arn:aws:iam::123456789012:role/service-role',
+                'Status': 'ACTIVE'
+            }
+        }
+        self.mock_connect_client.describe_instance.return_value = mock_response
+
+        result = self.integration.describe_instance("test-instance-id")
+
+        self.assertEqual(result.instance_id, 'test-instance-id')
+        self.assertEqual(result.instance_alias, 'test-instance')
+
+    def test_list_instances(self):
+        """Test listing Connect instances"""
+        mock_response = {
+            'InstanceSummaryList': [
+                {
+                    'InstanceId': 'instance-1',
+                    'InstanceArn': 'arn:aws:connect:us-east-1:123456789012:instance/instance-1',
+                    'IdentityManagementType': 'SAML',
+                    'InstanceAlias': 'Instance 1'
+                },
+                {
+                    'InstanceId': 'instance-2',
+                    'InstanceArn': 'arn:aws:connect:us-east-1:123456789012:instance/instance-2',
+                    'IdentityManagementType': 'CONNECT_MANAGED',
+                    'InstanceAlias': 'Instance 2'
+                }
+            ]
+        }
+        self.mock_connect_client.list_instances.return_value = mock_response
+
+        result = self.integration.list_instances()
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].instance_id, 'instance-1')
+        self.assertEqual(result[1].instance_id, 'instance-2')
+
+    def test_delete_instance(self):
+        """Test deleting a Connect instance"""
+        self.mock_connect_client.delete_instance.return_value = {}
+
+        result = self.integration.delete_instance("test-instance-id")
+
+        self.assertTrue(result)
+        self.mock_connect_client.delete_instance.assert_called_once_with(InstanceId='test-instance-id')
+
 
 class TestConnectContactFlows(unittest.TestCase):
     """Test Connect contact flow methods"""
 
     def setUp(self):
         """Set up test fixtures"""
-        self.mock_connect_client = MagicMock()
-
-        with patch.object(ConnectIntegration, '__init__', lambda x, **kwargs: None):
-            self.integration = ConnectIntegration()
-            self.integration._clients = {'connect': self.mock_connect_client}
+        self.integration, self.mock_connect_client, _ = create_mock_integration()
 
     def test_create_contact_flow(self):
         """Test creating a contact flow"""
         mock_response = {
             'ContactFlowId': 'cf-123',
-            'ContactFlowArn': 'arn:aws:connect:us-east-1:123456789012:contact-flow/cf-123'
+            'ContactFlowArn': 'arn:aws:connect:us-east-1:123456789012:contact-flow/cf-123',
+            'Name': 'Test Flow',
+            'Type': 'CONTACT_FLOW',
+            'State': 'ACTIVE'
         }
         self.mock_connect_client.create_contact_flow.return_value = mock_response
 
@@ -356,13 +401,14 @@ class TestConnectContactFlows(unittest.TestCase):
         result = self.integration.create_contact_flow("instance-id", config)
 
         self.assertEqual(result.contact_flow_id, 'cf-123')
+        self.assertEqual(result.name, 'Test Flow')
 
     def test_describe_contact_flow(self):
         """Test describing a contact flow"""
         mock_response = {
             'ContactFlow': {
-                'Id': 'cf-123',
-                'Arn': 'arn:aws:connect:us-east-1:123456789012:contact-flow/cf-123',
+                'ContactFlowId': 'cf-123',
+                'ContactFlowArn': 'arn:aws:connect:us-east-1:123456789012:contact-flow/cf-123',
                 'Name': 'Test Flow',
                 'Type': 'CONTACT_FLOW',
                 'State': 'ACTIVE'
@@ -372,7 +418,33 @@ class TestConnectContactFlows(unittest.TestCase):
 
         result = self.integration.describe_contact_flow("instance-id", "cf-123")
 
-        self.assertEqual(result['ContactFlow']['Id'], 'cf-123')
+        self.assertEqual(result.contact_flow_id, 'cf-123')
+        self.assertEqual(result.name, 'Test Flow')
+
+    def test_list_contact_flows(self):
+        """Test listing contact flows"""
+        mock_response = {
+            'ContactFlowSummaryList': [
+                {'Id': 'cf-1', 'Arn': 'arn:aws:connect:us-east-1:123456789012:contact-flow/cf-1', 'Name': 'Flow 1', 'Type': 'CONTACT_FLOW'},
+                {'Id': 'cf-2', 'Arn': 'arn:aws:connect:us-east-1:123456789012:contact-flow/cf-2', 'Name': 'Flow 2', 'Type': 'CONTACT_FLOW'}
+            ]
+        }
+        self.mock_connect_client.list_contact_flows.return_value = mock_response
+
+        result = self.integration.list_contact_flows("instance-id")
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].contact_flow_id, 'cf-1')
+        self.assertEqual(result[1].contact_flow_id, 'cf-2')
+
+    def test_delete_contact_flow(self):
+        """Test deleting a contact flow"""
+        self.mock_connect_client.delete_contact_flow.return_value = {}
+
+        result = self.integration.delete_contact_flow("instance-id", "cf-123")
+
+        self.assertTrue(result)
+        self.mock_connect_client.delete_contact_flow.assert_called_once()
 
 
 class TestConnectQueues(unittest.TestCase):
@@ -380,17 +452,15 @@ class TestConnectQueues(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures"""
-        self.mock_connect_client = MagicMock()
-
-        with patch.object(ConnectIntegration, '__init__', lambda x, **kwargs: None):
-            self.integration = ConnectIntegration()
-            self.integration._clients = {'connect': self.mock_connect_client}
+        self.integration, self.mock_connect_client, _ = create_mock_integration()
 
     def test_create_queue(self):
         """Test creating a queue"""
         mock_response = {
             'QueueId': 'queue-123',
-            'QueueArn': 'arn:aws:connect:us-east-1:123456789012:queue/queue-123'
+            'QueueArn': 'arn:aws:connect:us-east-1:123456789012:queue/queue-123',
+            'Name': 'Test Queue',
+            'QueueType': 'STANDARD'
         }
         self.mock_connect_client.create_queue.return_value = mock_response
 
@@ -402,13 +472,14 @@ class TestConnectQueues(unittest.TestCase):
         result = self.integration.create_queue("instance-id", config)
 
         self.assertEqual(result.queue_id, 'queue-123')
+        self.assertEqual(result.name, 'Test Queue')
 
     def test_list_queues(self):
         """Test listing queues"""
         mock_response = {
             'QueueSummaryList': [
-                {'Id': 'queue-1', 'Name': 'Queue 1'},
-                {'Id': 'queue-2', 'Name': 'Queue 2'}
+                {'Id': 'queue-1', 'Name': 'Queue 1', 'Arn': 'arn:aws:connect:us:123456789:queue/queue-1', 'QueueType': 'STANDARD'},
+                {'Id': 'queue-2', 'Name': 'Queue 2', 'Arn': 'arn:aws:connect:us:123456789:queue/queue-2', 'QueueType': 'STANDARD'}
             ]
         }
         self.mock_connect_client.list_queues.return_value = mock_response
@@ -416,6 +487,35 @@ class TestConnectQueues(unittest.TestCase):
         result = self.integration.list_queues("instance-id")
 
         self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].queue_id, 'queue-1')
+        self.assertEqual(result[1].queue_id, 'queue-2')
+
+    def test_describe_queue(self):
+        """Test describing a queue"""
+        mock_response = {
+            'Queue': {
+                'QueueId': 'queue-123',
+                'QueueArn': 'arn:aws:connect:us-east-1:123456789012:queue/queue-123',
+                'Name': 'Test Queue',
+                'QueueType': 'STANDARD',
+                'Status': 'ENABLED'
+            }
+        }
+        self.mock_connect_client.describe_queue.return_value = mock_response
+
+        result = self.integration.describe_queue("instance-id", "queue-123")
+
+        self.assertEqual(result.queue_id, 'queue-123')
+        self.assertEqual(result.name, 'Test Queue')
+
+    def test_delete_queue(self):
+        """Test deleting a queue"""
+        self.mock_connect_client.delete_queue.return_value = {}
+
+        result = self.integration.delete_queue("instance-id", "queue-123")
+
+        self.assertTrue(result)
+        self.mock_connect_client.delete_queue.assert_called_once()
 
 
 class TestConnectUsers(unittest.TestCase):
@@ -423,17 +523,14 @@ class TestConnectUsers(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures"""
-        self.mock_connect_client = MagicMock()
-
-        with patch.object(ConnectIntegration, '__init__', lambda x, **kwargs: None):
-            self.integration = ConnectIntegration()
-            self.integration._clients = {'connect': self.mock_connect_client}
+        self.integration, self.mock_connect_client, _ = create_mock_integration()
 
     def test_create_user(self):
         """Test creating a user"""
         mock_response = {
             'UserId': 'user-123',
-            'UserArn': 'arn:aws:connect:us-east-1:123456789012:user/user-123'
+            'UserArn': 'arn:aws:connect:us-east-1:123456789012:user/user-123',
+            'Username': 'testuser'
         }
         self.mock_connect_client.create_user.return_value = mock_response
 
@@ -449,6 +546,7 @@ class TestConnectUsers(unittest.TestCase):
         result = self.integration.create_user("instance-id", config)
 
         self.assertEqual(result.id, 'user-123')
+        self.assertEqual(result.username, 'testuser')
 
     def test_describe_user(self):
         """Test describing a user"""
@@ -463,7 +561,32 @@ class TestConnectUsers(unittest.TestCase):
 
         result = self.integration.describe_user("instance-id", "user-123")
 
-        self.assertEqual(result['User']['Id'], 'user-123')
+        self.assertEqual(result.id, 'user-123')
+        self.assertEqual(result.username, 'testuser')
+
+    def test_list_users(self):
+        """Test listing users"""
+        mock_response = {
+            'UserSummaryList': [
+                {'Id': 'user-1', 'Arn': 'arn:aws:connect:us:123456789:user/user-1', 'Username': 'user1'},
+                {'Id': 'user-2', 'Arn': 'arn:aws:connect:us:123456789:user/user-2', 'Username': 'user2'}
+            ]
+        }
+        self.mock_connect_client.list_users.return_value = mock_response
+
+        result = self.integration.list_users("instance-id")
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].id, 'user-1')
+
+    def test_delete_user(self):
+        """Test deleting a user"""
+        self.mock_connect_client.delete_user.return_value = {}
+
+        result = self.integration.delete_user("instance-id", "user-123")
+
+        self.assertTrue(result)
+        self.mock_connect_client.delete_user.assert_called_once()
 
 
 class TestConnectHoursOfOperation(unittest.TestCase):
@@ -471,17 +594,15 @@ class TestConnectHoursOfOperation(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures"""
-        self.mock_connect_client = MagicMock()
-
-        with patch.object(ConnectIntegration, '__init__', lambda x, **kwargs: None):
-            self.integration = ConnectIntegration()
-            self.integration._clients = {'connect': self.mock_connect_client}
+        self.integration, self.mock_connect_client, _ = create_mock_integration()
 
     def test_create_hours_of_operation(self):
         """Test creating hours of operation"""
         mock_response = {
             'HoursOfOperationId': 'hours-123',
-            'HoursOfOperationArn': 'arn:aws:connect:us-east-1:123456789012:hours-of-operation/hours-123'
+            'HoursOfOperationArn': 'arn:aws:connect:us-east-1:123456789012:hours-of-operation/hours-123',
+            'Name': 'Test Hours',
+            'TimeZone': 'UTC'
         }
         self.mock_connect_client.create_hours_of_operation.return_value = mock_response
 
@@ -498,6 +619,22 @@ class TestConnectHoursOfOperation(unittest.TestCase):
         result = self.integration.create_hours_of_operation("instance-id", config)
 
         self.assertEqual(result.hours_of_operation_id, 'hours-123')
+        self.assertEqual(result.name, 'Test Hours')
+
+    def test_list_hours_of_operations(self):
+        """Test listing hours of operations"""
+        mock_response = {
+            'HoursOfOperationSummaryList': [
+                {'Id': 'hours-1', 'Arn': 'arn:aws:connect:us:123456789:hours-of-operation/hours-1', 'Name': 'Hours 1', 'TimeZone': 'UTC'},
+                {'Id': 'hours-2', 'Arn': 'arn:aws:connect:us:123456789:hours-of-operation/hours-2', 'Name': 'Hours 2', 'TimeZone': 'America/New_York'}
+            ]
+        }
+        self.mock_connect_client.list_hours_of_operations.return_value = mock_response
+
+        result = self.integration.list_hours_of_operations("instance-id")
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].hours_of_operation_id, 'hours-1')
 
 
 class TestConnectQuickConnects(unittest.TestCase):
@@ -505,17 +642,15 @@ class TestConnectQuickConnects(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures"""
-        self.mock_connect_client = MagicMock()
-
-        with patch.object(ConnectIntegration, '__init__', lambda x, **kwargs: None):
-            self.integration = ConnectIntegration()
-            self.integration._clients = {'connect': self.mock_connect_client}
+        self.integration, self.mock_connect_client, _ = create_mock_integration()
 
     def test_create_quick_connect(self):
         """Test creating a quick connect"""
         mock_response = {
             'QuickConnectId': 'qc-123',
-            'QuickConnectArn': 'arn:aws:connect:us-east-1:123456789012:quick-connect/qc-123'
+            'QuickConnectArn': 'arn:aws:connect:us-east-1:123456789012:quick-connect/qc-123',
+            'Name': 'Test QC',
+            'Type': 'QUEUE'
         }
         self.mock_connect_client.create_quick_connect.return_value = mock_response
 
@@ -528,6 +663,22 @@ class TestConnectQuickConnects(unittest.TestCase):
         result = self.integration.create_quick_connect("instance-id", config)
 
         self.assertEqual(result.quick_connect_id, 'qc-123')
+        self.assertEqual(result.name, 'Test QC')
+
+    def test_list_quick_connects(self):
+        """Test listing quick connects"""
+        mock_response = {
+            'QuickConnectSummaryList': [
+                {'Id': 'qc-1', 'Arn': 'arn:aws:connect:us:123456789:quick-connect/qc-1', 'Name': 'QC 1', 'Type': 'QUEUE'},
+                {'Id': 'qc-2', 'Arn': 'arn:aws:connect:us:123456789:quick-connect/qc-2', 'Name': 'QC 2', 'Type': 'USER'}
+            ]
+        }
+        self.mock_connect_client.list_quick_connects.return_value = mock_response
+
+        result = self.integration.list_quick_connects("instance-id")
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].quick_connect_id, 'qc-1')
 
 
 class TestConnectRoutingProfiles(unittest.TestCase):
@@ -535,17 +686,18 @@ class TestConnectRoutingProfiles(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures"""
-        self.mock_connect_client = MagicMock()
-
-        with patch.object(ConnectIntegration, '__init__', lambda x, **kwargs: None):
-            self.integration = ConnectIntegration()
-            self.integration._clients = {'connect': self.mock_connect_client}
+        self.integration, self.mock_connect_client, _ = create_mock_integration()
 
     def test_create_routing_profile(self):
         """Test creating a routing profile"""
         mock_response = {
             'RoutingProfileId': 'rp-123',
-            'RoutingProfileArn': 'arn:aws:connect:us-east-1:123456789012:routing-profile/rp-123'
+            'RoutingProfileArn': 'arn:aws:connect:us-east-1:123456789012:routing-profile/rp-123',
+            'Name': 'Test RP',
+            'Description': 'Test routing profile',
+            'InstanceId': 'instance-123',
+            'DefaultOutboundQueueId': 'queue-123',
+            'MediaConcurrencies': [{'Channel': 'VOICE', 'Concurrency': 1}]
         }
         self.mock_connect_client.create_routing_profile.return_value = mock_response
 
@@ -560,6 +712,22 @@ class TestConnectRoutingProfiles(unittest.TestCase):
         result = self.integration.create_routing_profile("instance-id", config)
 
         self.assertEqual(result.routing_profile_id, 'rp-123')
+        self.assertEqual(result.name, 'Test RP')
+
+    def test_list_routing_profiles(self):
+        """Test listing routing profiles"""
+        mock_response = {
+            'RoutingProfileSummaryList': [
+                {'Id': 'rp-1', 'Arn': 'arn:aws:connect:us:123456789:routing-profile/rp-1', 'Name': 'RP 1'},
+                {'Id': 'rp-2', 'Arn': 'arn:aws:connect:us:123456789:routing-profile/rp-2', 'Name': 'RP 2'}
+            ]
+        }
+        self.mock_connect_client.list_routing_profiles.return_value = mock_response
+
+        result = self.integration.list_routing_profiles("instance-id")
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].routing_profile_id, 'rp-1')
 
 
 class TestConnectPrompts(unittest.TestCase):
@@ -567,17 +735,14 @@ class TestConnectPrompts(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures"""
-        self.mock_connect_client = MagicMock()
-
-        with patch.object(ConnectIntegration, '__init__', lambda x, **kwargs: None):
-            self.integration = ConnectIntegration()
-            self.integration._clients = {'connect': self.mock_connect_client}
+        self.integration, self.mock_connect_client, _ = create_mock_integration()
 
     def test_create_prompt(self):
         """Test creating a prompt"""
         mock_response = {
             'PromptId': 'prompt-123',
-            'PromptARN': 'arn:aws:connect:us-east-1:123456789012:prompt/prompt-123'
+            'PromptArn': 'arn:aws:connect:us-east-1:123456789012:prompt/prompt-123',
+            'Name': 'Test Prompt'
         }
         self.mock_connect_client.create_prompt.return_value = mock_response
 
@@ -589,6 +754,22 @@ class TestConnectPrompts(unittest.TestCase):
         result = self.integration.create_prompt("instance-id", config)
 
         self.assertEqual(result.prompt_id, 'prompt-123')
+        self.assertEqual(result.name, 'Test Prompt')
+
+    def test_list_prompts(self):
+        """Test listing prompts"""
+        mock_response = {
+            'PromptSummaryList': [
+                {'Id': 'prompt-1', 'Arn': 'arn:aws:connect:us:123456789:prompt/prompt-1', 'Name': 'Prompt 1'},
+                {'Id': 'prompt-2', 'Arn': 'arn:aws:connect:us:123456789:prompt/prompt-2', 'Name': 'Prompt 2'}
+            ]
+        }
+        self.mock_connect_client.list_prompts.return_value = mock_response
+
+        result = self.integration.list_prompts("instance-id")
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].prompt_id, 'prompt-1')
 
 
 class TestConnectContactSearch(unittest.TestCase):
@@ -596,11 +777,7 @@ class TestConnectContactSearch(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures"""
-        self.mock_connect_client = MagicMock()
-
-        with patch.object(ConnectIntegration, '__init__', lambda x, **kwargs: None):
-            self.integration = ConnectIntegration()
-            self.integration._clients = {'connect': self.mock_connect_client}
+        self.integration, self.mock_connect_client, _ = create_mock_integration()
 
     def test_search_contacts(self):
         """Test searching contacts"""
@@ -608,18 +785,51 @@ class TestConnectContactSearch(unittest.TestCase):
             'Contacts': [
                 {
                     'ContactId': 'contact-123',
-                    'Arn': 'arn:aws:connect:us-east-1:123456789012:contact/contact-123',
+                    'ContactArn': 'arn:aws:connect:us-east-1:123456789012:contact/contact-123',
                     'State': 'CONNECTED'
                 }
-            ],
-            'TotalCount': 1
+            ]
         }
         self.mock_connect_client.search_contacts.return_value = mock_response
 
-        result = self.integration.search_contacts("instance-id", start_time=datetime.now())
+        # Pass string timestamps as the actual implementation expects
+        result = self.integration.search_contacts(
+            "instance-id",
+            start_time="2024-01-01T00:00:00Z",
+            end_time="2024-01-02T00:00:00Z"
+        )
 
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].contact_id, 'contact-123')
+        self.assertEqual(result[0].state, 'CONNECTED')
+
+    def test_describe_contact(self):
+        """Test describing a contact"""
+        mock_response = {
+            'Contact': {
+                'ContactId': 'contact-123',
+                'ContactArn': 'arn:aws:connect:us-east-1:123456789012:contact/contact-123',
+                'State': 'CONNECTED',
+                'InitiationMethod': 'INBOUND'
+            }
+        }
+        self.mock_connect_client.describe_contact.return_value = mock_response
+
+        result = self.integration.describe_contact("instance-id", "contact-123")
+
+        self.assertEqual(result.contact_id, 'contact-123')
+        self.assertEqual(result.state, 'CONNECTED')
+
+    def test_get_contact_attributes(self):
+        """Test getting contact attributes"""
+        mock_response = {
+            'Attributes': {'key1': 'value1', 'key2': 'value2'}
+        }
+        self.mock_connect_client.get_contact_attributes.return_value = mock_response
+
+        result = self.integration.get_contact_attributes("instance-id", "contact-123")
+
+        self.assertEqual(result, {'key1': 'value1', 'key2': 'value2'})
 
 
 class TestConnectCloudWatchMetrics(unittest.TestCase):
@@ -627,28 +837,85 @@ class TestConnectCloudWatchMetrics(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures"""
-        self.mock_connect_client = MagicMock()
-        self.mock_cloudwatch_client = MagicMock()
+        self.integration, _, self.mock_cloudwatch_client = create_mock_integration()
 
-        with patch.object(ConnectIntegration, '__init__', lambda x, **kwargs: None):
-            self.integration = ConnectIntegration()
-            self.integration._clients = {
-                'connect': self.mock_connect_client,
-                'cloudwatch': self.mock_cloudwatch_client
-            }
-
-    def test_get_metrics(self):
-        """Test getting contact center metrics"""
+    def test_get_metric_statistics(self):
+        """Test getting CloudWatch metric statistics"""
         self.mock_cloudwatch_client.get_metric_statistics.return_value = {
             'Datapoints': [
-                {'Average': 5.0, 'Maximum': 10.0, 'Minimum': 1.0, 'Timestamp': '2024-01-01T00:00:00Z'}
+                {'Average': 5.0, 'Maximum': 10.0, 'Minimum': 1.0, 'Timestamp': datetime(2024, 1, 1)}
             ]
         }
 
-        result = self.integration.get_metrics("instance-id", metric_name="ActiveContacts")
+        result = self.integration.get_metric_statistics(
+            namespace="AWS/Connect",
+            metric_name="ActiveContacts",
+            start_time=datetime(2024, 1, 1),
+            end_time=datetime(2024, 1, 2)
+        )
 
-        self.assertIsNotNone(result)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]['Average'], 5.0)
         self.mock_cloudwatch_client.get_metric_statistics.assert_called()
+
+    def test_put_metric_data(self):
+        """Test putting CloudWatch metric data"""
+        self.mock_cloudwatch_client.put_metric_data.return_value = {}
+
+        result = self.integration.put_metric_data(
+            namespace="Custom/Namespace",
+            metric_data=[{'MetricName': 'TestMetric', 'Value': 42}]
+        )
+
+        self.assertTrue(result)
+        self.mock_cloudwatch_client.put_metric_data.assert_called_once()
+
+
+class TestConnectUtilityMethods(unittest.TestCase):
+    """Test Connect utility methods"""
+
+    def setUp(self):
+        """Set up test fixtures"""
+        self.integration, _, _ = create_mock_integration()
+
+    def test_get_instance_id_from_arn(self):
+        """Test extracting instance ID from ARN"""
+        arn = "arn:aws:connect:us-east-1:123456789012:instance/abc-123"
+        result = self.integration.get_instance_id_from_arn(arn)
+        self.assertEqual(result, "abc-123")
+
+    def test_generate_contact_flow_template(self):
+        """Test generating contact flow template"""
+        result = self.integration.generate_contact_flow_template(
+            name="Test Flow",
+            description="Test description"
+        )
+        
+        self.assertEqual(result['Metadata']['name'], "Test Flow")
+        self.assertEqual(result['Metadata']['description'], "Test description")
+        self.assertIn('Actions', result)
+        self.assertIn('Version', result)
+
+    def test_validate_phone_number_valid(self):
+        """Test validating valid phone numbers"""
+        self.assertTrue(self.integration.validate_phone_number("+1234567890"))
+        self.assertTrue(self.integration.validate_phone_number("+14155551234"))
+        self.assertTrue(self.integration.validate_phone_number("1234567890"))
+
+    def test_validate_phone_number_invalid(self):
+        """Test validating invalid phone numbers"""
+        self.assertFalse(self.integration.validate_phone_number("abc"))
+        self.assertFalse(self.integration.validate_phone_number(""))
+        self.assertFalse(self.integration.validate_phone_number("+0123456789"))
+
+    def test_calculate_wait_time_bucket(self):
+        """Test calculating wait time buckets"""
+        self.assertEqual(self.integration.calculate_wait_time_bucket(15), "less_than_30s")
+        self.assertEqual(self.integration.calculate_wait_time_bucket(45), "30s_to_1m")
+        self.assertEqual(self.integration.calculate_wait_time_bucket(120), "1m_to_3m")
+        self.assertEqual(self.integration.calculate_wait_time_bucket(240), "3m_to_5m")
+        self.assertEqual(self.integration.calculate_wait_time_bucket(480), "5m_to_10m")
+        self.assertEqual(self.integration.calculate_wait_time_bucket(700), "greater_than_10m")
 
 
 if __name__ == '__main__':

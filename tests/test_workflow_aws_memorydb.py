@@ -166,13 +166,20 @@ class TestClusterManagement(unittest.TestCase):
             "Cluster": {
                 "Name": "test-cluster",
                 "NumberOfShards": 1,
-                "Status": "creating"
+                "Status": "creating",
+                "NodeType": "db.r6g.large",
+                "EngineVersion": "7.0",
+                "ClusterEndpoint": {"Address": "test-cluster.xxxx.memorydb.us-east-1.amazonaws.com", "Port": 6379},
+                "Shards": [],
+                "TLSEnabled": True,
+                "MultiAZEnabled": False
             }
         }
 
         config = ClusterConfig(cluster_name="test-cluster")
         result = self.memorydb.create_cluster(config)
         self.assertEqual(result.cluster_name, "test-cluster")
+        self.assertIsInstance(result, ClusterInfo)
 
     def test_get_cluster(self):
         """Test getting cluster info"""
@@ -180,13 +187,20 @@ class TestClusterManagement(unittest.TestCase):
             "Clusters": [{
                 "Name": "test-cluster",
                 "Status": "available",
-                "NumberOfShards": 1
+                "NumberOfShards": 1,
+                "NodeType": "db.r6g.large",
+                "EngineVersion": "7.0",
+                "ClusterEndpoint": {"Address": "test-cluster.xxxx.memorydb.us-east-1.amazonaws.com", "Port": 6379},
+                "Shards": [],
+                "TLSEnabled": True,
+                "MultiAZEnabled": False
             }]
         }
 
         result = self.memorydb.get_cluster("test-cluster")
         self.assertIsNotNone(result)
         self.assertEqual(result.cluster_name, "test-cluster")
+        self.assertIsInstance(result, ClusterInfo)
 
     def test_get_cluster_not_found(self):
         """Test getting non-existent cluster"""
@@ -199,8 +213,8 @@ class TestClusterManagement(unittest.TestCase):
         """Test listing clusters"""
         self.mock_client.get_paginator.return_value.paginate.return_value = [
             {"Clusters": [
-                {"Name": "cluster-1", "Status": "available"},
-                {"Name": "cluster-2", "Status": "available"}
+                {"Name": "cluster-1", "Status": "available", "NodeType": "db.r6g.large", "EngineVersion": "7.0", "ClusterEndpoint": {"Address": "", "Port": 6379}, "Shards": [], "TLSEnabled": True, "MultiAZEnabled": False},
+                {"Name": "cluster-2", "Status": "available", "NodeType": "db.r6g.large", "EngineVersion": "7.0", "ClusterEndpoint": {"Address": "", "Port": 6379}, "Shards": [], "TLSEnabled": True, "MultiAZEnabled": False}
             ]}
         ]
 
@@ -232,15 +246,16 @@ class TestClusterUpdate(unittest.TestCase):
             "Clusters": [{
                 "Name": "test-cluster",
                 "Status": "available",
-                "NumberOfShards": 1
+                "NumberOfShards": 1,
+                "NodeType": "db.r6g.large",
+                "EngineVersion": "7.0",
+                "ClusterEndpoint": {"Address": "", "Port": 6379},
+                "Shards": [],
+                "TLSEnabled": True,
+                "MultiAZEnabled": False
             }]
         }
-        self.mock_client.update_cluster.return_value = {
-            "Cluster": {
-                "Name": "test-cluster",
-                "Status": "updating"
-            }
-        }
+        self.mock_client.modify_cluster.return_value = {}
 
         config = ClusterUpdateConfig(cluster_name="test-cluster", new_num_nodes=6)
         result = self.memorydb.update_cluster(config)
@@ -282,10 +297,10 @@ class TestNodeManagement(unittest.TestCase):
         self.assertIsInstance(result, list)
 
     def test_reboot_node(self):
-        """Test rebooting a node"""
+        """Test rebooting nodes"""
         self.mock_client.reboot_node.return_value = {}
 
-        result = self.memorydb.reboot_node("test-cluster", "node-1")
+        result = self.memorydb.reboot_node("test-cluster", ["node-1"])
         self.assertTrue(result)
 
 
@@ -302,18 +317,15 @@ class TestParameterGroups(unittest.TestCase):
 
     def test_create_parameter_group(self):
         """Test creating a parameter group"""
-        self.mock_client.create_parameter_group.return_value = {
-            "ParameterGroup": {
-                "Name": "test-pg",
-                "Family": "memorydb-redis7"
-            }
-        }
+        self.mock_client.create_parameter_group.return_value = {}
 
         result = self.memorydb.create_parameter_group("test-pg", "memorydb-redis7", "Test description")
-        self.assertIn("ParameterGroup", result)
+        self.assertIsInstance(result, ParameterGroupInfo)
+        self.assertEqual(result.name, "test-pg")
+        self.assertEqual(result.family, "memorydb-redis7")
 
-    def test_describe_parameter_group(self):
-        """Test describing a parameter group"""
+    def test_get_parameter_group(self):
+        """Test getting a parameter group"""
         self.mock_client.describe_parameter_groups.return_value = {
             "ParameterGroups": [{
                 "Name": "test-pg",
@@ -321,16 +333,18 @@ class TestParameterGroups(unittest.TestCase):
                 "Description": "Test"
             }]
         }
+        self.mock_client.list_parameters.return_value = {"Parameters": []}
 
-        result = self.memorydb.describe_parameter_group("test-pg")
+        result = self.memorydb.get_parameter_group("test-pg")
         self.assertIsNotNone(result)
+        self.assertIsInstance(result, ParameterGroupInfo)
 
     def test_list_parameter_groups(self):
         """Test listing parameter groups"""
         self.mock_client.describe_parameter_groups.return_value = {
             "ParameterGroups": [
-                {"Name": "pg-1"},
-                {"Name": "pg-2"}
+                {"Name": "pg-1", "Family": "memorydb-redis7", "Description": ""},
+                {"Name": "pg-2", "Family": "memorydb-redis7", "Description": ""}
             ]
         }
 
@@ -339,15 +353,17 @@ class TestParameterGroups(unittest.TestCase):
 
     def test_update_parameter_group(self):
         """Test updating a parameter group"""
-        self.mock_client.update_parameter_group.return_value = {
-            "ParameterGroup": {
-                "Name": "test-pg",
-                "Status": "active"
-            }
-        }
+        self.mock_client.update_parameter_group.return_value = {}
 
         result = self.memorydb.update_parameter_group("test-pg", {"maxmemory-policy": "allkeys-lru"})
-        self.assertIn("ParameterGroup", result)
+        self.assertTrue(result)
+
+    def test_delete_parameter_group(self):
+        """Test deleting a parameter group"""
+        self.mock_client.delete_parameter_group.return_value = {}
+
+        result = self.memorydb.delete_parameter_group("test-pg")
+        self.assertTrue(result)
 
 
 class TestSubnetGroups(unittest.TestCase):
@@ -363,22 +379,18 @@ class TestSubnetGroups(unittest.TestCase):
 
     def test_create_subnet_group(self):
         """Test creating a subnet group"""
-        self.mock_client.create_subnet_group.return_value = {
-            "SubnetGroup": {
-                "Name": "test-sg",
-                "Description": "Test subnet group"
-            }
-        }
+        self.mock_client.create_subnet_group.return_value = {}
 
         result = self.memorydb.create_subnet_group(
             "test-sg",
-            "Test subnet group",
-            ["subnet-1", "subnet-2"]
+            ["subnet-1", "subnet-2"],
+            "Test subnet group"
         )
-        self.assertIn("SubnetGroup", result)
+        self.assertIsInstance(result, SubnetGroupInfo)
+        self.assertEqual(result.name, "test-sg")
 
-    def test_describe_subnet_group(self):
-        """Test describing a subnet group"""
+    def test_get_subnet_group(self):
+        """Test getting a subnet group"""
         self.mock_client.describe_subnet_groups.return_value = {
             "SubnetGroups": [{
                 "Name": "test-sg",
@@ -387,13 +399,14 @@ class TestSubnetGroups(unittest.TestCase):
             }]
         }
 
-        result = self.memorydb.describe_subnet_group("test-sg")
+        result = self.memorydb.get_subnet_group("test-sg")
         self.assertIsNotNone(result)
+        self.assertIsInstance(result, SubnetGroupInfo)
 
     def test_list_subnet_groups(self):
         """Test listing subnet groups"""
         self.mock_client.describe_subnet_groups.return_value = {
-            "SubnetGroups": [{"Name": "sg-1"}]
+            "SubnetGroups": [{"Name": "sg-1", "Description": "", "Subnets": []}]
         }
 
         result = self.memorydb.list_subnet_groups()
@@ -428,10 +441,11 @@ class TestACLs(unittest.TestCase):
         }
 
         result = self.memorydb.create_acl("test-acl", ["user1"])
-        self.assertIn("ACL", result)
+        self.assertIsInstance(result, ACLInfo)
+        self.assertEqual(result.name, "test-acl")
 
-    def test_describe_acl(self):
-        """Test describing an ACL"""
+    def test_get_acl(self):
+        """Test getting an ACL"""
         self.mock_client.describe_acls.return_value = {
             "ACLs": [{
                 "Name": "test-acl",
@@ -440,20 +454,43 @@ class TestACLs(unittest.TestCase):
             }]
         }
 
-        result = self.memorydb.describe_acl("test-acl")
+        result = self.memorydb.get_acl("test-acl")
         self.assertIsNotNone(result)
+        self.assertIsInstance(result, ACLInfo)
+
+    def test_list_acls(self):
+        """Test listing ACLs"""
+        self.mock_client.describe_acls.return_value = {
+            "ACLs": [
+                {"Name": "acl-1", "Status": "active", "UserNames": []},
+                {"Name": "acl-2", "Status": "active", "UserNames": []}
+            ]
+        }
+
+        result = self.memorydb.list_acls()
+        self.assertEqual(len(result), 2)
 
     def test_update_acl(self):
         """Test updating an ACL"""
-        self.mock_client.update_acl.return_value = {
-            "ACL": {
+        self.mock_client.update_acl.return_value = {}
+        self.mock_client.describe_acls.return_value = {
+            "ACLs": [{
                 "Name": "test-acl",
-                "Status": "active"
-            }
+                "Status": "active",
+                "UserNames": ["user1", "user2"]
+            }]
         }
 
-        result = self.memorydb.update_acl("test-acl", ["user1", "user2"])
-        self.assertIn("ACL", result)
+        result = self.memorydb.update_acl("test-acl", user_names_to_add=["user2"])
+        self.assertIsNotNone(result)
+        self.assertIsInstance(result, ACLInfo)
+
+    def test_delete_acl(self):
+        """Test deleting an ACL"""
+        self.mock_client.delete_acl.return_value = {}
+
+        result = self.memorydb.delete_acl("test-acl")
+        self.assertTrue(result)
 
 
 class TestSnapshots(unittest.TestCase):
@@ -474,13 +511,15 @@ class TestSnapshots(unittest.TestCase):
                 "Name": "test-snapshot",
                 "Status": "creating",
                 "ClusterConfiguration": {
-                    "NumberOfShards": 1
+                    "NumberOfShards": 1,
+                    "Name": "test-cluster"
                 }
             }
         }
 
-        result = self.memorydb.create_snapshot("test-snapshot", "test-cluster")
-        self.assertIn("Snapshot", result)
+        result = self.memorydb.create_snapshot("test-cluster", "test-snapshot")
+        self.assertIsInstance(result, SnapshotInfo)
+        self.assertEqual(result.snapshot_name, "test-snapshot")
 
     def test_get_snapshot(self):
         """Test getting a snapshot"""
@@ -494,6 +533,7 @@ class TestSnapshots(unittest.TestCase):
 
         result = self.memorydb.get_snapshot("test-snapshot")
         self.assertIsNotNone(result)
+        self.assertIsInstance(result, SnapshotInfo)
 
     def test_list_snapshots(self):
         """Test listing snapshots"""

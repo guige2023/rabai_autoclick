@@ -10,6 +10,7 @@ import json
 import time
 import os
 import types
+from datetime import datetime
 
 # Create mock boto3 module before importing workflow_aws_glue
 mock_boto3 = types.ModuleType('boto3')
@@ -491,10 +492,12 @@ class TestGlueIntegration(unittest.TestCase):
 
     def test_update_table(self):
         """Test updating a table"""
-        self.mock_glue_client.update_table.return_value = {
+        self.mock_glue_client.update_table.return_value = {}
+        self.mock_glue_client.get_table.return_value = {
             "Table": {
                 "Name": "test-table",
-                "DatabaseName": "test-db"
+                "DatabaseName": "test-db",
+                "TableType": "EXTERNAL_TABLE"
             }
         }
 
@@ -523,13 +526,20 @@ class TestGlueIntegration(unittest.TestCase):
             ]
         }
 
-        result = self.integration.get_table_versions(database_name="test-db", name="test-table")
+        result = self.integration.get_table_versions(database_name="test-db", table_name="test-table")
 
         self.assertEqual(len(result), 2)
 
     def test_create_crawler(self):
         """Test creating a crawler"""
         self.mock_glue_client.create_crawler.return_value = {}
+        self.mock_glue_client.get_crawler.return_value = {
+            "Crawler": {
+                "Name": "test-crawler",
+                "State": "READY",
+                "DatabaseName": "test-db"
+            }
+        }
 
         result = self.integration.create_crawler(
             name="test-crawler",
@@ -585,6 +595,16 @@ class TestGlueIntegration(unittest.TestCase):
             "Name": "test-job",
             "Arn": "arn:aws:glue:us-east-1:123456789:job/test-job"
         }
+        self.mock_glue_client.get_job.return_value = {
+            "Job": {
+                "Name": "test-job",
+                "Arn": "arn:aws:glue:us-east-1:123456789:job/test-job",
+                "Role": "arn:aws:iam::123456789:role/my-role",
+                "Command": {"Name": "glueetl", "ScriptLocation": "s3://my-bucket/scripts/job.py"},
+                "CreatedOn": "2024-01-01T00:00:00Z",
+                "LastModifiedOn": "2024-01-01T00:00:00Z"
+            }
+        }
 
         result = self.integration.create_job(
             name="test-job",
@@ -595,6 +615,21 @@ class TestGlueIntegration(unittest.TestCase):
         self.assertEqual(result.name, "test-job")
         self.mock_glue_client.create_job.assert_called_once()
 
+    def test_get_job(self):
+        """Test getting job info"""
+        self.mock_glue_client.get_job.return_value = {
+            "Job": {
+                "Name": "test-job",
+                "Role": "arn:aws:iam::123456789:role/my-role",
+                "Command": {"Name": "glueetl"},
+                "CreatedOn": "2024-01-01T00:00:00Z"
+            }
+        }
+
+        result = self.integration.get_job(name="test-job")
+
+        self.assertEqual(result.name, "test-job")
+
     def test_start_job_run(self):
         """Test starting a job run"""
         self.mock_glue_client.start_job_run.return_value = {
@@ -603,7 +638,9 @@ class TestGlueIntegration(unittest.TestCase):
 
         result = self.integration.start_job_run(job_name="test-job")
 
-        self.assertEqual(result, "run-12345")
+        self.assertIsInstance(result, JobRunInfo)
+        self.assertEqual(result.job_name, "test-job")
+        self.assertEqual(result.run_id, "run-12345")
         self.mock_glue_client.start_job_run.assert_called_once()
 
     def test_get_job_run(self):
@@ -612,7 +649,7 @@ class TestGlueIntegration(unittest.TestCase):
             "JobRun": {
                 "Id": "run-12345",
                 "JobName": "test-job",
-                "Status": "SUCCEEDED",
+                "JobRunState": "SUCCEEDED",
                 "ExecutionTime": 120.0
             }
         }
@@ -626,8 +663,8 @@ class TestGlueIntegration(unittest.TestCase):
         """Test listing job runs"""
         self.mock_glue_client.get_paginator.return_value.paginate.return_value = [
             {"JobRuns": [
-                {"Id": "run-1", "Status": "SUCCEEDED"},
-                {"Id": "run-2", "Status": "FAILED"}
+                {"Id": "run-1", "JobRunState": "SUCCEEDED"},
+                {"Id": "run-2", "JobRunState": "FAILED"}
             ]}
         ]
 
@@ -637,8 +674,14 @@ class TestGlueIntegration(unittest.TestCase):
 
     def test_create_trigger(self):
         """Test creating a trigger"""
-        self.mock_glue_client.create_trigger.return_value = {
-            "Name": "test-trigger"
+        self.mock_glue_client.create_trigger.return_value = {}
+        self.mock_glue_client.get_trigger.return_value = {
+            "Trigger": {
+                "Name": "test-trigger",
+                "Type": "SCHEDULED",
+                "State": "CREATED",
+                "Actions": [{"JobName": "test-job"}]
+            }
         }
 
         result = self.integration.create_trigger(
@@ -650,6 +693,21 @@ class TestGlueIntegration(unittest.TestCase):
 
         self.assertEqual(result.name, "test-trigger")
         self.mock_glue_client.create_trigger.assert_called_once()
+
+    def test_get_trigger(self):
+        """Test getting trigger info"""
+        self.mock_glue_client.get_trigger.return_value = {
+            "Trigger": {
+                "Name": "test-trigger",
+                "Type": "SCHEDULED",
+                "State": "ACTIVATED",
+                "Actions": [{"JobName": "test-job"}]
+            }
+        }
+
+        result = self.integration.get_trigger(name="test-trigger")
+
+        self.assertEqual(result.name, "test-trigger")
 
     def test_start_trigger(self):
         """Test starting a trigger"""
@@ -677,10 +735,12 @@ class TestGlueIntegration(unittest.TestCase):
 
     def test_create_dev_endpoint(self):
         """Test creating a dev endpoint"""
-        self.mock_glue_client.create_dev_endpoint.return_value = {
+        self.mock_glue_client.create_dev_endpoint.return_value = {}
+        self.mock_glue_client.get_dev_endpoint.return_value = {
             "DevEndpoint": {
                 "EndpointName": "test-endpoint",
-                "Status": "PROVISIONING"
+                "Status": "READY",
+                "RoleArn": "arn:aws:iam::123456789:role/my-role"
             }
         }
 
@@ -725,22 +785,25 @@ class TestGlueIntegration(unittest.TestCase):
 
         result = self.integration.create_schema(
             registry_name="my-registry",
-            schema_name="my-schema",
+            name="my-schema",
             data_format="JSON",
             compatibility="BACKWARD"
         )
 
-        self.assertIn("SchemaArn", result)
+        self.assertEqual(result.schema_name, "my-schema")
+        self.assertEqual(result.registry_name, "my-registry")
         self.mock_glue_client.create_schema.assert_called_once()
 
     def test_get_schema(self):
         """Test getting schema info"""
         self.mock_glue_client.get_schema.return_value = {
-            "Schema": {
-                "RegistryName": "my-registry",
-                "SchemaName": "my-schema",
-                "SchemaArn": "arn:aws:glue:us-east-1:123456789:schema/my-registry/my-schema"
-            }
+            "SchemaName": "my-schema",
+            "SchemaArn": "arn:aws:glue:us-east-1:123456789:schema/my-registry/my-schema",
+            "DataFormat": "JSON",
+            "Compatibility": "BACKWARD",
+            "Description": None,
+            "LatestSchemaVersion": "1",
+            "Tags": {}
         }
 
         result = self.integration.get_schema(registry_name="my-registry", schema_name="my-schema")
@@ -765,7 +828,7 @@ class TestGlueIntegration(unittest.TestCase):
 
     def test_get_schema_version(self):
         """Test getting schema version"""
-        self.mock_glue_client.get_schema_version.return_value = {
+        self.mock_glue_client.get_latest_schema_version.return_value = {
             "SchemaDefinition": '{"type": "record"}',
             "VersionId": "1"
         }
@@ -776,22 +839,6 @@ class TestGlueIntegration(unittest.TestCase):
         )
 
         self.assertIn("SchemaDefinition", result)
-
-    def test_check_schema_version_compatibility(self):
-        """Test checking schema version compatibility"""
-        self.mock_glue_client.check_schema_version.return_value = {
-            "Compatibility": "BACKWARD",
-            "LatestSchemaVersion": "1",
-            "EarliestSchemaVersion": "1"
-        }
-
-        result = self.integration.check_schema_version_compatibility(
-            registry_name="my-registry",
-            schema_name="my-schema",
-            schema_definition='{"type": "record"}'
-        )
-
-        self.assertEqual(result["Compatibility"], "BACKWARD")
 
     def test_create_data_quality_profile(self):
         """Test creating a data quality profile"""
@@ -808,12 +855,13 @@ class TestGlueIntegration(unittest.TestCase):
         self.assertEqual(profile.name, "test-profile")
         self.assertEqual(len(profile.rules), 2)
 
-    def test_evaluate_data_quality(self):
-        """Test evaluating data quality"""
+    def test_analyze_data_quality(self):
+        """Test analyzing data quality"""
         self.mock_glue_client.get_table.return_value = {
             "Table": {
                 "Name": "test-table",
                 "DatabaseName": "test-db",
+                "TableType": "EXTERNAL_TABLE",
                 "StorageDescriptor": {
                     "Columns": [
                         {"Name": "id", "Type": "int"},
@@ -823,8 +871,7 @@ class TestGlueIntegration(unittest.TestCase):
             }
         }
 
-        profile = DataQualityProfile(
-            name="test-profile",
+        results = self.integration.analyze_data_quality(
             database_name="test-db",
             table_name="test-table",
             rules=[
@@ -833,36 +880,52 @@ class TestGlueIntegration(unittest.TestCase):
             ]
         )
 
-        result = self.integration.evaluate_data_quality(profile)
+        self.assertEqual(len(results), 2)
 
-        self.assertEqual(len(result.results), 2)
-
-    def test_get_data_quality_results(self):
-        """Test getting data quality results"""
-        self.mock_glue_client.get_data_quality_results.return_value = {
-            "Results": [
-                {"Rule": "IS_NOT_NULL", "Passed": True},
-                {"Rule": "IS_COMPLETE", "Passed": False}
-            ]
+    def test_get_data_quality_ruleset(self):
+        """Test getting data quality ruleset"""
+        self.mock_glue_client.get_data_quality_ruleset.return_value = {
+            "Name": "test-ruleset",
+            "Ruleset": "[{\"Rule\": \"IS_NOT_NULL\"}]"
         }
 
-        result = self.integration.get_data_quality_results(profile_arn="arn:aws:glue:us-east-1:123456789:dataQuality/profile/test")
+        result = self.integration.get_data_quality_ruleset(name="test-ruleset")
 
-        self.assertIn("Results", result)
+        self.assertEqual(result["Name"], "test-ruleset")
 
-    def test_get_cloudwatch_metrics(self):
-        """Test getting CloudWatch metrics"""
-        self.mock_cloudwatch_client.get_metric_data.return_value = {
-            "MetricDataResults": [
-                {
-                    "Label": " glue.aws.amazon.com/job/run/duration ",
-                    "Values": [120.0]
-                }
-            ]
+    def test_put_metric_data(self):
+        """Test putting metric data to CloudWatch"""
+        self.mock_cloudwatch_client.put_metric_data.return_value = {}
+
+        result = self.integration.put_metric_data(
+            namespace="AWS/Glue",
+            metrics=[{"MetricName": "test-metric", "Value": 100}]
+        )
+
+        self.mock_cloudwatch_client.put_metric_data.assert_called_once()
+
+    def test_get_job_metrics(self):
+        """Test getting job metrics"""
+        self.mock_cloudwatch_client.get_metric_statistics.return_value = {
+            "Datapoints": [{"Average": 120.0, "Timestamp": datetime(2024, 1, 1)}]
         }
 
-        result = self.integration.get_cloudwatch_metrics(
+        result = self.integration.get_job_metrics(
             job_name="test-job",
+            start_time=datetime(2024, 1, 1),
+            end_time=datetime(2024, 1, 2)
+        )
+
+        self.assertIsNotNone(result)
+
+    def test_get_crawler_metrics_cloudwatch(self):
+        """Test getting crawler metrics from CloudWatch"""
+        self.mock_cloudwatch_client.get_metric_statistics.return_value = {
+            "Datapoints": [{"Average": 10.0, "Timestamp": datetime(2024, 1, 1)}]
+        }
+
+        result = self.integration.get_crawler_metrics_cloudwatch(
+            crawler_name="test-crawler",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 2)
         )

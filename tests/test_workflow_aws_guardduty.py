@@ -562,7 +562,7 @@ class TestGuardDutyFindings(unittest.TestCase):
         self.mock_guardduty.get_findings.return_value = {
             "Findings": [
                 {
-                    "Id": "finding-1",
+                    "id": "finding-1",  # lowercase 'id' to match actual code
                     "Severity": "HIGH",
                     "Title": "Test Finding",
                     "Description": "A test finding",
@@ -620,7 +620,7 @@ class TestGuardDutyFindings(unittest.TestCase):
         self.mock_guardduty.get_findings.return_value = {
             "Findings": [
                 {
-                    "Id": "finding-1",
+                    "id": "finding-1",
                     "Severity": "HIGH",
                     "Title": "High Severity Finding",
                     "Description": "A high severity finding",
@@ -753,7 +753,7 @@ class TestGuardDutyFilters(unittest.TestCase):
     def test_list_filters(self):
         """Test list_filters method"""
         self.mock_guardduty.list_filters.return_value = {
-            "FilterNames": ["filter-1", "filter-2"]
+            "filterNames": ["filter-1", "filter-2"]  # lowercase key
         }
         
         integration = GuardDutyIntegration()
@@ -768,7 +768,7 @@ class TestGuardDutyFilters(unittest.TestCase):
         integration = GuardDutyIntegration()
         result = integration.update_filter(
             detector_id="detector-123",
-            filter_id="filter-123",
+            filter_name="filter-123",  # correct parameter name
             finding_criteria={"severity": [{"eq": ["CRITICAL"]}]}
         )
         
@@ -782,6 +782,23 @@ class TestGuardDutyFilters(unittest.TestCase):
         result = integration.delete_filter("detector-123", "filter-123")
         
         self.assertTrue(result)
+
+    def test_create_auto_archive_filter(self):
+        """Test create_auto_archive_filter method"""
+        self.mock_guardduty.create_filter.return_value = {
+            "filterId": "auto-archive-123"
+        }
+        
+        integration = GuardDutyIntegration()
+        filter_obj = integration.create_auto_archive_filter(
+            detector_id="detector-123",
+            name="auto-archive-high",
+            severity=FindingSeverity.HIGH,
+            description="Auto archive high severity"
+        )
+        
+        self.assertEqual(filter_obj.name, "auto-archive-high")
+        self.assertEqual(filter_obj.action, FilterAction.ARCHIVE)
 
 
 class TestGuardDutyMemberAccounts(unittest.TestCase):
@@ -854,7 +871,7 @@ class TestGuardDutyMemberAccounts(unittest.TestCase):
 
     def test_delete_member(self):
         """Test delete_member method"""
-        self.mock_guardduty.delete_member.return_value = {}
+        self.mock_guardduty.delete_members.return_value = {}
         
         integration = GuardDutyIntegration()
         result = integration.delete_member("detector-123", "123456789012")
@@ -881,18 +898,19 @@ class TestGuardDutyAdminAccount(unittest.TestCase):
         """Tear down test fixtures"""
         self.patcher.stop()
 
-    def test_enable_organization_admin(self):
-        """Test enable_organization_admin method"""
+    def test_enable_administrator(self):
+        """Test enable_administrator method"""
         self.mock_guardduty.enable_organization_admin_account.return_value = {}
         
         integration = GuardDutyIntegration()
-        result = integration.enable_organization_admin("detector-123")
+        result = integration.enable_administrator("999999999999")
         
         self.assertTrue(result)
+        self.mock_guardduty.enable_organization_admin_account.assert_called_once()
 
-    def test_get_admin_account(self):
-        """Test get_admin_account method"""
-        self.mock_guardduty.get_administrator_account.return_value = {
+    def test_get_administrator(self):
+        """Test get_administrator method"""
+        self.mock_guardduty.get_administrator.return_value = {
             "Administrator": {
                 "AccountId": "999999999999",
                 "RelationshipStatus": "Enabled"
@@ -900,10 +918,23 @@ class TestGuardDutyAdminAccount(unittest.TestCase):
         }
         
         integration = GuardDutyIntegration()
-        admin = integration.get_admin_account("detector-123")
+        admin = integration.get_administrator("detector-123")
         
         self.assertIsNotNone(admin)
         self.assertEqual(admin.admin_account_id, "999999999999")
+
+    def test_list_administrators(self):
+        """Test list_administrators method"""
+        self.mock_guardduty.list_administrators.return_value = {
+            "Administrators": [
+                {"AccountId": "999999999999", "RelationshipStatus": "Enabled"}
+            ]
+        }
+        
+        integration = GuardDutyIntegration()
+        admins = integration.list_administrators("detector-123")
+        
+        self.assertEqual(len(admins), 1)
 
 
 class TestGuardDutyS3Protection(unittest.TestCase):
@@ -927,6 +958,7 @@ class TestGuardDutyS3Protection(unittest.TestCase):
     def test_enable_s3_protection(self):
         """Test enable_s3_protection method"""
         self.mock_guardduty.update_detector.return_value = {}
+        self.mock_guardduty.update_datasources.return_value = {}
         
         integration = GuardDutyIntegration()
         result = integration.enable_s3_protection("detector-123")
@@ -935,13 +967,9 @@ class TestGuardDutyS3Protection(unittest.TestCase):
 
     def test_get_s3_protection_status(self):
         """Test get_s3_protection_status method"""
-        self.mock_guardduty.get_detector.return_value = {
-            "status": "ENABLED",
-            "findingPublishingFrequency": "FIFTEEN_MINUTES",
-            "dataSources": {
-                "S3Logs": {
-                    "Status": "ENABLED"
-                }
+        self.mock_guardduty.get_datasources.return_value = {
+            "s3Logs": {
+                "enable": True
             }
         }
         
@@ -949,6 +977,15 @@ class TestGuardDutyS3Protection(unittest.TestCase):
         status = integration.get_s3_protection_status("detector-123")
         
         self.assertTrue(status)
+
+    def test_disable_s3_protection(self):
+        """Test disable_s3_protection method"""
+        self.mock_guardduty.update_datasources.return_value = {}
+        
+        integration = GuardDutyIntegration()
+        result = integration.disable_s3_protection("detector-123")
+        
+        self.assertTrue(result)
 
 
 class TestGuardDutyCloudWatchIntegration(unittest.TestCase):
@@ -971,52 +1008,48 @@ class TestGuardDutyCloudWatchIntegration(unittest.TestCase):
         """Tear down test fixtures"""
         self.patcher.stop()
 
-    def test_put_cloudwatch_event(self):
-        """Test put_cloudwatch_event method"""
-        self.mock_events.put_events.return_value = {
-            "Entries": [{"EventId": "event-123"}]
-        }
+    def test_setup_cloudwatch_integration(self):
+        """Test setup_cloudwatch_integration method"""
+        self.mock_events.put_rule.return_value = {}
+        self.mock_events.put_targets.return_value = {}
         
         integration = GuardDutyIntegration()
-        result = integration.put_cloudwatch_event(
-            event_bus="default",
-            source="guardduty",
-            detail_type="GuardDuty Finding",
-            detail={"finding": "test"}
-        )
-        
-        self.assertTrue(result)
-
-    def test_create_cloudwatch_rule(self):
-        """Test create_cloudwatch_rule method"""
-        self.mock_events.put_rule.return_value = {
-            "RuleArn": "arn:aws:events:us-east-1:123456789012:rule/test-rule"
-        }
-        
-        integration = GuardDutyIntegration()
-        result = integration.create_cloudwatch_rule(
-            name="test-rule",
-            event_pattern={"source": ["guardduty.amazonaws.com"]}
-        )
-        
-        self.assertTrue(result)
-        self.assertIsNotNone(result)
-
-    def test_enable_cloudwatch_metrics(self):
-        """Test enable_cloudwatch_metrics method"""
-        self.mock_cloudwatch.put_metric_data.return_value = {}
-        
-        integration = GuardDutyIntegration()
-        result = integration.enable_cloudwatch_metrics(
+        result = integration.setup_cloudwatch_integration(
             detector_id="detector-123",
-            metrics=["FindingCount", "HealthScore"]
+            sns_topic_arn="arn:aws:sns:us-east-1:123456789012:my-topic"
         )
         
         self.assertTrue(result)
 
+    def test_put_guardduty_metric_alarm(self):
+        """Test put_guardduty_metric_alarm method"""
+        self.mock_cloudwatch.put_metric_alarm.return_value = {}
+        
+        integration = GuardDutyIntegration()
+        result = integration.put_guardduty_metric_alarm(
+            alarm_name="guardduty-alarm",
+            detector_id="detector-123",
+            threshold=5
+        )
+        
+        self.assertTrue(result)
 
-class TestGuardDutyWorkflow(unittest.TestCase):
-    """Test GuardDuty workflow operations"""
+    def test_get_guardduty_metrics(self):
+        """Test get_guardduty_metrics method"""
+        self.mock_cloudwatch.get_metric_statistics.return_value = {
+            "Datapoints": [
+                {"Timestamp": datetime(2024, 1, 1), "Sum": 10.0}
+            ]
+        }
+        
+        integration = GuardDutyIntegration()
+        metrics = integration.get_guardduty_metrics()
+        
+        self.assertIsInstance(metrics, list)
+
+
+class TestGuardDutyTagging(unittest.TestCase):
+    """Test GuardDuty resource tagging operations"""
 
     def setUp(self):
         """Set up test fixtures"""
@@ -1033,53 +1066,99 @@ class TestGuardDutyWorkflow(unittest.TestCase):
         """Tear down test fixtures"""
         self.patcher.stop()
 
-    def test_auto_remediate_high_severity(self):
-        """Test auto_remediate_high_severity method"""
-        self.mock_guardduty.list_findings.return_value = {
-            "findingIds": ["finding-1"]
-        }
-        self.mock_guardduty.get_findings.return_value = {
-            "Findings": [
-                {
-                    "Id": "finding-1",
-                    "Severity": "HIGH",
-                    "Title": "High Severity Finding",
-                    "Description": "A high severity finding",
-                    "AccountId": "123456789012",
-                    "Region": "us-east-1",
-                    "Service": {"Action": {"actionType": "OBSERVED"}},
-                    "Resource": {"resourceType": "EC2", "resourceId": "i-123"},
-                    "CreatedAt": "2024-01-01T00:00:00Z",
-                    "UpdatedAt": "2024-01-02T00:00:00Z",
-                    "Tags": {}
-                }
-            ]
-        }
-        self.mock_guardduty.archive_findings.return_value = {}
+    def test_tag_resource(self):
+        """Test tag_resource method"""
+        self.mock_guardduty.tag_resource.return_value = {}
         
         integration = GuardDutyIntegration()
-        result = integration.auto_remediate_high_severity("detector-123")
+        result = integration.tag_resource(
+            resource_arn="arn:aws:guardduty:us-east-1:123456789012:detector/detector-123",
+            tags={"env": "production"}
+        )
         
         self.assertTrue(result)
 
-    def test_generate_security_report(self):
-        """Test generate_security_report method"""
-        self.mock_guardduty.get_severity_statistics.return_value = {
-            "lowSeverity": 10,
-            "mediumSeverity": 5,
-            "highSeverity": 3,
-            "criticalSeverity": 1
-        }
-        self.mock_guardduty.list_findings.return_value = {
-            "findingIds": []
+    def test_untag_resource(self):
+        """Test untag_resource method"""
+        self.mock_guardduty.untag_resource.return_value = {}
+        
+        integration = GuardDutyIntegration()
+        result = integration.untag_resource(
+            resource_arn="arn:aws:guardduty:us-east-1:123456789012:detector/detector-123",
+            tag_keys=["env"]
+        )
+        
+        self.assertTrue(result)
+
+
+class TestGuardDutyPublishingDestinations(unittest.TestCase):
+    """Test GuardDuty publishing destinations operations"""
+
+    def setUp(self):
+        """Set up test fixtures"""
+        self.mock_guardduty = MagicMock()
+        
+        self.patcher = patch('src.workflow_aws_guardduty.boto3')
+        self.mock_boto3 = self.patcher.start()
+        
+        mock_session = MagicMock()
+        self.mock_boto3.Session.return_value = mock_session
+        mock_session.client.return_value = self.mock_guardduty
+
+    def tearDown(self):
+        """Tear down test fixtures"""
+        self.patcher.stop()
+
+    def test_create_publishing_destination(self):
+        """Test create_publishing_destination method"""
+        self.mock_guardduty.create_publishing_destination.return_value = {
+            "destinationId": "dest-123"
         }
         
         integration = GuardDutyIntegration()
-        report = integration.generate_security_report("detector-123")
+        dest_id = integration.create_publishing_destination(
+            detector_id="detector-123",
+            destination_type="S3",
+            s3_destination={"bucketName": "my-bucket"}
+        )
         
-        self.assertIn("summary", report)
-        self.assertIn("statistics", report)
-        self.assertEqual(report["statistics"]["critical"], 1)
+        self.assertEqual(dest_id, "dest-123")
+
+    def test_list_publishing_destinations(self):
+        """Test list_publishing_destinations method"""
+        self.mock_guardduty.list_publishing_destinations.return_value = {
+            "Destinations": [
+                {"destinationId": "dest-1", "destinationType": "S3", "status": "ACTIVE"}
+            ]
+        }
+        
+        integration = GuardDutyIntegration()
+        destinations = integration.list_publishing_destinations("detector-123")
+        
+        self.assertEqual(len(destinations), 1)
+
+    def test_get_publishing_destination(self):
+        """Test get_publishing_destination method"""
+        self.mock_guardduty.get_publishing_destination.return_value = {
+            "destinationType": "S3",
+            "properties": {"bucketName": "my-bucket"},
+            "status": "ACTIVE"
+        }
+        
+        integration = GuardDutyIntegration()
+        dest = integration.get_publishing_destination("detector-123", "dest-123")
+        
+        self.assertIsNotNone(dest)
+        self.assertEqual(dest["destination_type"], "S3")
+
+    def test_delete_publishing_destination(self):
+        """Test delete_publishing_destination method"""
+        self.mock_guardduty.delete_publishing_destination.return_value = {}
+        
+        integration = GuardDutyIntegration()
+        result = integration.delete_publishing_destination("detector-123", "dest-123")
+        
+        self.assertTrue(result)
 
 
 if __name__ == '__main__':

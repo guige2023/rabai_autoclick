@@ -415,7 +415,6 @@ class TestCURIntegration(unittest.TestCase):
         integration = CURIntegration(boto_s3_client=self.mock_s3_client)
         integration.s3 = self.mock_s3_client
 
-        # Create a proper mock exception with response attribute
         error_response = {"Error": {"Code": "404"}}
         
         class MockClientError(Exception):
@@ -489,6 +488,37 @@ class TestCURIntegration(unittest.TestCase):
         )
 
         self.assertEqual(result, {})
+
+    def test_customize_report_units(self):
+        """Test customize_report_units method"""
+        integration = CURIntegration(boto_cur_client=self.mock_cur_client)
+        integration.cur_service = self.mock_cur_client
+        integration._reports = {}
+
+        self.mock_cur_client.get_report_definition.return_value = {
+            "ReportDefinition": {
+                "ReportName": "test-report",
+                "S3Bucket": "test-bucket",
+                "S3Prefix": "test-prefix",
+                "S3Region": "us-east-1",
+                "TimeUnit": "DAILY",
+                "Format": "textORcsv",
+                "Compression": "GZIP",
+                "SchemaElements": ["LINE_ITEM"],
+                "AdditionalSchemaElements": []
+            }
+        }
+        self.mock_cur_client.put_report_definition.return_value = {}
+
+        result = integration.customize_report_units(
+            report_name="test-report",
+            include_tags=True,
+            include_linked_accounts=True,
+            include_credits=True
+        )
+
+        self.assertEqual(result, {})
+        self.mock_cur_client.put_report_definition.assert_called()
 
     def test_set_compression(self):
         """Test set_compression method"""
@@ -653,6 +683,424 @@ class TestCURIntegration(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0]["version_id"], "v1")
         self.assertTrue(result[0]["is_latest"])
+
+    def test_setup_athena_integration(self):
+        """Test setup_athena_integration method"""
+        integration = CURIntegration(
+            boto_athena_client=self.mock_athena_client,
+            boto_s3_client=self.mock_s3_client
+        )
+        integration.athena = self.mock_athena_client
+        integration.s3 = self.mock_s3_client
+
+        self.mock_athena_client.start_query_execution.return_value = {}
+
+        config = AthenaIntegrationConfig(
+            database_name="test_db",
+            table_name="test_table",
+            cur_bucket="test-bucket",
+            cur_prefix="test-prefix",
+            output_location="s3://athena-results/"
+        )
+
+        result = integration.setup_athena_integration(config)
+
+        self.assertEqual(result["database"], "test_db")
+        self.assertEqual(result["table"], "test_table")
+        self.assertTrue(result["database_created"])
+
+    def test_setup_athena_integration_raises_when_not_available(self):
+        """Test setup_athena_integration raises when Athena not available"""
+        integration = CURIntegration()
+        integration.athena = None
+
+        config = AthenaIntegrationConfig()
+
+        with self.assertRaises(RuntimeError) as context:
+            integration.setup_athena_integration(config)
+
+        self.assertIn("Athena client not available", str(context.exception))
+
+    def test_query_cur_data(self):
+        """Test query_cur_data method"""
+        integration = CURIntegration(boto_athena_client=self.mock_athena_client)
+        integration.athena = self.mock_athena_client
+
+        self.mock_athena_client.start_query_execution.return_value = {
+            "QueryExecutionId": "test-query-id"
+        }
+        self.mock_athena_client.get_query_execution.return_value = {
+            "QueryExecution": {
+                "Status": {"State": "SUCCEEDED"}
+            }
+        }
+        self.mock_athena_client.get_query_results.return_value = {
+            "ResultSet": {
+                "Rows": [],
+                "ResultSetMetadata": {"ColumnInfo": []}
+            }
+        }
+
+        result = integration.query_cur_data("SELECT * FROM test")
+
+        self.assertEqual(result["query_execution_id"], "test-query-id")
+        self.assertEqual(result["state"], "SUCCEEDED")
+
+    def test_query_cur_data_raises_when_not_available(self):
+        """Test query_cur_data raises when Athena not available"""
+        integration = CURIntegration()
+        integration.athena = None
+
+        with self.assertRaises(RuntimeError) as context:
+            integration.query_cur_data("SELECT * FROM test")
+
+        self.assertIn("Athena client not available", str(context.exception))
+
+    def test_generate_cost_query(self):
+        """Test generate_cost_query method"""
+        integration = CURIntegration()
+
+        query = integration.generate_cost_query(
+            database="test_db",
+            table="test_table",
+            start_date="2024-01-01",
+            end_date="2024-01-31",
+            group_by=["product_product_name"]
+        )
+
+        self.assertIn("SELECT", query)
+        self.assertIn("test_db.test_table", query)
+        self.assertIn("line_item_usage_start_date", query)
+        self.assertIn("GROUP BY", query)
+
+    def test_setup_glue_integration(self):
+        """Test setup_glue_integration method"""
+        integration = CURIntegration(boto_glue_client=self.mock_glue_client)
+        integration.glue = self.mock_glue_client
+
+        self.mock_glue_client.create_database.return_value = {}
+        self.mock_glue_client.create_table.return_value = {}
+
+        config = GlueCatalogConfig(
+            database_name="test_glue_db",
+            table_name="test_glue_table",
+            cur_bucket="test-bucket",
+            cur_prefix="test-prefix"
+        )
+
+        result = integration.setup_glue_integration(config)
+
+        self.assertEqual(result["database"], "test_glue_db")
+        self.assertEqual(result["table"], "test_glue_table")
+
+    def test_setup_glue_integration_raises_when_not_available(self):
+        """Test setup_glue_integration raises when Glue not available"""
+        integration = CURIntegration()
+        integration.glue = None
+
+        config = GlueCatalogConfig()
+
+        with self.assertRaises(RuntimeError) as context:
+            integration.setup_glue_integration(config)
+
+        self.assertIn("Glue client not available", str(context.exception))
+
+    def test_update_glue_partitions(self):
+        """Test update_glue_partitions method"""
+        integration = CURIntegration(
+            boto_glue_client=self.mock_glue_client,
+            boto_s3_client=self.mock_s3_client
+        )
+        integration.glue = self.mock_glue_client
+        integration.s3 = self.mock_s3_client
+
+        # The implementation looks for "year" and "month" as exact path segments
+        # followed by their values (e.g., "year", "2024", "month", "01")
+        self.mock_s3_client.list_objects_v2.return_value = {
+            "Contents": [
+                {"Key": "prefix/year/2024/month/01/data.csv"}
+            ]
+        }
+        self.mock_glue_client.batch_create_partition.return_value = {}
+
+        result = integration.update_glue_partitions(
+            database="test_db",
+            table="test_table",
+            s3_bucket="test-bucket",
+            s3_prefix="prefix"
+        )
+
+        self.assertEqual(result["partitions_created"], 1)
+
+    def test_update_glue_partitions_raises_when_not_available(self):
+        """Test update_glue_partitions raises when Glue not available"""
+        integration = CURIntegration(boto_glue_client=self.mock_glue_client)
+        integration.glue = None
+
+        with self.assertRaises(RuntimeError) as context:
+            integration.update_glue_partitions(
+                database="test_db",
+                table="test_table",
+                s3_bucket="test-bucket",
+                s3_prefix="prefix"
+            )
+
+        self.assertIn("Glue client not available", str(context.exception))
+
+    def test_set_retention_policy(self):
+        """Test set_retention_policy method"""
+        integration = CURIntegration(boto_cloudwatch_client=self.mock_cloudwatch_client)
+        integration.cloudwatch = self.mock_cloudwatch_client
+
+        result = integration.set_retention_policy(
+            report_name="test-report",
+            retention_days=30,
+            archive_before_delete=True,
+            archive_location="s3://archive-bucket/"
+        )
+
+        self.assertTrue(result.enabled)
+        self.assertEqual(result.retention_days, 30)
+        self.assertTrue(result.archive_before_delete)
+
+    def test_get_retention_policy(self):
+        """Test get_retention_policy method"""
+        integration = CURIntegration()
+
+        integration._retention_policies["test-report"] = RetentionPolicy(
+            enabled=True,
+            retention_days=60
+        )
+
+        result = integration.get_retention_policy("test-report")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.retention_days, 60)
+
+    def test_get_retention_policy_returns_none_when_not_found(self):
+        """Test get_retention_policy returns None when not found"""
+        integration = CURIntegration()
+
+        result = integration.get_retention_policy("non-existent")
+
+        self.assertIsNone(result)
+
+    def test_apply_retention_policy(self):
+        """Test apply_retention_policy method"""
+        from datetime import datetime, timedelta
+
+        integration = CURIntegration(
+            boto_s3_client=self.mock_s3_client,
+            boto_cloudwatch_client=self.mock_cloudwatch_client
+        )
+        integration.s3 = self.mock_s3_client
+        integration.cloudwatch = self.mock_cloudwatch_client
+
+        integration._retention_policies["test-report"] = RetentionPolicy(
+            enabled=True,
+            retention_days=0,
+            archive_before_delete=False
+        )
+
+        old_date = datetime.utcnow() - timedelta(days=1)
+        self.mock_s3_client.list_objects_v2.return_value = {
+            "Contents": [
+                {"Key": "prefix/old-file.csv", "LastModified": old_date}
+            ]
+        }
+        self.mock_s3_client.delete_objects.return_value = {}
+
+        result = integration.apply_retention_policy(
+            report_name="test-report",
+            s3_bucket="test-bucket",
+            s3_prefix="prefix"
+        )
+
+        self.assertEqual(result["deleted_count"], 1)
+
+    def test_apply_retention_policy_returns_error_when_no_policy(self):
+        """Test apply_retention_policy returns error when no policy"""
+        integration = CURIntegration(boto_s3_client=self.mock_s3_client)
+        integration.s3 = self.mock_s3_client
+
+        result = integration.apply_retention_policy(
+            report_name="non-existent",
+            s3_bucket="test-bucket",
+            s3_prefix="prefix"
+        )
+
+        self.assertIn("error", result)
+
+    def test_get_delivery_metrics(self):
+        """Test get_delivery_metrics method"""
+        integration = CURIntegration(boto_cloudwatch_client=self.mock_cloudwatch_client)
+        integration.cloudwatch = self.mock_cloudwatch_client
+
+        self.mock_cloudwatch_client.get_metric_statistics.return_value = {
+            "Datapoints": [
+                {
+                    "Average": 1.0,
+                    "Unit": "Count",
+                    "Timestamp": datetime.utcnow()
+                }
+            ]
+        }
+
+        result = integration.get_delivery_metrics("test-report")
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].metric_name, "ReportDeliverySuccess")
+
+    def test_get_delivery_metrics_raises_when_not_available(self):
+        """Test get_delivery_metrics raises when CloudWatch not available"""
+        integration = CURIntegration()
+        integration.cloudwatch = None
+
+        with self.assertRaises(RuntimeError) as context:
+            integration.get_delivery_metrics("test-report")
+
+        self.assertIn("CloudWatch client not available", str(context.exception))
+
+    def test_setup_cloudwatch_alarms(self):
+        """Test setup_cloudwatch_alarms method"""
+        integration = CURIntegration(boto_cloudwatch_client=self.mock_cloudwatch_client)
+        integration.cloudwatch = self.mock_cloudwatch_client
+
+        self.mock_cloudwatch_client.put_metric_alarm.return_value = {}
+
+        result = integration.setup_cloudwatch_alarms(
+            report_name="test-report",
+            s3_bucket="test-bucket",
+            alarm_topic_arn="arn:aws:sns:us-east-1:123456789012:alarm-topic"
+        )
+
+        self.assertTrue(result["alarm_created"])
+        self.assertEqual(result["alarm_name"], "test-report-delivery-failure")
+
+    def test_setup_cloudwatch_alarms_raises_when_not_available(self):
+        """Test setup_cloudwatch_alarms raises when CloudWatch not available"""
+        integration = CURIntegration()
+        integration.cloudwatch = None
+
+        with self.assertRaises(RuntimeError) as context:
+            integration.setup_cloudwatch_alarms(
+                report_name="test-report",
+                s3_bucket="test-bucket"
+            )
+
+        self.assertIn("CloudWatch client not available", str(context.exception))
+
+    def test_validate_report_configuration_valid(self):
+        """Test validate_report_configuration with valid config"""
+        integration = CURIntegration()
+
+        result = integration.validate_report_configuration(
+            report_name="valid-report",
+            s3_bucket="test-bucket",
+            s3_prefix="test-prefix",
+            s3_region="us-east-1"
+        )
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(len(result["errors"]), 0)
+
+    def test_validate_report_configuration_invalid_name(self):
+        """Test validate_report_configuration with invalid name"""
+        integration = CURIntegration()
+
+        result = integration.validate_report_configuration(
+            report_name="",
+            s3_bucket="test-bucket",
+            s3_prefix="test-prefix",
+            s3_region="us-east-1"
+        )
+
+        self.assertFalse(result["valid"])
+        self.assertGreater(len(result["errors"]), 0)
+
+    def test_validate_report_configuration_missing_bucket(self):
+        """Test validate_report_configuration with missing bucket"""
+        integration = CURIntegration()
+
+        result = integration.validate_report_configuration(
+            report_name="test-report",
+            s3_bucket="",
+            s3_prefix="test-prefix",
+            s3_region="us-east-1"
+        )
+
+        self.assertFalse(result["valid"])
+
+    def test_get_report_status(self):
+        """Test get_report_status method"""
+        integration = CURIntegration(
+            boto_cur_client=self.mock_cur_client,
+            boto_s3_client=self.mock_s3_client
+        )
+        integration.cur_service = self.mock_cur_client
+        integration.s3 = self.mock_s3_client
+
+        self.mock_cur_client.get_report_definition.return_value = {
+            "ReportDefinition": {
+                "ReportName": "test-report",
+                "S3Bucket": "test-bucket",
+                "S3Prefix": "test-prefix",
+                "S3Region": "us-east-1",
+                "TimeUnit": "DAILY",
+                "Format": "textORcsv",
+                "Compression": "GZIP",
+                "SchemaElements": ["LINE_ITEM"],
+                "AdditionalSchemaElements": [],
+                "ReportVersioning": "CREATE_NEW_REPORT"
+            }
+        }
+        self.mock_s3_client.list_objects_v2.return_value = {"Contents": []}
+
+        result = integration.get_report_status("test-report")
+
+        self.assertEqual(result["report_name"], "test-report")
+        self.assertEqual(result["status"], "ACTIVE")
+
+    def test_get_report_status_raises_when_not_available(self):
+        """Test get_report_status raises when CUR service not available"""
+        integration = CURIntegration()
+        integration.cur_service = None
+
+        with self.assertRaises(RuntimeError) as context:
+            integration.get_report_status("test-report")
+
+        self.assertIn("Boto3 not available", str(context.exception))
+
+    def test_export_report_config(self):
+        """Test export_report_config method"""
+        integration = CURIntegration(boto_cur_client=self.mock_cur_client)
+        integration.cur_service = self.mock_cur_client
+
+        self.mock_cur_client.get_report_definition.return_value = {
+            "ReportDefinition": {
+                "ReportName": "test-report",
+                "S3Bucket": "test-bucket",
+                "S3Prefix": "test-prefix",
+                "S3Region": "us-east-1",
+                "TimeUnit": "DAILY",
+                "Format": "textORcsv",
+                "Compression": "GZIP",
+                "SchemaElements": ["LINE_ITEM"],
+                "AdditionalSchemaElements": ["TAGS"],
+                "ReportVersioning": "CREATE_NEW_REPORT"
+            }
+        }
+
+        integration._retention_policies["test-report"] = RetentionPolicy(
+            enabled=True,
+            retention_days=90
+        )
+
+        result = integration.export_report_config("test-report")
+
+        self.assertEqual(result["report_name"], "test-report")
+        self.assertEqual(result["s3_bucket"], "test-bucket")
+        self.assertIn("retention_policy", result)
 
 
 if __name__ == '__main__':

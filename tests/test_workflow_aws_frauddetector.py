@@ -12,7 +12,7 @@ Comprehensive tests for FraudDetectorIntegration class covering:
 - Label management
 - Variable management
 - Outcome management
-- Prediction (get_prediction)
+- Prediction (predict and get_prediction)
 - Batch prediction
 - CloudWatch integration
 """
@@ -33,13 +33,13 @@ mock_boto3.Session = MagicMock()
 mock_boto3.client = MagicMock()
 
 # Create mock botocore exceptions
-mock_boto3_exceptions = types.ModuleType('botocore.exceptions')
-mock_boto3_exceptions.ClientError = Exception
-mock_boto3_exceptions.BotoCoreError = Exception
+mock_botocore_exceptions = types.ModuleType('botocore.exceptions')
+mock_botocore_exceptions.ClientError = Exception
+mock_botocore_exceptions.BotoCoreError = Exception
 
 sys.modules['boto3'] = mock_boto3
 sys.modules['botocore'] = types.ModuleType('botocore')
-sys.modules['botocore.exceptions'] = mock_boto3_exceptions
+sys.modules['botocore.exceptions'] = mock_botocore_exceptions
 
 # Import the module
 import src.workflow_aws_frauddetector as frauddetector_module
@@ -206,7 +206,7 @@ class TestEventTypeConfig(unittest.TestCase):
         config = EventTypeConfig(
             name="test-event",
             entity_types=["user"],
-            variables=["amount", "ip_address"],
+            event_variables=["amount", "ip_address"],
             labels=["fraud", "legit"]
         )
         self.assertEqual(config.name, "test-event")
@@ -289,6 +289,13 @@ class TestBatchPredictionJob(unittest.TestCase):
         self.assertEqual(job.status, BatchPredictionStatus.RUNNING)
 
 
+class MockClientError(Exception):
+    """Mock ClientError with response attribute"""
+    def __init__(self, message, response=None):
+        super().__init__(message)
+        self.response = response or {}
+
+
 class TestFraudDetectorIntegration(unittest.TestCase):
     """Test FraudDetectorIntegration class"""
 
@@ -352,8 +359,7 @@ class TestDetectorManagement(unittest.TestCase):
 
     def test_create_detector_conflict(self):
         """Test detector creation with conflict"""
-        error = Exception("Conflict")
-        error.response = {"Error": {"Code": "ConflictException"}}
+        error = MockClientError("Conflict", {"Error": {"Code": "ConflictException"}})
         self.mock_frauddetector_client.create_detector.side_effect = error
         
         result = self.integration.create_detector(detector_id="existing-detector")
@@ -363,7 +369,8 @@ class TestDetectorManagement(unittest.TestCase):
 
     def test_create_detector_client_error(self):
         """Test detector creation with client error"""
-        self.mock_frauddetector_client.create_detector.side_effect = Exception("Client error")
+        error = MockClientError("Client error", {"Error": {"Code": "SomeError"}})
+        self.mock_frauddetector_client.create_detector.side_effect = error
         
         result = self.integration.create_detector(detector_id="test-detector")
         
@@ -384,8 +391,7 @@ class TestDetectorManagement(unittest.TestCase):
 
     def test_get_detector_not_found(self):
         """Test detector not found"""
-        error = Exception("Not found")
-        error.response = {"Error": {"Code": "ResourceNotFoundException"}}
+        error = MockClientError("Not found", {"Error": {"Code": "ResourceNotFoundException"}})
         self.mock_frauddetector_client.get_detector.side_effect = error
         
         result = self.integration.get_detector("nonexistent")
@@ -578,8 +584,7 @@ class TestModelManagement(unittest.TestCase):
 
     def test_create_model_conflict(self):
         """Test model creation with conflict"""
-        error = Exception("Conflict")
-        error.response = {"Error": {"Code": "ConflictException"}}
+        error = MockClientError("Conflict", {"Error": {"Code": "ConflictException"}})
         self.mock_frauddetector_client.create_model.side_effect = error
         
         result = self.integration.create_model(
@@ -604,8 +609,7 @@ class TestModelManagement(unittest.TestCase):
 
     def test_get_model_not_found(self):
         """Test model not found"""
-        error = Exception("Not found")
-        error.response = {"Error": {"Code": "ResourceNotFoundException"}}
+        error = MockClientError("Not found", {"Error": {"Code": "ResourceNotFoundException"}})
         self.mock_frauddetector_client.get_model.side_effect = error
         
         result = self.integration.get_model("nonexistent", ModelType.ONLINE_FRAUD_INSIGHTS)
@@ -788,14 +792,14 @@ class TestEventTypeManagement(unittest.TestCase):
 
     def test_create_event_type_success(self):
         """Test successful event type creation"""
-        self.mock_frauddetector_client.create_event.return_value = {
+        self.mock_frauddetector_client.create_event_type.return_value = {
             "eventTypeArn": "arn:aws:frauddetector:us-east-1:123456789012:event-type/test-event"
         }
         
         result = self.integration.create_event_type(
             name="test-event",
             entity_types=["user"],
-            variables=["amount"],
+            event_variables=["amount"],
             labels=["fraud", "legit"]
         )
         
@@ -803,7 +807,7 @@ class TestEventTypeManagement(unittest.TestCase):
 
     def test_get_event_type_success(self):
         """Test successful event type retrieval"""
-        self.mock_frauddetector_client.get_event.return_value = {
+        self.mock_frauddetector_client.get_event_type.return_value = {
             "name": "test-event",
             "entityTypes": ["user"],
             "status": "ACTIVE"
@@ -815,7 +819,7 @@ class TestEventTypeManagement(unittest.TestCase):
 
     def test_list_event_types_success(self):
         """Test listing event types"""
-        self.mock_frauddetector_client.list_events.return_value = {
+        self.mock_frauddetector_client.list_event_types.return_value = {
             "eventTypes": [{"name": "event1"}, {"name": "event2"}]
         }
         
@@ -825,7 +829,7 @@ class TestEventTypeManagement(unittest.TestCase):
 
     def test_delete_event_type_success(self):
         """Test successful event type deletion"""
-        self.mock_frauddetector_client.delete_event.return_value = {}
+        self.mock_frauddetector_client.delete_event_type.return_value = {}
         
         result = self.integration.delete_event_type("test-event")
         
@@ -1071,46 +1075,69 @@ class TestPrediction(unittest.TestCase):
     def tearDown(self):
         self.boto3_session_patcher.stop()
 
-    def test_get_prediction_success(self):
-        """Test successful prediction"""
-        self.mock_frauddetector_client.get_prediction.return_value = {
+    def test_predict_success(self):
+        """Test successful fraud prediction"""
+        self.mock_frauddetector_client.predict.return_value = {
             "modelVersion": {"modelId": "test-model", "modelType": "ONLINE_FRAUD_INSIGHTS", "modelVersionNumber": "1"},
-            "detector": {"detectorId": "test-detector", "detectorVersion": "1"},
-            "prediction": {
-                "fraudScore": 850,
-                "riskScore": 0.85,
-                "riskLevel": "HIGH"
-            }
+            "detectorVersion": "1",
+            "scores": {"fraud_score": 850},
+            "modelId": "test-model"
         }
         
-        result = self.integration.get_prediction(
+        result = self.integration.predict(
             detector_id="test-detector",
-            detector_version_id="1",
+            detector_version="1",
+            event_id="event-123",
             event_type_name="test-event",
             entity_id="entity-123",
             entity_type="user",
-            event_id="event-123",
             event_variables={"amount": "100", "ip_address": "192.168.1.1"}
         )
         
         self.assertTrue(result["success"])
         self.assertIn("prediction", result)
+        self.assertEqual(result["prediction"].fraud_score, 850)
 
-    def test_get_prediction_not_found(self):
+    def test_predict_not_found(self):
         """Test prediction with not found"""
-        error = Exception("Not found")
-        error.response = {"Error": {"Code": "ResourceNotFoundException"}}
-        self.mock_frauddetector_client.get_prediction.side_effect = error
+        error = MockClientError("Not found", {"Error": {"Code": "ResourceNotFoundException"}})
+        self.mock_frauddetector_client.predict.side_effect = error
         
-        result = self.integration.get_prediction(
+        result = self.integration.predict(
             detector_id="nonexistent",
-            detector_version_id="1",
+            detector_version="1",
+            event_id="event-123",
             event_type_name="test-event",
             entity_id="entity-123",
             entity_type="user",
-            event_id="event-123",
             event_variables={}
         )
+        
+        self.assertFalse(result["success"])
+
+    def test_get_prediction_success(self):
+        """Test successful get prediction"""
+        self.mock_frauddetector_client.get_prediction.return_value = {
+            "eventId": "event-123",
+            "eventTypeName": "test-event",
+            "detectorId": "test-detector",
+            "detectorVersion": "1",
+            "modelId": "test-model",
+            "modelVersion": "1",
+            "scores": {"fraud_score": 850}
+        }
+        
+        result = self.integration.get_prediction(event_id="event-123")
+        
+        self.assertTrue(result["success"])
+        self.assertIn("prediction", result)
+
+    def test_get_prediction_not_found(self):
+        """Test get prediction with not found"""
+        error = MockClientError("Not found", {"Error": {"Code": "ResourceNotFoundException"}})
+        self.mock_frauddetector_client.get_prediction.side_effect = error
+        
+        result = self.integration.get_prediction(event_id="nonexistent")
         
         self.assertFalse(result["success"])
 
@@ -1139,11 +1166,12 @@ class TestBatchPrediction(unittest.TestCase):
         }
         
         result = self.integration.create_batch_prediction(
-            batch_prediction_name="test-batch",
+            job_id="batch-123",
             detector_name="test-detector",
             detector_version="1",
             input_path="s3://bucket/input.csv",
-            output_path="s3://bucket/output/"
+            output_path="s3://bucket/output/",
+            event_type_name="test-event"
         )
         
         self.assertTrue(result["success"])
@@ -1152,11 +1180,13 @@ class TestBatchPrediction(unittest.TestCase):
     def test_get_batch_prediction_success(self):
         """Test successful batch prediction retrieval"""
         self.mock_frauddetector_client.get_batch_prediction.return_value = {
-            "batchPredictionId": "batch-123",
-            "batchPredictionName": "test-batch",
-            "status": "COMPLETED",
-            "inputPath": "s3://bucket/input.csv",
-            "outputPath": "s3://bucket/output/"
+            "batchPrediction": {
+                "batchPredictionId": "batch-123",
+                "batchPredictionName": "test-batch",
+                "status": "COMPLETED",
+                "inputPath": "s3://bucket/input.csv",
+                "outputPath": "s3://bucket/output/"
+            }
         }
         
         result = self.integration.get_batch_prediction("batch-123")

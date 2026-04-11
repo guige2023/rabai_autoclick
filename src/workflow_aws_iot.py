@@ -219,8 +219,8 @@ class RuleConfig:
     """Configuration for creating an IoT rule."""
     rule_name: str
     sql: str
-    description: str = ""
     actions: List[Dict[str, Any]]
+    description: str = ""
     aws_iot_sql_version: str = "2016-03-23"
     rule_disabled: bool = False
     tags: Dict[str, str] = field(default_factory=dict)

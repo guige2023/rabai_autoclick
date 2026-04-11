@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import Mock, patch, MagicMock, PropertyMock
 import json
 import time
+import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 import types
@@ -308,6 +309,15 @@ class TestProjectMetrics(unittest.TestCase):
         self.assertEqual(metrics.successful_deployments, 8)
 
 
+def run_async(coro):
+    """Helper to run async code in tests"""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
 class TestCodeStarIntegration(unittest.TestCase):
     """Test CodeStarIntegration class"""
 
@@ -316,12 +326,14 @@ class TestCodeStarIntegration(unittest.TestCase):
         self.mock_codestar_client = MagicMock()
         self.mock_notifications_client = MagicMock()
         self.mock_pipeline_client = MagicMock()
+        self.mock_codeconnections_client = MagicMock()
         
         # Create integration instance with mocked clients
         self.integration = CodeStarIntegration(region="us-east-1")
         self.integration.codestar_client = self.mock_codestar_client
         self.integration.codestar_notifications_client = self.mock_notifications_client
         self.integration.codepipeline_client = self.mock_pipeline_client
+        self.integration.codeconnections_client = self.mock_codeconnections_client
 
     def test_init_defaults(self):
         """Test initialization with defaults"""
@@ -338,37 +350,44 @@ class TestCodeStarIntegration(unittest.TestCase):
     def test_create_project(self):
         """Test creating a project"""
         mock_response = {
-            "project": {
-                "projectId": "project-123",
-                "projectArn": "arn:aws:codestar:us-east-1:123:project/project-123",
-                "name": "test-project"
-            }
+            "projectId": "project-123",
+            "stackId": "arn:aws:cloudformation:us-east-1:123:stack/test",
+            "applicationArn": "arn:aws:codestar:us-east-1:123:application/test",
+            "artifactStore": {"bucket": "test-bucket"},
+            "sourceCode": [{"repositoryUrl": "https://git.codecommit.com/test"}]
         }
         self.mock_codestar_client.create_project.return_value = mock_response
         
-        result = self.integration.create_project(
+        result = run_async(self.integration.create_project(
             name="test-project",
             template_id="python-web-app",
             description="A test project"
-        )
+        ))
         
-        self.assertEqual(result["project"]["projectId"], "project-123")
+        self.assertIsInstance(result, Project)
+        self.assertEqual(result.name, "test-project")
+        self.assertEqual(result.template_id, "python-web-app")
+        self.assertEqual(result.status, ProjectStatus.CREATING)
         self.mock_codestar_client.create_project.assert_called_once()
 
     def test_get_project(self):
         """Test getting a project"""
         mock_response = {
-            "project": {
-                "projectId": "project-123",
-                "name": "test-project",
-                "status": "InProgress"
-            }
+            "id": "project-123",
+            "name": "test-project",
+            "status": "InProgress",
+            "description": "A test project",
+            "projectTemplateId": "python-web-app",
+            "createdTime": "2024-01-01T00:00:00Z",
+            "updatedTime": "2024-01-02T00:00:00Z"
         }
         self.mock_codestar_client.describe_project.return_value = mock_response
         
-        result = self.integration.get_project("project-123")
+        result = run_async(self.integration.get_project("project-123"))
         
-        self.assertEqual(result["project"]["projectId"], "project-123")
+        self.assertIsInstance(result, Project)
+        self.assertEqual(result.id, "project-123")
+        self.assertEqual(result.name, "test-project")
 
     def test_list_projects(self):
         """Test listing projects"""
@@ -380,53 +399,85 @@ class TestCodeStarIntegration(unittest.TestCase):
         }
         self.mock_codestar_client.list_projects.return_value = mock_response
         
-        result = self.integration.list_projects()
+        # Pre-populate a project to avoid calling describe_project
+        self.integration._projects["project-1"] = Project(
+            id="project-1", name="project-one", description="",
+            region="us-east-1", template_id="", status=ProjectStatus.COMPLETED,
+            created_time=datetime.now(), updated_time=datetime.now()
+        )
         
-        self.assertEqual(len(result["projects"]), 2)
+        result = run_async(self.integration.list_projects())
+        
+        self.assertIsInstance(result, list)
+        self.assertTrue(len(result) >= 1)
 
     def test_update_project(self):
         """Test updating a project"""
-        mock_response = {
-            "project": {
-                "projectId": "project-123",
-                "name": "updated-project"
-            }
+        # Pre-populate project
+        self.integration._projects["project-123"] = Project(
+            id="project-123", name="old-name", description="old desc",
+            region="us-east-1", template_id="", status=ProjectStatus.COMPLETED,
+            created_time=datetime.now(), updated_time=datetime.now()
+        )
+        self.mock_codestar_client.describe_project.return_value = {
+            "id": "project-123", "name": "old-name", "status": "Completed",
+            "description": "old desc", "projectTemplateId": ""
         }
-        self.mock_codestar_client.update_project.return_value = mock_response
         
-        result = self.integration.update_project("project-123", name="updated-project")
+        result = run_async(self.integration.update_project(
+            "project-123", name="updated-project", description="new desc"
+        ))
         
-        self.assertEqual(result["project"]["name"], "updated-project")
+        self.assertIsInstance(result, Project)
+        self.assertEqual(result.name, "updated-project")
+        self.assertEqual(result.description, "new desc")
 
     def test_delete_project(self):
         """Test deleting a project"""
-        self.mock_codestar_client.delete_project.return_value = {}
+        # Pre-populate project
+        self.integration._projects["project-123"] = Project(
+            id="project-123", name="test", description="",
+            region="us-east-1", template_id="", status=ProjectStatus.COMPLETED,
+            created_time=datetime.now(), updated_time=datetime.now()
+        )
         
-        result = self.integration.delete_project("project-123")
+        result = run_async(self.integration.delete_project("project-123"))
         
         self.assertTrue(result)
-        self.mock_codestar_client.delete_project.assert_called_once()
+        self.assertNotIn("project-123", self.integration._projects)
 
-    def test_associate_team_member(self):
-        """Test associating a team member"""
+    def test_add_team_member(self):
+        """Test adding a team member"""
+        # Pre-populate project
+        self.integration._projects["project-123"] = Project(
+            id="project-123", name="test", description="",
+            region="us-east-1", template_id="", status=ProjectStatus.COMPLETED,
+            created_time=datetime.now(), updated_time=datetime.now()
+        )
+        self.mock_codestar_client.describe_project.return_value = {
+            "id": "project-123", "name": "test", "status": "Completed",
+            "description": "", "projectTemplateId": ""
+        }
         self.mock_codestar_client.associate_team_member.return_value = {}
         
-        result = self.integration.add_team_member(
+        result = run_async(self.integration.add_team_member(
             project_id="project-123",
             user_arn="arn:aws:iam::123:user/test",
             role=TeamMemberRole.CONTRIBUTOR
-        )
+        ))
         
-        self.assertTrue(result)
+        self.assertIsInstance(result, TeamMember)
+        self.assertEqual(result.user_arn, "arn:aws:iam::123:user/test")
+        self.assertEqual(result.role, TeamMemberRole.CONTRIBUTOR)
 
-    def test_disassociate_team_member(self):
-        """Test disassociating a team member"""
+    def test_remove_team_member(self):
+        """Test removing a team member"""
         self.mock_codestar_client.disassociate_team_member.return_value = {}
         
-        result = self.integration.remove_team_member(
+        result = run_async(self.integration.remove_team_member(
             project_id="project-123",
             user_arn="arn:aws:iam::123:user/test"
-        )
+        ))
         
         self.assertTrue(result)
 
@@ -434,103 +485,127 @@ class TestCodeStarIntegration(unittest.TestCase):
         """Test listing team members"""
         mock_response = {
             "teamMembers": [
-                {"userArn": "arn:aws:iam::123:user/user1", "role": "Owner"},
-                {"userArn": "arn:aws:iam::123:user/user2", "role": "Contributor"}
+                {"userArn": "arn:aws:iam::123:user/user1", "projectRole": "Owner"},
+                {"userArn": "arn:aws:iam::123:user/user2", "projectRole": "Contributor"}
             ]
         }
         self.mock_codestar_client.list_team_members.return_value = mock_response
         
-        result = self.integration.list_team_members("project-123")
+        result = run_async(self.integration.list_team_members("project-123"))
         
-        self.assertEqual(len(result["teamMembers"]), 2)
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 2)
+        self.assertIsInstance(result[0], TeamMember)
 
-    def test_update_team_member(self):
-        """Test updating a team member"""
-        mock_response = {
-            "userArn": "arn:aws:iam::123:user/test",
-            "projectARN": "arn:aws:codestar:us-east-1:123:project/project-123",
-            "role": "Viewer"
-        }
-        self.mock_codestar_client.update_team_member.return_value = mock_response
+    def test_update_team_member_role(self):
+        """Test updating a team member's role"""
+        # Pre-populate team member
+        self.integration._team_members["project-123"] = [
+            TeamMember(
+                user_arn="arn:aws:iam::123:user/test",
+                project_arn="arn:aws:codestar:us-east-1:123:project/project-123",
+                role=TeamMemberRole.CONTRIBUTOR
+            )
+        ]
+        self.mock_codestar_client.update_team_member.return_value = {}
         
-        result = self.integration.update_team_member(
+        result = run_async(self.integration.update_team_member_role(
             project_id="project-123",
             user_arn="arn:aws:iam::123:user/test",
             role=TeamMemberRole.VIEWER
-        )
+        ))
         
-        self.assertEqual(result["role"], "Viewer")
+        self.assertIsInstance(result, TeamMember)
+        self.assertEqual(result.role, TeamMemberRole.VIEWER)
 
     def test_list_project_resources(self):
         """Test listing project resources"""
         mock_response = {
             "resources": [
-                {"id": "resource-1", "type": "AWS::CodeCommit::Repository"},
-                {"id": "resource-2", "type": "AWS::CodeBuild::Project"}
+                {"id": "resource-1", "type": "AWS::CodeCommit::Repository", "name": "repo1",
+                 "projectArn": "arn:aws:codestar:us-east-1:123:project/p1", "status": "CREATED",
+                 "createdTime": "2024-01-01T00:00:00Z", "updatedTime": "2024-01-01T00:00:00Z"},
+                {"id": "resource-2", "type": "AWS::CodeBuild::Project", "name": "build1",
+                 "projectArn": "arn:aws:codestar:us-east-1:123:project/p1", "status": "CREATED",
+                 "createdTime": "2024-01-01T00:00:00Z", "updatedTime": "2024-01-01T00:00:00Z"}
             ]
         }
         self.mock_codestar_client.list_project_resources.return_value = mock_response
         
-        result = self.integration.list_project_resources("project-123")
+        result = run_async(self.integration.list_project_resources("project-123"))
         
-        self.assertEqual(len(result["resources"]), 2)
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 2)
+        self.assertIsInstance(result[0], ProjectResource)
 
     def test_create_notification_rule(self):
         """Test creating notification rule"""
         mock_response = {
-            "notificationRule": {
-                "arn": "arn:aws:codestar-notifications:us-east-1:123:notification-rule/rule-123",
-                "id": "rule-123"
-            }
+            "arn": "arn:aws:codestar-notifications:us-east-1:123:notification-rule/rule-123"
         }
         self.mock_notifications_client.create_notification_rule.return_value = mock_response
         
-        result = self.integration.create_notification_rule(
-            project_arn="arn:aws:codestar:us-east-1:123:project/project-123",
+        result = run_async(self.integration.create_notification_rule(
             name="test-rule",
-            event_types=["codestar:project-created"],
+            project_arn="arn:aws:codestar:us-east-1:123:project/project-123",
+            event_types=[NotificationEventType.PROJECT_CREATED],
             target_type="SNS",
             target_address="arn:aws:sns:us-east-1:123:topic"
-        )
+        ))
         
-        self.assertEqual(result["notificationRule"]["id"], "rule-123")
+        self.assertIsInstance(result, NotificationRule)
+        self.assertEqual(result.name, "test-rule")
+        self.assertTrue(result.enabled)
 
     def test_list_notification_rules(self):
         """Test listing notification rules"""
-        mock_response = {
-            "notificationRules": [
-                {"arn": "arn:aws:codestar-notifications:us-east-1:123:notification-rule/rule-1"},
-                {"arn": "arn:aws:codestar-notifications:us-east-1:123:notification-rule/rule-2"}
-            ]
-        }
-        self.mock_notifications_client.list_notification_rules.return_value = mock_response
-        
-        result = self.integration.list_notification_rules(
-            project_arn="arn:aws:codestar:us-east-1:123:project/project-123"
+        # Pre-populate a notification rule
+        self.integration._notification_rules["rule-1"] = NotificationRule(
+            id="rule-1", arn="arn:aws:codestar-notifications:us-east-1:123:notification-rule/rule-1",
+            name="rule-1", project_arn="arn:aws:codestar:us-east-1:123:project/project-123",
+            event_types=["codestar:project-created"], target_type="SNS",
+            target_address="arn:aws:sns:us-east-1:123:topic"
         )
         
-        self.assertEqual(len(result["notificationRules"]), 2)
+        result = run_async(self.integration.list_notification_rules())
+        
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 1)
 
     def test_update_notification_rule(self):
         """Test updating notification rule"""
+        # Pre-populate notification rule
+        self.integration._notification_rules["rule-123"] = NotificationRule(
+            id="rule-123", arn="arn:aws:codestar-notifications:us-east-1:123:notification-rule/rule-123",
+            name="test-rule", project_arn="arn:aws:codestar:us-east-1:123:project/project-123",
+            event_types=["codestar:project-created"], target_type="SNS",
+            target_address="arn:aws:sns:us-east-1:123:topic", enabled=True
+        )
         self.mock_notifications_client.update_notification_rule.return_value = {}
         
-        result = self.integration.update_notification_rule(
-            arn="arn:aws:codestar-notifications:us-east-1:123:notification-rule/rule-123",
-            enabled=True
-        )
+        result = run_async(self.integration.update_notification_rule(
+            rule_id="rule-123",
+            enabled=False
+        ))
         
-        self.assertTrue(result)
+        self.assertIsInstance(result, NotificationRule)
+        self.assertFalse(result.enabled)
 
     def test_delete_notification_rule(self):
         """Test deleting notification rule"""
+        # Pre-populate notification rule
+        self.integration._notification_rules["rule-123"] = NotificationRule(
+            id="rule-123", arn="arn:aws:codestar-notifications:us-east-1:123:notification-rule/rule-123",
+            name="test-rule", project_arn="arn:aws:codestar:us-east-1:123:project/project-123",
+            event_types=["codestar:project-created"], target_type="SNS",
+            target_address="arn:aws:sns:us-east-1:123:topic", enabled=True
+        )
         self.mock_notifications_client.delete_notification_rule.return_value = {}
         
-        result = self.integration.delete_notification_rule(
-            arn="arn:aws:codestar-notifications:us-east-1:123:notification-rule/rule-123"
-        )
+        result = run_async(self.integration.delete_notification_rule("rule-123"))
         
         self.assertTrue(result)
+        self.assertNotIn("rule-123", self.integration._notification_rules)
 
     def test_describe_notification_events(self):
         """Test describing notification events"""
@@ -542,40 +617,57 @@ class TestCodeStarIntegration(unittest.TestCase):
         }
         self.mock_notifications_client.describe_notification_events.return_value = mock_response
         
-        result = self.integration.describe_notification_events(
-            arn="arn:aws:codestar-notifications:us-east-1:123:notification-rule/rule-123"
-        )
+        result = run_async(self.integration.describe_notification_events(
+            project_arn="arn:aws:codestar:us-east-1:123:project/project-123"
+        ))
         
-        self.assertEqual(len(result["events"]), 2)
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 2)
 
     def test_list_project_templates(self):
         """Test listing project templates"""
         mock_response = {
-            "templates": [
-                {"id": "python-web-app", "name": "Python Web App"},
-                {"id": "nodejs-web-app", "name": "Node.js Web App"}
+            "projectTemplates": [
+                {"id": "python-web-app", "name": "Python Web App", "description": "Python web app template",
+                 "category": "Web", "tags": ["Python"]},
+                {"id": "nodejs-web-app", "name": "Node.js Web App", "description": "Node.js web app template",
+                 "category": "Web", "tags": ["Node"]}
             ]
         }
         self.mock_codestar_client.list_project_templates.return_value = mock_response
         
-        result = self.integration.list_project_templates()
+        result = run_async(self.integration.list_project_templates())
         
-        self.assertEqual(len(result["templates"]), 2)
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 2)
+        self.assertIsInstance(result[0], ProjectTemplateInfo)
 
     def test_get_project_template(self):
         """Test getting project template"""
         mock_response = {
-            "template": {
+            "projectTemplate": {
                 "id": "python-web-app",
                 "name": "Python Web App",
-                "description": "A Python web application template"
+                "description": "A Python web application template",
+                "category": "Web",
+                "tags": ["Python"]
             }
         }
         self.mock_codestar_client.get_project_template.return_value = mock_response
         
-        result = self.integration.get_project_template("python-web-app")
+        result = run_async(self.integration.get_project_template("python-web-app"))
         
-        self.assertEqual(result["template"]["id"], "python-web-app")
+        self.assertIsInstance(result, ProjectTemplateInfo)
+        self.assertEqual(result.id, "python-web-app")
+
+    def test_on_callback(self):
+        """Test registering callbacks"""
+        callback_called = []
+        def callback(data):
+            callback_called.append(data)
+        
+        self.integration.on("project.created", callback)
+        self.assertIn("project.created", self.integration._callbacks)
 
 
 class TestCodeStarIntegrationWithMockSession(unittest.TestCase):

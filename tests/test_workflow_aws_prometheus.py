@@ -624,25 +624,26 @@ class TestPrometheusIntegrationLabels(unittest.TestCase):
             self.skipTest("Module could not be imported due to dataclass issue")
         self.integration = PrometheusIntegration(region="us-west-2", workspace_id="ws-12345")
 
-    def test_create_metric_label(self):
+    def test_create_label(self):
         """Test creating a metric label"""
-        label = self.integration.create_metric_label(
+        label = self.integration.create_label(
+            metric_name="node_cpu",
             name="environment",
-            value="production",
-            metric_name="node_cpu"
+            value="production"
         )
 
         self.assertEqual(label.name, "environment")
         self.assertEqual(label.value, "production")
+        self.assertEqual(label.metric_name, "node_cpu")
 
-    def test_list_metric_labels(self):
+    def test_list_labels(self):
         """Test listing metric labels"""
         self.integration._labels["ws-12345"] = [
             MetricLabel(name="env", value="prod", metric_name="cpu"),
             MetricLabel(name="region", value="us-west-2", metric_name="cpu")
         ]
 
-        result = self.integration.list_metric_labels("ws-12345")
+        result = self.integration.list_labels(workspace_id="ws-12345")
 
         self.assertEqual(len(result), 2)
 
@@ -672,10 +673,10 @@ class TestPrometheusIntegrationRemoteWrite(unittest.TestCase):
 
     def test_list_remote_write_configs(self):
         """Test listing remote write configurations"""
-        self.mock_amp_client.listRemoteWriteConfigs.return_value = {
-            "remoteWriteConfigs": [
-                {"name": "config1"},
-                {"name": "config2"}
+        self.mock_amp_client.listRemoteWrites.return_value = {
+            "remoteWrites": [
+                {"name": "config1", "endpoint": "https://example1.com/write"},
+                {"name": "config2", "endpoint": "https://example2.com/write"}
             ]
         }
 
@@ -694,15 +695,15 @@ class TestPrometheusIntegrationServiceDiscovery(unittest.TestCase):
         self.mock_amp_client = MagicMock()
         self.integration._amp_client = self.mock_amp_client
 
-    def test_create_service_discovery_target(self):
-        """Test creating service discovery target"""
+    def test_register_service_discovery_target(self):
+        """Test registering service discovery target"""
         target = ServiceDiscoveryTarget(
             target_group_arn="arn:aws:elasticloadbalancing:us-west-2:123456789012:targetgroup/my-targets/abc123",
             target_type="eks",
             port=9090
         )
 
-        result = self.integration.create_service_discovery_target(target, "ws-12345")
+        result = self.integration.register_service_discovery_target(target, "ws-12345")
 
         self.assertEqual(result.target_type, "eks")
 
