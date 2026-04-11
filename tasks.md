@@ -141,7 +141,7 @@ d421b8f docs: update tasks.md with latest status
 
 - [ ] 清理 `tests/conftest.py` 中的 skip 标记（与 `pyproject.toml` `--ignore` 重复）
 - [ ] 从 `pyproject.toml` 逐个移除 `--ignore`，验证对应测试文件rewrite后能通过
-- [ ] 为 48 个未 rewrite 的 `test_workflow_aws_*.py` 文件补充测试覆盖率
+- [ ] 核实剩余 AWS 测试文件数量，修正 tasks.md 中的错误数字
 
 ### 长期
 
