@@ -103,7 +103,7 @@ jobs:
           print_hash: true
           
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           generate_release_notes: true
